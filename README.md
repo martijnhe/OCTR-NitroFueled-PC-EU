@@ -2,34 +2,71 @@
   <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
 </p>
 
-# CTR-NitroFueled-PC
+# CTR Nitro-Fueled PC: EU edition, ultrawide and unlock-all
 
-> **This fork (OCTR-NitroFueled-PC-EU)** adds the **European edition (CUSA14876)** and an
-> **ultrawide** option. No game files are included.
->
-> - **EU 1.21** (base game + 1.21 update merged, e.g. `tools/merge_update.py`): runs with the
->   60 FPS, no-motion-blur and 1080p Pro patches (`patches/CrashTeamRacingEU.xml`, same menu
->   switches). EU 1.00 without the update also runs, with its own patches.
-> - **Ultrawide:** on a monitor wider than 16:9 the first start asks *Ultrawide? Yes / No*, with
->   *Ask me every time*. The settings menu (Insert or L3+R3) has the switch too; a change restarts
->   the game. The game then draws at the monitor's size (`bbport.ini`: `ultrawide`,
->   `ultrawide_size`, `ultrawide_ask`). Videos and the title screen are still stretched or show
->   the edges of the set: see [TODO.md](TODO.md).
-> - **Unlock everything** (on by default; menu: *Unlock everything*, or `unlock_all=0` in
->   `bbport.ini`): all characters, karts and Pit Stop items, through the game's own `_unlockAll`
->   build flag (src/runtime_unlock.c). The Pit Stop shop itself needs the online service and stays
->   closed; see [TODO.md](TODO.md).
-> - **Internal resolution** (1440p and the others) now also applies when started through
->   `run.sh` (Linux, Steam Deck), not only `run.py`.
-> - **DLC:** put your add-on packages (`.pkg`, e.g. the Nitros Oxide Edition, pre-order and
->   Firehawk kart packs) in `dlc/`: they are reported installed, now also when started through
->   `run.sh` (Linux, Steam Deck). Packages of the other edition are skipped.
-> - **Shortcuts:** `launcher/install-desktop.sh GAME_DIR` adds *Crash Team Racing Nitro-Fueled* to
->   the application menu and to **Steam** (non-Steam game with the game's cover art, starts the
->   game directly, so it works in Steam Deck game mode). If Steam is open, the shortcut is added
->   as soon as it closes. `STEAM_SHORTCUT=0` skips Steam.
-> - Builds and runs on Linux as before (`bash build.sh`, `bash run.sh`; `BB_GAME_DIR` points at
->   the game folder); no CPU-specific flags, so the same build works on the Steam Deck.
+**Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows,
+with the European edition, ultrawide monitors and everything unlocked.**
+
+This is a fork of [CTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC), itself built
+on [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire): the game's own code runs directly on
+the CPU, a small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4
+draws with Vulkan. No emulator, no game files included.
+
+## What this version adds
+
+| Feature | What you get | Setting |
+|---|---|---|
+| **European edition** | CUSA14876 runs, with the **1.21 update** (all Grand Prix tracks, characters and karts that came after launch). EU 1.00 without the update runs too. The USA edition (CUSA13795) keeps working. | automatic |
+| **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch. | on by default; menu *Unlock everything* / `unlock_all=0` |
+| **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
+| **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
+| **Ultrawide** | On a monitor wider than 16:9 (2560x1080, 3440x1440, ...) the game draws at the monitor's own size; the HUD spreads to the edges. The first start asks *Ultrawide? Yes / No* (with *Ask me every time*). | menu *Ultrawide* / `ultrawide=1`, `ultrawide_ask` |
+| **16:9 videos and cutscenes in ultrawide** | The intro videos and the story cutscenes are shown at 16:9 with black bars instead of stretched or showing off-stage; gameplay stays ultrawide. Turn it off to keep them wide. | on by default; menu *Ultrawide: videos and cutscenes at 16:9* / `ultrawide_cinematics=0` |
+| **Internal resolution** | 480p to native 4K (1440p is the PS4 Pro's own), now also on Linux and the Steam Deck. | menu *Internal resolution* / `render_res=1440` |
+| **DLC** | Your own add-on packages (Nitros Oxide Edition, pre-order pack, Firehawk kart) are reported installed. | put the `.pkg` files in `dlc/` |
+| **Shortcuts and Steam** | *Crash Team Racing Nitro-Fueled* in the application menu and in **Steam** (with the game's cover art), starting the game directly, so it works in Steam Deck game mode. | at install |
+| **Steam Deck** | Same build, no CPU-specific flags; light additions only (no extra processes). | |
+
+The settings live in `bbport.ini` and in the in-game menu: **Insert** on the keyboard, or
+**L3 + R3** on a controller. Options marked "restart" in the menu offer *Apply and restart game*.
+
+## What you need
+
+You bring your own game: **no game files, updates or DLC are included or downloaded**.
+
+- The game as decrypted files: the base game and the **1.21 update** of the European
+  (CUSA14876) or US (CUSA13795) edition, each dumped or extracted to a folder.
+- Optional: your own DLC packages (`.pkg`).
+- Linux (any recent distribution, or SteamOS on the Steam Deck) with a Vulkan 1.3 GPU, or
+  Windows 10/11 (see further below).
+
+## Quick start (Linux, Steam Deck)
+
+With the helper script (`nitrofueledpcscript.sh`, Arch/CachyOS; on other systems install the
+same packages with your package manager):
+
+```bash
+./nitrofueledpcscript.sh install                                   # dependencies, clone, build, shortcuts
+./nitrofueledpcscript.sh merge <base game> <1.21 update> <game>    # merge the update (no extra disk space)
+./nitrofueledpcscript.sh dlc <folder with your DLC .pkg files>     # optional
+./nitrofueledpcscript.sh run <game>                                # play
+```
+
+After `merge` the game is in your application menu and in Steam as *Crash Team Racing
+Nitro-Fueled*. By hand: `bash build.sh`, then `BB_GAME_DIR=<game> bash run.sh`, and
+`launcher/install-desktop.sh <game>` for the shortcuts.
+
+## Not working yet
+
+- **Pit Stop shop, Online races, Grand Prix events:** they need Activision's online service
+  (Demonware), which this port does not connect to. With *Unlock everything* you already have
+  everything the Pit Stop sells. Work toward an offline Pit Stop is in [TODO.md](TODO.md).
+- **Title screen in ultrawide** still shows the edges of its 16:9 set.
+- Local split screen works (second controller).
+
+## Original project
+
+The notes below are from the upstream project (Windows packaging, releases, credits).
 
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**
 
