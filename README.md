@@ -80,9 +80,21 @@ at the same time.
 ## Wanted: the Grand Prix intros (optional)
 
 Every Grand Prix season had its own start-up intro and CTR TV episode, and each update replaced
-the previous season's: the final update (1.21) only has the February Grand Prix's CTR TV
-(`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. The earlier ones were in the
-updates 1.10 to 1.20.
+the previous season's: the final update (1.21) only has the February Grand Prix's (Gasmoxia) CTR
+TV (`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. A season's files are in its own
+update and in the ones after it up to the next season's (versions from
+[IGN's update list](https://www.ign.com/wikis/crash-team-racing-nitro-fueled/Updates_and_Patch_Notes)):
+
+| Grand Prix | Started | PS4 update with it |
+|---|---|---|
+| Nitro Tour | July 2019 | 1.04 |
+| Back N. Time | August 2019 | 1.08 |
+| Spyro & Friends | August 30, 2019 | 1.09 |
+| Spooky | October 2019 | 1.12 |
+| Neon Circus | November 2019 | 1.14 |
+| Winter Festival | December 12, 2019 | 1.16 |
+| Rustland | January 16, 2020 | 1.17 |
+| Gasmoxia | February 20, 2020 | 1.19 (its CTR TV is still in 1.20 and 1.21: `CTRTV_FebGP.bk2`) |
 
 If you dumped one of those updates from your own console, please open an issue with one of the
 forms (the update's version, the Grand Prix, and the names, sizes and checksums of its files):

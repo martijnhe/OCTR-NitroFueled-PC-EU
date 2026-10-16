@@ -30,8 +30,11 @@ body:
     id: version
     attributes:
       label: Update version
-      description: The update's version (sce_sys/param.sfo APP_VER), for example 01.10.
-      placeholder: "01.10"
+      description: |
+        The update's version (sce_sys/param.sfo APP_VER). The seasons' PS4 updates: Nitro Tour 1.04,
+        Back N. Time 1.08, Spyro & Friends 1.09, Spooky 1.12, Neon Circus 1.14, Winter Festival 1.16,
+        Rustland 1.17, Gasmoxia 1.19.
+      placeholder: "01.12"
     validations:
       required: true
   - type: input
