@@ -78,6 +78,14 @@ fps=${BB_FPS:-30}
 "$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
     --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$BB_CONFIG"
 patch_args=(--patches "$out/patches.bin")
+# bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
+# above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
+read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$BB_CONFIG") || true
+if [[ -n ${plan_pro:-} ]]; then
+    export BB_NEO=$plan_pro
+    if [[ $plan_heap == 1 && ${BB_DMEM_MB:-0} -lt 7168 ]]; then export BB_DMEM_MB=7168; fi
+    echo "Internal resolution: $plan_label"
+fi
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
 # picks its Pro rendering path. Off by default: the Steam Deck is closer to a base PS4.
 export BB_NEO=${BB_NEO:-0}

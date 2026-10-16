@@ -51,6 +51,13 @@ RENDER_SCALE_SIGNATURE='41 8b 44 24 48 41 89 86 48 05 00 00'  # mov 0x48(%r12),%
 GPU_HEAP_SIGNATURE='c7 45 c8 00 00 00 3c e9'                  # movl $0x3c000000,-0x38(%rbp); jmp
 RENDER_SCALES={'480':480/1080,'720':720/1080,'1620':1.5,'2160':2.0}
 # Below 1080p the picture stays 1920x1080: the Pro path's doubling of the output size is removed.
+# Ultrawide (bbport.ini ultrawide=1, ultrawide_size=WxH): the display setup's two loads of the
+# output size from the game's settings (mov 0x10(%r12),%eax and mov 0x14(%r12),%eax, 5 bytes each)
+# become `mov $W,%eax` and `mov $H,%eax`; the base PS4 path then draws the scene at that size and
+# the camera follows its aspect. Found in the EU 1.00 executable (0x12e6bc1).
+OUTPUT_SIZE_SIGNATURE=('41 8b 44 24 10 85 c0 7f 05 41 8b 44 24 08 41 89 86 40 05 00 00 '
+                       '41 8b 44 24 14 85 c0 7f 05 41 8b 44 24 0c 41 89 86 44 05 00 00 '
+                       '41 8b 44 24 18 41 89 86 88 04 00 00')
 OUTPUT_DOUBLE_SIGNATURE='01 c9 41 89 8e 40 05 00 00 45 8b 86 44 05 00 00 45 01 c0'
 
 
@@ -65,12 +72,25 @@ def render_res(settings):
 DLSS_QUALITIES={'dlaa':1.0,'quality':2/3,'balanced':0.58,'performance':0.5,'ultra_performance':1/3}
 
 
+def ultrawide_size(settings):
+    """(width, height) when ultrawide is on (bbport.ini ultrawide=1 with ultrawide_size=WxH), else None."""
+    s=settings or {}
+    if s.get('ultrawide')!='1': return None
+    w,sep,h=s.get('ultrawide_size','').partition('x')
+    if not (sep and w.isdigit() and h.isdigit()): return None
+    w,h=int(w),int(h)
+    return (w,h) if 640<=w<=16384 and 360<=h<=8640 else None
+
+
 def render_plan(settings):
     """How the game renders, from bbport.ini: a dict with `label`, `scale` (the render scale
     relative to 1920x1080 patched at 0x17aa662, None for the game's own), `pro` (the PS4 Pro path,
     BB_NEO=1), `single` (the Pro path's output doubling removed: a 1080p picture) and `heap` (the
     larger GPU heap, needed above a 1.5 scale), or None when nothing is set."""
     s=settings or {}
+    if size:=ultrawide_size(s):
+        return dict(label=f'ultrawide {size[0]}x{size[1]}',scale=None,pro=False,single=False,heap=False,
+                    output=size)
     quality=s.get('dlss_quality')
     if s.get('temporal')=='dlss' and quality in DLSS_QUALITIES:
         out=2160 if s.get('dlss_output')=='2160' else 1080
@@ -94,6 +114,12 @@ def render_patches(settings):
     if plan is None:
         return []
     lines=[]
+    if plan.get('output'):
+        w,h=plan['output']
+        lines.append(dict(Type='bytes',Address='0x016e6bc1',Value='b8'+struct.pack('<I',w).hex(),
+                          Signature=OUTPUT_SIZE_SIGNATURE,SignatureOffset='0x0'))
+        lines.append(dict(Type='bytes',Address='0x016e6bd6',Value='b8'+struct.pack('<I',h).hex(),
+                          Signature=OUTPUT_SIZE_SIGNATURE,SignatureOffset='0x15'))
     if plan['scale'] is not None:
         value='b8'+struct.pack('<f',plan['scale']).hex()
         lines.append(dict(Type='bytes',Address='0x017aa662',Value=value,
@@ -269,7 +295,13 @@ def main():
     p.add_argument('--out',type=Path,default=root/'out')
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
+    p.add_argument('--print-plan',action='store_true',
+                   help='print "PRO HEAP LABEL" of the render plan (run.sh), or nothing, and exit')
     a=p.parse_args()
+    if a.print_plan:
+        plan=render_plan(read_settings(a.settings))
+        if plan: print(int(plan['pro']),int(plan['heap']),plan['label'])
+        return
     elf=(a.out/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
     found=external_patches(a.patches_dir,a.app_version,a.title_id)

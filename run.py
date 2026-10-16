@@ -182,6 +182,9 @@ def main():
     if check.returncode:
         fail(check.stdout.strip() or 'Game check failed.', 2)
     env['BB_GAME_PROFILE'] = check.stdout.strip() or 'ctr'
+    # The game's own title ID and version (the EU edition, CUSA14876 1.00, has its own patches).
+    info = run_python('scripts/game_check.py', '--info', game, capture=True).split()
+    title_id, app_version = (info + [TITLE_ID, APP_VERSION][len(info):])[:2]
     say(f'Game profile: {env["BB_GAME_PROFILE"]}')
 
     original_game = game.resolve()
@@ -205,7 +208,7 @@ def main():
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
         if env.get('BB_CLEAR_SHADER_CACHE', '0') == '1':
-            shutil.rmtree(user_dir / 'cache' / TITLE_ID, ignore_errors=True)
+            shutil.rmtree(user_dir / 'cache' / title_id, ignore_errors=True)
             say('Shader cache: cleared for this launch (BB_CLEAR_SHADER_CACHE=1)')
         env.setdefault('BB_PREUPLOAD', '1')
         # The PC memory model (dma-buf guest memory) is Linux only: the 0.3 model on Windows.
@@ -241,7 +244,7 @@ def main():
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
-                       '--app-version', APP_VERSION, '--title-id', TITLE_ID, '--out', out,
+                       '--app-version', app_version, '--title-id', title_id, '--out', out,
                        '--settings', config)
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank

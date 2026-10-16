@@ -145,6 +145,20 @@ class RenderResTests(unittest.TestCase):
         self.assertEqual(writes, [(0x17aa662 - EBOOT_BASE, b'\xb8' + struct.pack('<f', 2.0)),
                                   (0x1fbb93e - EBOOT_BASE, b'\x70')])
 
+    def test_ultrawide_plan_and_writes(self):
+        plan = patches.render_plan
+        uw = {'ultrawide': '1', 'ultrawide_size': '3440x1440', 'render_res': '2160'}
+        self.assertEqual(plan(uw)['output'], (3440, 1440))
+        self.assertFalse(plan(uw)['pro'])  # the base path: the monitor's size, not render_res
+        self.assertEqual(plan({**uw, 'ultrawide': '0'})['label'], '2160p')
+        self.assertEqual(plan({'ultrawide': '1'}), None)  # no size chosen yet
+        self.assertEqual(plan({'ultrawide': '1', 'ultrawide_size': '99x99'}), None)
+        sig = bytes.fromhex(patches.OUTPUT_SIZE_SIGNATURE.replace(' ', ''))
+        elf = tiny_elf(bytes(0x100) + sig + bytes(0x100), vaddr=0x1000)
+        writes = compile_external(patches.render_patches(uw), eboot_segments(elf), elf)
+        self.assertEqual(writes, [(0x1100, b'\xb8' + struct.pack('<I', 3440)),
+                                  (0x1115, b'\xb8' + struct.pack('<I', 1440))])
+
     def test_dlss_quality_picks_the_render_size(self):
         plan = patches.render_plan
         dlss = lambda q, out='1080': {'temporal': 'dlss', 'dlss_quality': q, 'dlss_output': out,
