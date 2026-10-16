@@ -104,6 +104,26 @@ presence names the running title id.
 - `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation
   (`runtime_services.c`, `runtime_net_overrides.c`); the game build itself passes.
 
+## Discord on Linux and the Steam Deck: presence and invites
+
+Upstream's Discord parts are Windows-only (`launcher/windows/discord_link.cpp`,
+`discord_presence.cpp`, in the Windows launcher). On Linux the nickname can only be kept by keeping
+`ryunet_online.key`.
+
+- **Nickname link / recover / unlink** (an OS reinstall or another PC keeps the nickname): OAuth2
+  with Discord app 1560408801704943708, scope identify, redirect `http://127.0.0.1:<53134-53136>/discord`
+  (registered at Discord); the code goes to the RyuNET server, `POST /ryunet/discord/link`
+  (nick, code, redirect_uri; nick empty = recover), `POST /ryunet/discord/unlink` (nick),
+  `GET /ryunet/nick?name=` (status). Every request carries `X-RyuNET-Key: HMAC-SHA256(key, host)`
+  (run.py server_key). Done (2026-10-16): `scripts/discord_link.py` (status, link, recover, unlink)
+  and the in-game menu's Online section (Link / Recover with Discord, Status); link tested. Recover
+  not tested yet (it moves the nickname to the recovering installation's key). Still open: the
+  buttons in the Linux GTK launcher.
+- **Presence and invites** (Discord shows "playing CTR", invites join a private room): the
+  Discord IPC, a named pipe on Windows, is the Unix socket `$XDG_RUNTIME_DIR/discord-ipc-0` on
+  Linux (Flatpak Discord: `app/com.discordapp.Discord/discord-ipc-0`). Port the transport of
+  discord_presence.cpp, then the launcher's activity and join handling.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only

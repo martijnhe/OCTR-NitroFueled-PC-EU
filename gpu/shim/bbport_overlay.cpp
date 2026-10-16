@@ -11,6 +11,10 @@
 #include <string>
 
 #include <SDL3/SDL.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -62,9 +66,18 @@ std::atomic<bool> ultrawide_prompt{false};
 bool unlock_confirm = false; // SacredFire: "Unlock everything" asks before it turns on
 // SacredFire online: the first start asks for a nickname (online_asked); the field's text.
 std::atomic<bool> online_prompt{false};
+// SacredFire online: linking the nickname to Discord (scripts/discord_link.py, Linux): the running
+// script, its result file and the last outcome shown in the menu.
+#ifndef _WIN32
+pid_t discord_pid = 0;
+#endif
+std::string discord_message;
+std::string discord_result_path;
 bool online_prompt_checked = false;
 char online_name_edit[32] = "";
 void SetUnlockAll(bool on);
+void DiscordRun(const char* command);
+void DiscordPoll();
 void SetOnline(bool on, const char* name);
 void RestartForOnline();
 bool ultrawide_prompt_checked = false;
@@ -717,9 +730,25 @@ void Menu() {
             SetOnline(on, online_name_edit);
         }
         Hint(BbSettings::MenuText(
-            "Applies after restarting the game. Your nickname belongs to this PC's ryunet_online.key: keep a "
-            "copy of that file to keep the nickname (link it to Discord in the Windows launcher).",
-            "Применяется после перезапуска. Ник привязан к файлу ryunet_online.key этого ПК."));
+            "Applies after restarting the game. Your nickname belongs to this PC's ryunet_online.key; link it to "
+            "Discord to get it back after a reinstall or on another PC (Recover with Discord).",
+            "Применяется после перезапуска. Свяжите ник с Discord, чтобы вернуть его на другом ПК."));
+        DiscordPoll();
+#ifndef _WIN32
+        const bool busy = discord_pid > 0;
+#else
+        const bool busy = false;
+#endif
+        ImGui::BeginDisabled(busy);
+        ImGui::BeginDisabled(!ok);
+        if (ImGui::Button(BbSettings::MenuText("Link with Discord", "Связать с Discord"))) DiscordRun("link");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(BbSettings::MenuText("Recover with Discord", "Вернуть через Discord"))) DiscordRun("recover");
+        ImGui::SameLine();
+        if (ImGui::Button(BbSettings::MenuText("Status", "Статус"))) DiscordRun("status");
+        ImGui::EndDisabled();
+        if (!discord_message.empty()) ImGui::TextWrapped("%s", discord_message.c_str());
     }
 
     // SacredFire: controller ports for split screen. Each port takes one connected gamepad; the
@@ -1177,6 +1206,74 @@ void OnlinePrompt() {
         online_prompt = false;
         std::printf("Online: not now\n");
     }
+}
+
+// SacredFire online: scripts/discord_link.py link|recover|status in the background (the browser
+// opens Discord's authorization page); the menu shows its outcome. Linux and the Steam Deck (the
+// Windows launcher has its own). recover writes the nickname into bbport.ini, taken over here.
+void DiscordRun(const char* command) {
+#ifndef _WIN32
+    if (discord_pid > 0) return;
+    const char* tmp = std::getenv("XDG_RUNTIME_DIR");
+    discord_result_path = std::string(tmp && *tmp ? tmp : "/tmp") + "/ctr-discord-link.json";
+    std::remove(discord_result_path.c_str());
+    const char* python = std::getenv("PYTHON");
+    if (!python || !*python) python = "python3";
+    BbSettings::Save(); // the script reads online_name from bbport.ini
+    const pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        execlp(python, python, "scripts/discord_link.py", command, "--result", discord_result_path.c_str(),
+               (char*)nullptr);
+        _exit(127);
+    }
+    if (pid > 0) {
+        discord_pid = pid;
+        discord_message = std::strcmp(command, "status") == 0
+                              ? "Asking the server..."
+                              : "Waiting for Discord in your browser (authorize there; up to 3 minutes)...";
+    } else {
+        discord_message = "Could not start scripts/discord_link.py.";
+    }
+#else
+    (void)command;
+    discord_message = "On Windows: the launcher's Online tab.";
+#endif
+}
+
+// The script's outcome once it has ended: {"ok":..,"status":..,"message":..,"nick":..}.
+void DiscordPoll() {
+#ifndef _WIN32
+    if (discord_pid <= 0) return;
+    int status = 0;
+    if (waitpid(discord_pid, &status, WNOHANG) != discord_pid) return;
+    discord_pid = 0;
+    std::string body;
+    if (FILE* f = std::fopen(discord_result_path.c_str(), "rb")) {
+        char buffer[4096];
+        body.assign(buffer, std::fread(buffer, 1, sizeof buffer, f));
+        std::fclose(f);
+    }
+    const auto field = [&](const char* key) {
+        const std::string tag = std::string("\"") + key + "\": \"";
+        const size_t at = body.find(tag);
+        if (at == std::string::npos) return std::string();
+        std::string out;
+        for (size_t i = at + tag.size(); i < body.size() && body[i] != '"'; ++i) {
+            if (body[i] == '\\' && i + 1 < body.size()) ++i;
+            out += body[i];
+        }
+        return out;
+    };
+    discord_message = body.empty() ? "Discord link: no answer (see the log)." : field("message");
+    const std::string state = field("status"), nick = field("nick");
+    if ((state == "recovered" || state == "own_nick") && BbSettings::NicknameOk(nick.c_str())) {
+        SetOnline(true, nick.c_str());
+        std::snprintf(online_name_edit, sizeof(online_name_edit), "%s", nick.c_str());
+        BbSettings::Save();
+    }
+    std::printf("Discord link: %s\n", discord_message.c_str());
+#endif
 }
 
 void UltrawidePrompt() {

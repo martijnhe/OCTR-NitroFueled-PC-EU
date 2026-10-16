@@ -165,6 +165,9 @@ def online_key(data):
     # or re-downloaded folder on the same PC keeps the nicknames.
     appdata = os.environ.get('APPDATA')
     backup = Path(appdata) / 'CTR-NitroFueled-PC' / 'ryunet_online.key' if appdata else None
+    if backup is None and os.name != 'nt':  # Linux, Steam Deck: ~/.config/CTR-NitroFueled-PC
+        config_home = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+        backup = Path(config_home) / 'CTR-NitroFueled-PC' / 'ryunet_online.key'
 
     def read(p):
         try:
