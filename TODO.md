@@ -91,3 +91,32 @@ the game data or only on the server.
   "ready/online" checks pass.
 - Online racing on community servers would need the above plus matchmaking and peer connections
   (NpMatching2 / Demonware lobbies): a separate project.
+
+### Offline Pit Stop: map of the EU 1.21 code (image offsets; patch Address = offset + 0x400000)
+
+- The marketplace is not on the UNO REST API (no inventory/balance URLs among the templates):
+  it runs over the LSG. So the route is a game-side patch, not JSON answers.
+- `CMarketplace` (singleton pointer at global 0x2ac8348; field table 0x2674890):
+  +0x18 `_data` (CMarketplaceData, from looseData/MarketplaceData.igz in permanent.pak: items,
+  SKUs, prices, featured calendar, bundles: the catalogue is local), +0x28 `_config`,
+  +0x40 `_inventoryItems`, +0x48 `_balances`, +0x64 `_loadedElements` (bit 1 inventory, bit 2
+  balances; 3 = ready), +0x98 `_purchasedExchangeSkuIds`.
+- Server task callbacks: 0xab4470 inventory arrived (task+0xa0 -> +0x40, sets bit 1, calls
+  0xab35d0), 0xab4360 balances arrived (task+0xa8 -> +0x48, sets bit 2, calls 0xab35d0);
+  static thunk 0xab4450(task) calls the inventory one on the singleton.
+- `CMarketplaceNodes` visual-script functions (registered at 0x193e21c, 14 in order):
+  clearVisibleItemsList 0x11444b0, fetchWumpaCoinsBalance 0x11444c0 (reads 0xab06c0(...)),
+  checkIfMarketplaceIsReady 0x1144500, setSelectedFeaturedIndex 0x11445c0,
+  getSelectedFeaturedIndex 0x11445e0, getDailyDealsRemainingTime 0x1144600,
+  setNextPitStopRefreshTime 0x1144710, sendVisitPitstopEvents 0x1144720, getFillUpEnabled
+  0x1144730, getExtraTabEnabled 0x11447b0, showExchangeResult 0x11447f0, refreshPitstop
+  0x1144830, getRemainingRefreshCharges 0x1144e30, automaticRefreshPitstop 0x1144f40.
+- checkIfMarketplaceIsReady needs: CMarketplace+0x18 != 0, +0x64 == 3; global 0x2acb3d8 (an
+  online/session object): [+0x68]->count at +0xc > 0, ([+0x50] | 1) == 3; then [+0x40]->+0x130
+  byte +0x11 or 0xaa2b90(...). Forcing it ready (jmp at 0x1144518 -> 0x114457c) is not enough:
+  the main menu's Pit Stop entry shows "A network error has occurred" before the shop opens, a
+  separate gate (probably the 0x2acb3d8 session state).
+- Hook plan for C code inside the game: redirect a call in the shop code to an import the game
+  never uses offline (e.g. sceNpWordFilterSanitizeComment); runtime_online.c implements that
+  import, running on the game thread (guest TLS set), and can fill inventory/balances and handle
+  purchases from a local file (user/marketplace.json).
