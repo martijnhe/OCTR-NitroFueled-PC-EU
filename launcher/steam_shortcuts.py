@@ -12,7 +12,7 @@ import subprocess
 import zlib
 from pathlib import Path
 
-NAME = "SacredFire"
+NAME = "Crash Team Racing Nitro-Fueled"
 
 
 def steam_roots():
@@ -180,9 +180,24 @@ def grid_artwork(path, appid, icon="", hero=""):
             (grid / name).write_bytes(Path(source).read_bytes())
 
 
-def add_everywhere(exe, name, icon="", hero=""):
+def has_exe(exe):
+    """True when some Steam user already has a shortcut that starts `exe` (any name: also one
+    added by hand with Add a Non-Steam Game)."""
+    quoted = f'"{exe}"'
+    for path in shortcut_files():
+        try:
+            shortcuts = parse(path.read_bytes()).get("shortcuts", {}) if path.exists() else {}
+        except (OSError, ValueError, IndexError):
+            continue
+        for entry in shortcuts.values():
+            if isinstance(entry, dict) and entry.get("Exe") in (quoted, exe):
+                return True
+    return False
+
+
+def add_everywhere(exe, name, icon="", hero="", launch_options=""):
     """The shortcut (and artwork) for every Steam user; returns (added, updated) counts."""
-    entry = make_entry(exe, str(Path(exe).parent), name=name, icon=icon)
+    entry = make_entry(exe, str(Path(exe).parent), name=name, launch_options=launch_options, icon=icon)
     added = updated = 0
     for path in shortcut_files():
         if add_shortcut(path, entry):
@@ -201,6 +216,8 @@ def main(argv):
     p.add_argument("--name", default=NAME)
     p.add_argument("--icon", default="")
     p.add_argument("--hero", default="")
+    p.add_argument("--options", default="", help="the shortcut's launch options")
+    p.add_argument("--marker", default="", help="file created once the shortcut is written")
     p.add_argument("--wait", action="store_true",
                    help="if Steam runs, wait (up to a day) until it exits, then add the shortcut")
     a = p.parse_args(argv)
@@ -211,13 +228,18 @@ def main(argv):
         if not a.wait:
             print("Steam: running; close it and run again (it overwrites its shortcuts when it exits)")
             return 1
+        # Checked every second: switching to the Steam Deck's game mode restarts Steam within
+        # seconds, and the entry has to be in the file before the new Steam reads it.
         deadline = time.time() + 86400
         while steam_running() and time.time() < deadline:
-            time.sleep(10)
-        time.sleep(3)  # let Steam finish writing its files
+            time.sleep(1)
+        time.sleep(1)  # let Steam finish writing its files
         if steam_running():
             return 1
-    added, updated = add_everywhere(a.exe, a.name, a.icon, a.hero)
+    added, updated = add_everywhere(a.exe, a.name, a.icon, a.hero, a.options)
+    if a.marker:
+        Path(a.marker).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.marker).touch()
     print(f'Steam: "{a.name}" added for {added} user(s), updated for {updated}; it shows after Steam starts')
     return 0
 

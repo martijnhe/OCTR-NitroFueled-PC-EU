@@ -24,7 +24,7 @@ draws with Vulkan. No emulator, no game files included.
 | **16:9 videos and cutscenes in ultrawide** | The intro videos and the story cutscenes are shown at 16:9 with black bars instead of stretched or showing off-stage; gameplay stays ultrawide. Turn it off to keep them wide. | on by default; menu *Ultrawide: videos and cutscenes at 16:9* / `ultrawide_cinematics=0` |
 | **Internal resolution** | 480p to native 4K (1440p is the PS4 Pro's own), now also on Linux and the Steam Deck. | menu *Internal resolution* / `render_res=1440` |
 | **DLC** | Your own add-on packages (Nitros Oxide Edition, pre-order pack, Firehawk kart) are reported installed. | put the `.pkg` files in `dlc/` |
-| **Shortcuts and Steam** | *Crash Team Racing Nitro-Fueled* in the application menu and in **Steam** (with the game's cover art), starting the game directly, so it works in Steam Deck game mode. | at install |
+| **Shortcuts and Steam** | *Crash Team Racing Nitro-Fueled* in the application menu and in **Steam** (with the game's cover art), starting the game directly, so it works in Steam Deck game mode. The AppImage adds itself to Steam on its first start (while Steam runs: as soon as it closes, e.g. when switching to game mode). | at install; AppImage: first start (`STEAM_SHORTCUT=0` skips it) |
 | **Steam Deck** | Same build, no CPU-specific flags; light additions only (no extra processes). | |
 
 The settings live in `bbport.ini` and in the in-game menu: **Insert** on the keyboard, or
@@ -301,7 +301,11 @@ lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire
 Without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
 until a folder passes the game check.
 
-**Adding the AppImage to Steam**: the launcher's *Settings → Steam → Add to Steam* writes the
+**Adding the AppImage to Steam**: the AppImage does it on its first start (once; not when Steam
+already has a shortcut to it or started it; `STEAM_SHORTCUT=0` skips it). Steam overwrites its
+shortcuts when it exits, so while it runs a small waiter adds the entry as soon as Steam closes:
+on the Steam Deck, start the AppImage once in desktop mode and switch to game mode. Put the
+AppImage where it stays (the shortcut points at its path). Otherwise the launcher's *Settings → Steam → Add to Steam* writes the
 shortcut (with `--play`, for the Steam Deck's game mode) while Steam is closed; by hand, *Add a
 Non-Steam Game* needs no options. The compatibility tool does not matter. Steam's overlay is removed before the port's own programs start. Where
 Steam runs games without FUSE, set the launch options to

@@ -659,6 +659,57 @@ class LauncherApp(Adw.Application):
         window.present()
 
 
+def auto_add_to_steam():
+    """First start of the AppImage: a Steam shortcut to it (with --play, for the Steam Deck's game
+    mode), once; STEAM_SHORTCUT=0 skips it. Not when Steam started us or already has a shortcut
+    to the AppImage (one added by hand). Steam overwrites its shortcuts when it exits, so while it
+    runs a detached waiter (the host's Python and a copy of steam_shortcuts.py: the AppImage's
+    mount goes away when it exits) adds the entry as soon as Steam closes, e.g. when switching to
+    game mode."""
+    marker = DATA_DIR / "steam_shortcut_added"
+    appimage = os.environ.get("APPIMAGE", "")
+    if os.environ.get("STEAM_SHORTCUT") == "0" or not appimage or marker.exists():
+        return
+    try:
+        exe, start_dir, options = steam_shortcuts.launcher_command()
+        if os.environ.get("SteamGameId") or os.environ.get("SteamAppId") or steam_shortcuts.has_exe(exe):
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            return
+        if not steam_shortcuts.shortcut_files():
+            return  # Steam not set up yet: try again next start
+        game = Path(load_settings()["game_dir"]).expanduser() / "sce_sys"
+        args = ["--exe", exe, "--name", steam_shortcuts.NAME, f"--options={options}",
+                "--marker", str(marker)]
+        for flag, name in (("--icon", "icon0.png"), ("--hero", "pic1.png")):
+            if (game / name).is_file():
+                args += [flag, str(game / name)]
+        if not steam_shortcuts.steam_running():
+            steam_shortcuts.main(args)
+            return
+        pending = DATA_DIR / "steam_shortcut_waiter.pid"
+        try:
+            os.kill(int(pending.read_text()), 0)
+            return  # a waiter from an earlier start is still waiting
+        except (OSError, ValueError):
+            pass
+        script = DATA_DIR / "steam_shortcuts.py"
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        script.write_bytes(Path(steam_shortcuts.__file__).read_bytes())
+        python = next((p for p in ("/usr/bin/python3", "/bin/python3") if Path(p).is_file()), sys.executable)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD")}
+        env["PATH"] = "/usr/bin:/bin:" + env.get("PATH", "")
+        waiter = subprocess.Popen([python, str(script), *args, "--wait"], env=env, cwd="/",
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, start_new_session=True)
+        pending.write_text(str(waiter.pid))
+        print(f'Steam: "{steam_shortcuts.NAME}" is added to Steam as soon as Steam closes '
+              "(or switch to game mode)", file=sys.stderr)
+    except (Exception, SystemExit) as error:  # never keep the game from starting
+        print(f"Steam: could not add the shortcut: {error}", file=sys.stderr)
+
+
 def play():
     """--play: the game with the saved settings, no window (Steam Deck game mode)."""
     settings = load_settings()
@@ -670,6 +721,7 @@ def play():
 
 
 if __name__ == "__main__":
+    auto_add_to_steam()
     if "--play" in sys.argv[1:]:
         sys.exit(play())
     sys.exit(LauncherApp().run([a for a in sys.argv if a != "--play"]))

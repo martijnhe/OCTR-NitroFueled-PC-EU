@@ -49,6 +49,20 @@ class SteamShortcuts(unittest.TestCase):
             self.assertEqual(top["shortcuts"]["1"]["LaunchOptions"], "")
             self.assertFalse(path.with_name(path.name + ".tmp").exists())
 
+    def test_has_exe_finds_any_name(self):
+        """A shortcut to the AppImage added by hand (another name) counts: no second one."""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "userdata/123/config/shortcuts.vdf"
+            path.parent.mkdir(parents=True)
+            ss.add_shortcut(path, ss.make_entry("/games/a.AppImage", "/games", name="Mine"))
+            files = ss.shortcut_files
+            ss.shortcut_files = lambda: [path]
+            try:
+                self.assertTrue(ss.has_exe("/games/a.AppImage"))
+                self.assertFalse(ss.has_exe("/games/b.AppImage"))
+            finally:
+                ss.shortcut_files = files
+
     def test_launcher_command(self):
         exe, start_dir, options = ss.launcher_command()
         self.assertEqual(options, "--play")
