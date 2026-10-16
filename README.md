@@ -296,7 +296,9 @@ patch files go into `patches/` or `BB_PATCHES_DIR`, selected through `patches.js
 `packaging/appimage.sh` builds `dist/SacredFire-x86_64.AppImage` (about 430 MB) with Nix: the
 binaries are built in `nix-shell shell.nix` so the bundle can collect their libraries, then
 `nix bundle` packs them with the GTK launcher, Python and Mesa's Vulkan drivers (the header of
-the script has the exact steps). Running it opens the launcher; `--play` starts the game. Data
+the script has the exact steps). Running it starts the game when it has a game folder (chosen,
+or next to the AppImage) and opens the launcher otherwise; `--launcher` opens the launcher anyway.
+The in-game menu (L3+R3, or Insert) has 60 FPS, motion blur and the internal resolution (1080p). Data
 lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire-launcher`.
 A game folder next to the AppImage (a folder with `eboot.bin` in the AppImage's own folder, one
 with 1.21 in its name first) is used when none is chosen: copy the AppImage and the merged game

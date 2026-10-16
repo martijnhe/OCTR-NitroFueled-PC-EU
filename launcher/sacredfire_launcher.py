@@ -739,6 +739,10 @@ def play():
 
 if __name__ == "__main__":
     auto_add_to_steam()
-    if "--play" in sys.argv[1:]:
+    # The AppImage with a game folder (chosen, or next to it) starts the game right away; the
+    # in-game menu (Insert / L3+R3) has the patches. --launcher opens this window instead.
+    direct = bool(os.environ.get("APPIMAGE")) and "--launcher" not in sys.argv[1:] \
+        and (Path(load_settings()["game_dir"]).expanduser() / "eboot.bin").is_file()
+    if direct or "--play" in sys.argv[1:]:
         sys.exit(play())
-    sys.exit(LauncherApp().run([a for a in sys.argv if a != "--play"]))
+    sys.exit(LauncherApp().run([a for a in sys.argv if a not in ("--play", "--launcher")]))
