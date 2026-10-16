@@ -84,10 +84,15 @@ the previous season's: the final update (1.21) only has the February Grand Prix'
 (`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. The earlier ones were in the
 updates 1.10 to 1.20.
 
-If you dumped one of those updates from your own console, please
-[open an issue with the *CTR TV / Grand Prix intro* form](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/issues/new?template=grand_prix_intro.yml):
-the update's version, the Grand Prix, and the names, sizes and checksums of its `.bk2` files. With
-that the port can support them (CTR TV episodes already work: put them in your own `archives`).
+If you dumped one of those updates from your own console, please open an issue with one of the
+forms (the update's version, the Grand Prix, and the names, sizes and checksums of its files):
+
+- [**CTR TV episode**](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/issues/new?template=ctrtv_episode.yml):
+  the update's `CTRTV_*.bk2` (these already play: put them in your own `archives`, then menu
+  *CTR TV > Episode*).
+- [**Grand Prix start-up intro**](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/issues/new?template=grand_prix_intro.yml):
+  the scene where a character jumps into the logo, and the start screen files that changed.
+
 **No game files in issues, please**: they are Activision's and cannot be shared here.
 
 ## Not working yet

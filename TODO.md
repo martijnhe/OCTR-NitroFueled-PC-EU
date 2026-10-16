@@ -134,8 +134,9 @@ start screen (`octane_startscreen.pak`) has only Crash's intro (`Crash_MainMenu`
 
 **Wanted:** the earlier seasons' intros (updates 1.10 to 1.20: their CTR TV episodes and the
 start-screen intros where another character jumps into the logo, see "Intro Comparison + All
-Grand Prix Intros" on YouTube). Reports come in through the issue form
-`.github/ISSUE_TEMPLATE/grand_prix_intro.yml` (names, sizes, checksums; no game files). Then:
+Grand Prix Intros" on YouTube). Reports come in through the issue forms
+`.github/ISSUE_TEMPLATE/ctrtv_episode.yml` and `grand_prix_intro.yml` (names, sizes, checksums; no
+game files). Then:
 check whether a start-screen intro is a `.pak` cutscene the game picks by Grand Prix data
 (`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
 choice for it.

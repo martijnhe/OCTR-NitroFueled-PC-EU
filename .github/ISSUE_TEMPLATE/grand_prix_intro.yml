@@ -1,18 +1,18 @@
-name: CTR TV / Grand Prix intro
-description: Tell us which update had which Grand Prix intro or CTR TV episode (information only, no game files).
+name: Grand Prix start-up intro
+description: Tell us which update had which Grand Prix start-up intro (information only, no game files).
 title: "[Grand Prix intro] "
 labels: ["grand-prix-intro"]
 body:
   - type: markdown
     attributes:
       value: |
-        Each Grand Prix season of Crash Team Racing Nitro-Fueled came with its own start-up intro and
-        CTR TV episode, and the next update replaced them: the final update (1.21) only has the
-        February Grand Prix's `CTRTV_FebGP.bk2`. This port can play any `CTRTV_*.bk2` it finds in
-        your own game folder (menu: L3 + R3 > CTR TV > Episode).
+        Each Grand Prix season of Crash Team Racing Nitro-Fueled had its own start-up intro: the
+        scene where a character jumps into the CTR logo before "Press X to begin". The next update
+        replaced it: the final update (1.21) only has Crash's (`octane_startscreen.pak`). CTR TV
+        episodes have their own form (*CTR TV episode*).
 
-        If you dumped an older update from your own console, tell us what is in it, so the port can
-        support it and others can check their own dumps.
+        If you dumped an older update from your own console, tell us what its start-up intro was
+        and which files changed, so the port can offer it.
 
         **Do not attach, upload or link game files** (videos, `.pak`, `.pkg`, dumps, saves): they are
         Activision's and cannot be shared here. Names, sizes and checksums are enough.
@@ -40,14 +40,20 @@ body:
       label: Grand Prix
       description: Which Grand Prix season this update was for, if you know it.
       placeholder: "Neon Circus"
+  - type: input
+    id: character
+    attributes:
+      label: Character in the intro
+      description: Who jumps into the logo in this update's start-up intro.
+      placeholder: "Spyro"
   - type: textarea
     id: files
     attributes:
-      label: Video files
+      label: Start screen files
       description: |
-        The `CTRTV_*.bk2` and other new `.bk2` files in the update's `archives` folder, each with its
-        size in bytes and its SHA-256 (`sha256sum archives/*.bk2` on Linux,
-        `Get-FileHash archives\*.bk2` in PowerShell).
+        `octane_startscreen.pak`, `juicedomain_startscreen.pak` and any other new `.pak` or `.bk2` in the
+        update's `archives` folder, each with its size in bytes and its SHA-256
+        (`sha256sum archives/octane_startscreen.pak` on Linux, `Get-FileHash` in PowerShell).
       render: text
     validations:
       required: true
@@ -55,7 +61,7 @@ body:
     id: notes
     attributes:
       label: Anything else
-      description: Did the start-up intro (the scene where a character jumps into the CTR logo) change in this update? Other things you noticed.
+      description: Other things you noticed (a recording's link is welcome; game files are not).
   - type: checkboxes
     id: rules
     attributes:
