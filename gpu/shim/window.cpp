@@ -93,6 +93,12 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     const bool fullscreen = (fullscreen_env && fullscreen_env[0] == '1') ||
                             BbSettings::Get().fullscreen.load(std::memory_order_relaxed);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen);
+    const char* borderless_env = std::getenv("BB_BORDERLESS");
+    const bool borderless = (borderless_env && borderless_env[0] == '1') ||
+                            BbSettings::Get().borderless.load(std::memory_order_relaxed);
+    if (borderless) {
+        SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_BORDERLESS_BOOLEAN, true);
+    }
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
@@ -274,6 +280,13 @@ bool WindowSDL::PollEvents() {
                 LOG_ERROR(Frontend, "Failed to set fullscreen {}: {}", want, SDL_GetError());
             }
         }
+        // Borderless switch
+        static int cur_borderless = -1;
+        const bool want_borderless = BbSettings::Get().borderless.load(std::memory_order_relaxed);
+        if (cur_borderless != int(want_borderless)) {
+            cur_borderless = int(want_borderless);
+            SDL_SetWindowBordered(window, !want_borderless);
+        }
     }
     {
         std::scoped_lock lock{text_mutex};
@@ -309,6 +322,14 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         if (BbOverlay::HandleEvent(event)) {
+            continue;
+        }
+        // Alt + Enter toggles fullscreen
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.mod & SDL_KMOD_ALT) &&
+            (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)) {
+            bool cur = BbSettings::Get().fullscreen.load(std::memory_order_relaxed);
+            BbSettings::Get().fullscreen.store(!cur, std::memory_order_relaxed);
             continue;
         }
         switch (event.type) {

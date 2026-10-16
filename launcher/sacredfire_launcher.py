@@ -88,6 +88,16 @@ DEFAULTS = {
     "extra_env": "",
 }
 INI_DEFAULTS = {"show_fps": "0", **{key: "0" for key, _, _ in PATCHES}}
+# RyuNET online (run.py setup_online reads the same bbport.ini keys). The nickname is the
+# player's identity on the server: the first installation to use one keeps it.
+ONLINE_SERVER = "octr.ryu7w7.xyz"
+RESERVED_NICKS = {"ryupc", "ryunet", "player", "jugador", "guest"}
+INVENTORIES = [("Bought on the server", "server"), ("From my save (100% saves)", "save")]
+
+
+def nick_ok(name):
+    return (3 <= len(name) <= 16 and all(c.isascii() and (c.isalnum() or c in "_-") for c in name)
+            and name.lower() not in RESERVED_NICKS)
 
 
 def game_next_to_appimage():
@@ -336,6 +346,22 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.patch_rows[key] = row
         page.add(patches)
 
+        online = Adw.PreferencesGroup(title=tr("Online (RyuNET)"),
+                                      description=tr("Online races, private rooms and the Pit Stop. Your nickname is yours on the server: "
+                                                     "this installation keeps it (ryunet_online.key in the data folder). "
+                                                     "Linking it to Discord is in the Windows launcher."))
+        self.online_row = Adw.SwitchRow(title=tr("Play online"), active=self.ini.get("online") == "1")
+        online.add(self.online_row)
+        self.nick_row = Adw.EntryRow(title=tr("Nickname (3-16 letters, digits, _ or -)"),
+                                     text=self.ini.get("online_name", ""))
+        online.add(self.nick_row)
+        self.server_row = Adw.EntryRow(title=tr("Server"), text=self.ini.get("online_server") or ONLINE_SERVER)
+        online.add(self.server_row)
+        self.inventory_row = combo_row(tr("Pit Stop items"), None, [(tr(label), value) for label, value in INVENTORIES],
+                                       self.ini.get("online_inventory", "server"))
+        online.add(self.inventory_row)
+        page.add(online)
+
         console = Adw.PreferencesGroup(title=tr("Console"))
         self.neo_row = Adw.SwitchRow(title=tr("PS4 Pro mode"),
                                      subtitle=tr("Neo mode, 7 CPUs, 5568 MiB direct memory: the game's Pro rendering path"),
@@ -467,6 +493,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         for key, row in self.patch_rows.items():
             self.ini[key] = "1" if row.get_active() else "0"
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
+        self.ini["online"] = "1" if self.online_row.get_active() else "0"
+        self.ini["online_name"] = self.nick_row.get_text().strip()
+        self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
+        self.ini["online_inventory"] = combo_value(self.inventory_row)
         save_ini(self.ini, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
 
@@ -599,6 +629,10 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.stop_game()
             return
         self.store()
+        if self.ini.get("online") == "1" and not nick_ok(self.ini.get("online_name", "")):
+            self.toasts.add_toast(Adw.Toast(title=tr("Online play needs your own nickname (3-16 letters, digits, _ or -; not RyuPC or Player)"),
+                                            timeout=8))
+            return
         self.log_view.get_buffer().set_text("")
         self.issue_notice.set_visible(False)
         launcher = Gio.SubprocessLauncher.new(

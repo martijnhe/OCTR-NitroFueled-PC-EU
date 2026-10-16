@@ -20,15 +20,16 @@ MINGW*|MSYS*)
             git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
         fi
     done
-    cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
+    cmake -S gpu -B out/gpu-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
         -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF}"
-    if ! ninja -C out/gpu sacredfire bb-gpu-capabilities ctr-launcher > out/gpu-build.log 2>&1; then
+    if ! ninja -C out/gpu-win sacredfire bb-gpu-capabilities ctr-launcher > out/gpu-build.log 2>&1; then
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
-    cp out/gpu/sacredfire.exe out/gpu/bb-gpu-capabilities.exe out/gpu/CTR-NitroFueled-PC.exe out/
-    version=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
+    cp out/gpu-win/sacredfire.exe out/gpu-win/bb-gpu-capabilities.exe out/gpu-win/CTR-NitroFueled-PC.exe out/
+    # BB_VERSION names a build before its release tag exists (BB_VERSION=v0.5 bash build.sh).
+    version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
     printf '%s-windows\n' "$version" > out/VERSION
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
     exit 0
@@ -103,13 +104,14 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
 echo "Built $PWD/out/sacredfire"
 # out/VERSION: the source revision this build came from (the nearest v* tag, else the commit;
 # "-dirty" when tracked files differ from it). run.sh prints it, the launcher shows it and the
 # package carries it, so a published binary can be matched to its source. The FSR-Vulkan patch
-# build.sh applies inside its submodule does not count as a change.
-version=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
+# build.sh applies inside its submodule does not count as a change. BB_VERSION names a build
+# before its release tag exists.
+version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
 git update-index -q --refresh 2>/dev/null || true
 if ! git diff-index --quiet --ignore-submodules=dirty HEAD -- 2>/dev/null; then version="$version-dirty"; fi
 printf '%s\n' "$version" > out/VERSION

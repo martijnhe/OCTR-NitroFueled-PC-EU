@@ -67,8 +67,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.fps_limit = std::clamp(i, 0, 1000);
     } else if (key == "async_pipelines") {
         v.async_pipelines = i != 0;
+    } else if (key == "msaa") {
+        v.msaa = i != 0;
     } else if (key == "fullscreen") {
         v.fullscreen = i != 0;
+    } else if (key == "borderless") {
+        v.borderless = i != 0;
+    } else if (key == "volume") {
+        v.volume = std::clamp(i, 0, 200);
     } else if (key == "menu_pos") {
         float x = -1.0f, y = -1.0f;
         if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
@@ -227,6 +233,9 @@ void Load() {
     if (const char* full = std::getenv("BB_FULLSCREEN")) {
         v.fullscreen = full[0] == '1';
     }
+    if (const char* bdr = std::getenv("BB_BORDERLESS")) {
+        v.borderless = bdr[0] == '1';
+    }
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;
@@ -349,7 +358,10 @@ void Save() {
     put("show_fps", flag(v.show_fps));
     put("fps_limit", std::to_string(v.fps_limit.load()));
     put("async_pipelines", flag(v.async_pipelines));
+    put("msaa", flag(v.msaa));
     put("fullscreen", flag(v.fullscreen));
+    put("borderless", flag(v.borderless));
+    put("volume", std::to_string(v.volume.load()));
     put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
     put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
     // Read by patches.py at start.
@@ -451,3 +463,15 @@ const char* UpscalerName(int upscaler) {
 }
 
 } // namespace BbSettings
+
+namespace AmdGpu {
+bool BbNoMsaa() {
+    static const bool value = [] {
+        if (const char* env = std::getenv("BB_NO_MSAA")) {
+            return env[0] == '1';
+        }
+        return !BbSettings::Get().msaa.load();
+    }();
+    return value;
+}
+} // namespace AmdGpu

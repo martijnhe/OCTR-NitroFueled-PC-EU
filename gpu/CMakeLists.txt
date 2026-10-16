@@ -246,15 +246,28 @@ if (WIN32)
     target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan PkgConfig::SDL3)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
-    add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp
+    add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
+        ../launcher/windows/discord_link.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
     target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends)
     target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
     target_link_options(ctr-launcher PRIVATE -static -municode -s)
-    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid)
+    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
     set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
+    # Discord presence and invites against a fake Discord pipe; never touches the real one.
+    add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp
+        ../launcher/windows/discord_presence.cpp)
+    target_compile_options(discord-presence-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_include_directories(discord-presence-test PRIVATE ../launcher/windows)
+    target_link_options(discord-presence-test PRIVATE -static)
+    # The Discord account authorization's loopback redirect, with a scripted browser.
+    add_executable(discord-link-test EXCLUDE_FROM_ALL ../tests/test_discord_link.cpp ../launcher/windows/discord_link.cpp)
+    target_compile_options(discord-link-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_include_directories(discord-link-test PRIVATE ../launcher/windows)
+    target_link_options(discord-link-test PRIVATE -static)
+    target_link_libraries(discord-link-test PRIVATE ws2_32 bcrypt shell32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.

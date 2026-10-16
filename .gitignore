@@ -41,5 +41,7 @@ gpu/shim/bbport_gnm_table.inc
 /dlc/
 /backups/
 /launcher.ini
+# The installation's secret that owns its online nicknames (run.py / launcher): never shared
+/ryunet_online.key
 /CUSA13795*/
 *.pkg

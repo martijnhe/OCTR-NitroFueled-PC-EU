@@ -6,6 +6,8 @@
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 
+#include <array>
+#include <atomic>
 #include <magic_enum/magic_enum.hpp>
 
 #define INVALID_NUMBER_FORMAT_COMBO                                                                \
@@ -637,7 +639,13 @@ std::span<const SurfaceFormatInfo> SurfaceFormats() {
         // 10_11_11
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format10_11_11, AmdGpu::NumberFormat::Float,
                                 vk::Format::eB10G11R11UfloatPack32),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format10_11_11, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eB10G11R11UfloatPack32),
         // 11_11_10 - Remapped to 10_11_11.
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format11_11_10, AmdGpu::NumberFormat::Float,
+                                vk::Format::eB10G11R11UfloatPack32),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format11_11_10, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eB10G11R11UfloatPack32),
         // 10_10_10_2 - Remapped to 2_10_10_10.
         // 2_10_10_10
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format2_10_10_10, AmdGpu::NumberFormat::Unorm,
@@ -786,11 +794,31 @@ vk::Format TrySurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
-               static_cast<u32>(num_format));
-    return result;
+    if (result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid) {
+        return result;
+    }
+    // sacredfire: an unknown pairing used to stop the game (CTR asked for 10_11_11 Unorm, now in
+    // the table). The same data format read as another number format keeps the texel size and
+    // layout of guest memory: drawn slightly off instead of a crash. Warned once per pairing.
+    static std::array<std::atomic<bool>, surface_format_table.size()> warned{};
+    const size_t index = GetSurfaceFormatTableIndex(data_format, num_format);
+    for (u32 n = 0; n < (1u << amd_gpu_number_format_bit_size); ++n) {
+        result = surface_format_table[GetSurfaceFormatTableIndex(data_format, AmdGpu::NumberFormat(n))];
+        if (result != vk::Format::eUndefined) {
+            if (!warned[index].exchange(true)) {
+                LOG_WARNING(Render_Vulkan, "Unknown data_format={} and num_format={}: using vk format {}",
+                            static_cast<u32>(data_format), static_cast<u32>(num_format),
+                            static_cast<u32>(result));
+            }
+            return result;
+        }
+    }
+    // Nothing for this data format at all: a 32-bit format, as the last resort.
+    if (!warned[index].exchange(true)) {
+        LOG_WARNING(Render_Vulkan, "Unknown data_format={} and num_format={}: using B10G11R11UfloatPack32",
+                    static_cast<u32>(data_format), static_cast<u32>(num_format));
+    }
+    return vk::Format::eB10G11R11UfloatPack32;
 }
 
 static constexpr DepthFormatInfo CreateDepthFormatInfo(

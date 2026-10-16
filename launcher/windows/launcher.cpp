@@ -14,6 +14,10 @@
 #include <d3d11.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <shlobj.h>
+#include <winhttp.h>
+#include <bcrypt.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <cctype>
@@ -37,6 +41,9 @@
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
+
+#include "discord_link.h"
+#include "discord_presence.h"
 
 namespace fs = std::filesystem;
 
@@ -101,6 +108,11 @@ std::string FormatBytes(std::uintmax_t bytes) {
     std::snprintf(buf, sizeof buf, "%.1f GB", double(bytes) / double(1ull << 30));
     return buf;
 }
+
+const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
+const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
+const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
+const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 
 // ---------------------------------------------------------------------------------------------
 // Language: Spanish or English, chosen in the launcher (default: Windows' language).
@@ -566,6 +578,9 @@ struct App {
 
     Ini launcher;  // launcher.ini
     Ini game;      // bbport.ini
+    char online_server_buf[128] = "octr.ryu7w7.xyz";
+    char online_name_buf[32] = "";
+    char online_friends_buf[512] = "";
 
     // Game folders.
     fs::path game_dir, base_dir, update_dir;
@@ -598,6 +613,11 @@ struct App {
 
     bool want_close = false;
     bool confirm_clear_cache = false;
+    bool ask_nick = false;  // PLAY pressed online without a usable nickname
+    // A Discord invite for another server, waiting for the player to confirm the switch.
+    bool ask_join_server = false;
+    std::string join_server, join_nick;
+    bool pending_play = false;  // an accepted invite starts the game once it is ready
     std::string notice;
 
     // Patches tab.
@@ -636,6 +656,393 @@ void SaveGameIni() {
     if (!g_app.game.Save(GameIni(), "# bbport settings (in-game menu: Insert / L3+R3)")) {
         g_app.notice = T("No se pudo guardar bbport.ini.", "Could not save bbport.ini.");
     }
+}
+
+void SyncOnlineBuffers() {
+    App& a = g_app;
+    std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
+    if (srv.empty()) {
+        srv = "octr.ryu7w7.xyz";
+        a.game.Set("online_server", srv);
+    }
+    std::string nick = a.game.Get("online_name", a.game.Get("user_name"));
+    std::string friends = a.game.Get("online_friends", "");
+    std::strncpy(a.online_server_buf, srv.c_str(), sizeof(a.online_server_buf) - 1);
+    a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+    std::strncpy(a.online_name_buf, nick.c_str(), sizeof(a.online_name_buf) - 1);
+    a.online_name_buf[sizeof(a.online_name_buf) - 1] = '\0';
+    std::strncpy(a.online_friends_buf, friends.c_str(), sizeof(a.online_friends_buf) - 1);
+    a.online_friends_buf[sizeof(a.online_friends_buf) - 1] = '\0';
+}
+
+std::string CurrentNick() { return Trim(g_app.game.Get("online_name", g_app.game.Get("user_name"))); }
+
+/// The server derives the player's ID from the nickname, so everyone left on the old default
+/// (RyuPC) was ONE player online: one wallet, and matchmaking evicting each other. These names
+/// are refused; run.py refuses them too.
+bool ReservedNick(const std::string& nick) {
+    static const char* const kReserved[] = {"ryupc", "ryunet", "player", "jugador", "guest"};
+    std::string lower = nick;
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* r : kReserved)
+        if (lower == r) return true;
+    return false;
+}
+
+bool NickChar(unsigned c) { return c < 128 && (std::isalnum(int(c)) || c == '_' || c == '-'); }
+
+/// Why this nickname cannot be used online, or nullptr when it can.
+const char* NickProblem(const std::string& nick) {
+    if (nick.empty()) return T("Falta tu apodo.", "Your nickname is missing.");
+    if (nick.size() < 3 || nick.size() > 16)
+        return T("El apodo debe tener de 3 a 16 caracteres.", "The nickname must be 3 to 16 characters.");
+    for (const char c : nick)
+        if (!NickChar(static_cast<unsigned char>(c)))
+            return T("Solo letras, números, _ y -.", "Only letters, digits, _ and -.");
+    if (ReservedNick(nick))
+        return T("Ese es un apodo por defecto que usa mucha gente: elige uno propio.",
+                 "That is a default nickname many people share: choose your own.");
+    return nullptr;
+}
+
+int NickFilter(ImGuiInputTextCallbackData* data) { return NickChar(data->EventChar) ? 0 : 1; }
+
+/// Nickname field (letters, digits, _ and - only, 16 at most); true when it was edited.
+bool NickInput(const char* label) {
+    App& a = g_app;
+    constexpr size_t kMaxNick = 16;
+    static_assert(sizeof(a.online_name_buf) > kMaxNick);
+    if (!ImGui::InputText(label, a.online_name_buf, kMaxNick + 1, ImGuiInputTextFlags_CallbackCharFilter, NickFilter))
+        return false;
+    a.game.Set("online_name", a.online_name_buf);
+    a.game.Set("user_name", a.online_name_buf);
+    return true;
+}
+
+/// This installation's secret, shared with run.py (ryunet_online.key next to it): the server
+/// lets the first key to use a nickname keep it. Created here when missing, so the nickname
+/// check below already speaks for this installation.
+/// A second copy of the key outside the game folder (%APPDATA%\CTR-NitroFueled-PC), so that
+/// deleting, moving or re-downloading the folder on the same PC keeps the nicknames.
+fs::path BackupKeyPath() {
+    const wchar_t* appdata = _wgetenv(L"APPDATA");
+    return appdata && *appdata ? fs::path(appdata) / L"CTR-NitroFueled-PC" / L"ryunet_online.key" : fs::path();
+}
+
+std::string ReadKeyFile(const fs::path& path) {
+    std::string key;
+    if (path.empty()) return key;
+    std::ifstream(path, std::ios::binary) >> key;
+    for (char& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (key.size() != 64 || key.find_first_not_of("0123456789abcdef") != std::string::npos) key.clear();
+    return key;
+}
+
+bool WriteKeyFile(const fs::path& path, const std::string& key) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << key << "\n";
+    return bool(out);
+}
+
+std::string OnlineKey() {
+    static std::mutex mutex;  // the server checks ask from background threads
+    static std::string cached;
+    std::scoped_lock lock{mutex};
+    if (!cached.empty()) return cached;
+    const fs::path path = g_app.root / L"ryunet_online.key";
+    const fs::path backup = BackupKeyPath();
+    std::string key = ReadKeyFile(path);
+    if (key.empty()) key = ReadKeyFile(backup);  // a new folder on a PC that played before
+    if (key.empty()) {
+        unsigned char raw[32];
+        if (BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};
+        static const char kHex[] = "0123456789abcdef";
+        for (const unsigned char b : raw) {
+            key += kHex[b >> 4];
+            key += kHex[b & 15];
+        }
+    }
+    if (ReadKeyFile(path) != key && !WriteKeyFile(path, key)) return {};
+    if (ReadKeyFile(backup).empty()) WriteKeyFile(backup, key);  // never overwrites another folder's
+    cached = key;
+    return cached;
+}
+
+/// Server availability of a nickname: "free", "yours", "taken", "reserved", "invalid", or
+/// "" while unknown or when the server could not be asked (it checks again at login).
+struct NickCheck {
+    struct Result {
+        std::string status;
+        ULONGLONG at = 0;  // GetTickCount64: an unreachable server is asked again later
+        bool linked = false;          // the nickname is linked to a Discord account
+        bool link_available = false;  // the server can link Discord accounts
+        std::string discord;          // the linked account's name (only for our own nickname)
+    };
+    std::mutex mutex;
+    std::map<std::string, Result> results;  // "server|nick" -> answer
+    std::string in_flight;
+};
+NickCheck g_nick_check;
+
+std::string Lower(std::string s) {
+    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/// The server setting's host and HTTP port, split exactly as run.py does ("host" or "host:port").
+void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& port) {
+    host = server;
+    port = 8080;  // run.py's online_http_port default
+    const auto colon = server.find(':');
+    if (colon == std::string::npos || server.front() == '[') return;
+    const std::string digits = server.substr(colon + 1);
+    if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos) return;
+    host = server.substr(0, colon);
+    port = INTERNET_PORT(std::atoi(digits.c_str()));
+}
+
+/// What one server sees of the installation's key: HMAC-SHA256(key, host), as run.py sends it.
+/// Every server gets a different value, so none can reuse it on another to take a nickname.
+std::string ServerKey(const std::string& host) {
+    const std::string key = OnlineKey();
+    if (key.size() != 64) return {};
+    unsigned char raw[32];
+    for (int i = 0; i < 32; ++i) raw[i] = static_cast<unsigned char>(std::stoi(key.substr(i * 2, 2), nullptr, 16));
+    const std::string msg = Lower(Trim(host));
+    unsigned char mac[32];
+    bool ok = false;
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0) {
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        if (BCryptCreateHash(alg, &hash, nullptr, 0, raw, sizeof raw, 0) == 0) {
+            ok = BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(msg.data())), ULONG(msg.size()), 0) == 0 &&
+                 BCryptFinishHash(hash, mac, sizeof mac, 0) == 0;
+            BCryptDestroyHash(hash);
+        }
+        BCryptCloseAlgorithmProvider(alg, 0);
+    }
+    if (!ok) return {};
+    static const char kHex[] = "0123456789abcdef";
+    std::string out;
+    for (const unsigned char b : mac) {
+        out += kHex[b >> 4];
+        out += kHex[b & 15];
+    }
+    return out;
+}
+
+/// A request to the RyuNET server's HTTP port, with this installation's key for that server.
+/// The body, or "" when the server could not be reached. Called from background threads.
+std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
+                        const std::string& form = {}, int timeout_ms = 3000) {
+    std::string host;
+    INTERNET_PORT port = 0;
+    SplitServer(server, host, port);
+    const std::string key = ServerKey(host);
+    std::string body;
+    HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return body;
+    WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
+    HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), port, 0);
+    HINTERNET req = conn ? WinHttpOpenRequest(conn, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES, 0)
+                         : nullptr;
+    std::wstring headers;
+    if (!key.empty()) headers += L"X-RyuNET-Key: " + Widen(key) + L"\r\n";
+    if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
+    if (req && WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                  headers.empty() ? 0 : DWORD(-1),
+                                  form.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(form.data()),
+                                  DWORD(form.size()), DWORD(form.size()), 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
+            std::string chunk(avail, '\0');
+            DWORD got = 0;
+            if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;
+            body.append(chunk.data(), got);
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (conn) WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    return body;
+}
+
+std::string HttpGet(const std::string& server, const std::wstring& path) { return HttpRequest(server, L"GET", path); }
+
+/// A string field of a small flat JSON answer ("" when missing).
+std::string JsonField(const std::string& body, const char* key) {
+    const std::string field = std::string("\"") + key + "\":\"";
+    const auto at = body.find(field);
+    if (at == std::string::npos) return {};
+    const auto end = body.find('"', at + field.size());
+    return end == std::string::npos ? std::string() : body.substr(at + field.size(), end - at - field.size());
+}
+
+/// A number field of a small flat JSON answer.
+bool JsonNumber(const std::string& body, const char* key, int& value) {
+    const std::string field = std::string("\"") + key + "\":";
+    const auto at = body.find(field);
+    if (at == std::string::npos) return false;
+    char* end = nullptr;
+    const long n = std::strtol(body.c_str() + at + field.size(), &end, 10);
+    if (end == body.c_str() + at + field.size()) return false;
+    value = int(n);
+    return true;
+}
+
+/// A true/false field of a small flat JSON answer.
+bool JsonBool(const std::string& body, const char* key) {
+    return body.find(std::string("\"") + key + "\":true") != std::string::npos;
+}
+
+NickCheck::Result AskNickStatus(const std::string& server, const std::string& nick) {
+    // {"status":"...","linked":..,"discord_link":..,"discord":".."}; a server without this
+    // endpoint answers something else.
+    const std::string body = HttpGet(server, L"/ryunet/nick?name=" + Widen(nick));  // [A-Za-z0-9_-]
+    NickCheck::Result r;
+    r.status = JsonField(body, "status");
+    r.linked = JsonBool(body, "linked");
+    r.link_available = JsonBool(body, "discord_link");
+    r.discord = JsonField(body, "discord");
+    return r;
+}
+
+/// Cached answer for the current nickname, asking the server in the background once per
+/// nickname. "?" while the question is out.
+std::string NickAvailability() {
+    const std::string nick = CurrentNick();
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    if (NickProblem(nick) || server.empty()) return "";
+    const std::string id = server + "|" + nick;
+    std::scoped_lock lock{g_nick_check.mutex};
+    if (const auto it = g_nick_check.results.find(id); it != g_nick_check.results.end()) {
+        if (!it->second.status.empty() || GetTickCount64() - it->second.at < 30000) return it->second.status;
+    }
+    if (!g_nick_check.in_flight.empty()) return "?";
+    g_nick_check.in_flight = id;
+    std::thread([server, nick, id] {
+        NickCheck::Result result = AskNickStatus(server, nick);
+        result.at = GetTickCount64();
+        std::scoped_lock done{g_nick_check.mutex};
+        g_nick_check.results[id] = result;
+        g_nick_check.in_flight.clear();
+    }).detach();
+    return "?";
+}
+
+/// Whether the server can link Discord accounts, asked once in the background without a
+/// nickname (a reinstalled launcher has none yet).
+bool DiscordLinkAvailable() {
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    if (server.empty()) return false;
+    const std::string id = server + "|*";
+    std::scoped_lock lock{g_nick_check.mutex};
+    if (const auto it = g_nick_check.results.find(id); it != g_nick_check.results.end()) {
+        if (it->second.link_available || GetTickCount64() - it->second.at < 30000) return it->second.link_available;
+    }
+    if (!g_nick_check.in_flight.empty()) return false;
+    g_nick_check.in_flight = id;
+    std::thread([server, id] {
+        NickCheck::Result result = AskNickStatus(server, "");
+        result.at = GetTickCount64();
+        std::scoped_lock done{g_nick_check.mutex};
+        g_nick_check.results[id] = result;
+        g_nick_check.in_flight.clear();
+    }).detach();
+    return false;
+}
+
+/// The last answer about the current nickname (status "" when unknown), without asking.
+NickCheck::Result NickInfo() {
+    const std::string server = Trim(g_app.game.Get("online_server", "octr.ryu7w7.xyz"));
+    std::scoped_lock lock{g_nick_check.mutex};
+    const auto it = g_nick_check.results.find(server + "|" + CurrentNick());
+    return it == g_nick_check.results.end() ? NickCheck::Result{} : it->second;
+}
+
+/// One line under a nickname field: what the server says about it.
+void NickAvailabilityLine() {
+    const std::string s = NickAvailability();
+    if (s == "?") {
+        ImGui::TextColored(kGrey, "%s", T("Comprobando el apodo en el servidor...", "Checking the nickname with the server..."));
+    } else if (s == "free") {
+        ImGui::TextColored(kGreen, "%s", T("Disponible: será tuyo la primera vez que juegues online.",
+                                           "Available: it becomes yours the first time you play online."));
+    } else if (s == "yours") {
+        ImGui::TextColored(kGreen, "%s", T("Este apodo es tuyo.", "This nickname is yours."));
+    } else if (s == "taken" && NickInfo().linked) {
+        ImGui::TextColored(kRed, "%s", T("Ese apodo está vinculado a una cuenta de Discord. Si es tuyo, recupéralo en la "
+                                         "pestaña Online (Recuperar con Discord); si no, elige otro.",
+                                         "That nickname is linked to a Discord account. If it is yours, recover it in the "
+                                         "Online tab (Recover with Discord); otherwise choose another one."));
+    } else if (s == "taken") {
+        ImGui::TextColored(kRed, "%s", T("Ese apodo ya lo usa otra persona: elige otro.",
+                                         "Someone else already uses that nickname: choose another one."));
+    } else if (s == "reserved" || s == "invalid") {
+        ImGui::TextColored(kRed, "%s", T("El servidor no acepta ese apodo: elige otro.", "The server does not accept that nickname: choose another one."));
+    }
+}
+
+bool NickTaken() {
+    const std::string s = NickAvailability();
+    return s == "taken" || s == "reserved" || s == "invalid";
+}
+
+/// The lobby this player hosts (their party or private room), from the server's
+/// /ryunet/party, refreshed in the background every 20 s while it is asked for.
+struct PartyPoll {
+    std::mutex mutex;
+    std::string id;  // "server|nick" of the last answer
+    bool known = false;  // the server answered
+    int players = 0, max = 0;
+    ULONGLONG at = 0;
+    bool in_flight = false;
+};
+PartyPoll g_party;
+
+/// False while unknown (no answer yet, or a server without /ryunet/party).
+bool PartyInfo(const std::string& server, const std::string& nick, int& players, int& max) {
+    const std::string id = server + "|" + nick;
+    std::scoped_lock lock{g_party.mutex};
+    if ((g_party.id != id || GetTickCount64() - g_party.at >= 20000) && !g_party.in_flight) {
+        g_party.in_flight = true;
+        std::thread([server, nick, id] {
+            const std::string body = HttpGet(server, L"/ryunet/party?name=" + Widen(nick));
+            int p = 0, m = 0;
+            const bool known = JsonNumber(body, "players", p) && JsonNumber(body, "max", m);
+            std::scoped_lock done{g_party.mutex};
+            g_party.id = id;
+            g_party.known = known;
+            g_party.players = p;
+            g_party.max = m;
+            g_party.at = GetTickCount64();
+            g_party.in_flight = false;
+        }).detach();
+    }
+    if (g_party.id != id || !g_party.known) return false;
+    players = g_party.players;
+    max = g_party.max;
+    return true;
+}
+
+/// A server setting that can travel inside a Discord join secret (and be trusted coming out
+/// of one): a host name or IP with an optional port.
+bool ValidServer(const std::string& s) {
+    return !s.empty() && s.size() <= 64 &&
+           s.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:") == std::string::npos;
+}
+
+bool ListHas(const std::string& csv, const std::string& name) {
+    std::stringstream in(csv);
+    for (std::string item; std::getline(in, item, ',');)
+        if (Lower(Trim(item)) == Lower(name)) return true;
+    return false;
 }
 
 void AddLog(const std::string& line) {
@@ -841,7 +1248,10 @@ void StartGame() {
         app.exit_code = code;
         app.job_finished = true;
     });
-    ShowWindow(a.hwnd, SW_MINIMIZE);
+    if (a.hwnd) {
+        if (a.launcher.Flag("hide_on_play", false)) ShowWindow(a.hwnd, SW_HIDE);
+        else ShowWindow(a.hwnd, SW_MINIMIZE);
+    }
 }
 
 void StopGame() {
@@ -850,9 +1260,300 @@ void StopGame() {
     else if (g_app.process) TerminateProcess(g_app.process, 1);
 }
 
+/// Discord application whose name and art the presence shows (and whose OAuth2 links
+/// nicknames). launcher.ini discord_app_id can name another one; empty or missing is this one.
+constexpr const char* kDiscordAppId = "1560408801704943708";
+
+std::string DiscordAppId() {
+    const std::string id = g_app.launcher.Get("discord_app_id");
+    return id.empty() ? kDiscordAppId : id;
+}
+
+/// Shows the game in the player's Discord status while it runs (launcher.ini discord_rpc,
+/// on by default). Called every frame; DiscordPresence only talks to Discord on a change.
+void UpdateDiscord() {
+    App& a = g_app;
+    static int64_t started = 0;
+    if (!a.game_running) {
+        started = 0;
+    } else if (started == 0) {
+        started = int64_t(std::time(nullptr));
+    }
+    const bool enabled = a.launcher.Flag("discord_rpc", true);
+    const std::string app_id = DiscordAppId();
+    if (!a.game_running) {
+        DiscordPresence::Update(enabled, app_id, nullptr);
+        return;
+    }
+    DiscordPresence::Activity activity;
+    if (a.game.Flag("online", true)) {
+        activity.details = T("Jugando online", "Playing online");
+        const std::string nick = CurrentNick();
+        if (!nick.empty()) activity.state = std::string(T("Apodo: ", "Nickname: ")) + nick;
+        // Joinable: Discord's "Join" and the chat's "+ > Invite" hand our server and nickname to
+        // whoever accepts; their launcher adds us as a friend and starts their game.
+        const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+        if (!NickProblem(nick) && ValidServer(server)) {
+            int players = 0, max = 0;
+            if (!PartyInfo(server, nick, players, max)) {
+                players = 1;  // a server without /ryunet/party: offer it anyway
+                max = 8;
+            }
+            if (players > 0 && max >= players) {
+                activity.party_id = "ctr:" + Lower(server) + ":" + Lower(nick);
+                activity.party_size = players;
+                activity.party_max = max;
+                if (players < max) activity.join_secret = "ctr1|" + server + "|" + nick;
+            }
+        }
+    } else {
+        activity.details = T("Jugando sin conexión", "Playing offline");
+    }
+    activity.start = started;
+    activity.large_image = "logo";
+    activity.large_text = "Crash Team Racing Nitro-Fueled";
+    DiscordPresence::Update(enabled, app_id, &activity);
+}
+
+/// Lets Discord start this launcher when the player accepts an invite with it closed: the
+/// discord-<app id> URL protocol, registered for the current user as Discord's own SDKs do.
+/// Written on every start, so a portable folder that moved points at its new place.
+void RegisterDiscordLaunch(const std::string& app_id) {
+    if (app_id.empty() || app_id.find_first_not_of("0123456789") != std::string::npos) return;
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    const std::wstring path(exe, n);
+    const std::wstring base = L"Software\\Classes\\discord-" + Widen(app_id);
+    const auto set = [](const std::wstring& key, const wchar_t* name, const std::wstring& value) {
+        HKEY h = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS)
+            return;
+        RegSetValueExW(h, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       DWORD((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(h);
+    };
+    set(base, nullptr, L"URL:Run game " + Widen(app_id) + L" protocol");
+    set(base, L"URL Protocol", L"");
+    set(base + L"\\DefaultIcon", nullptr, path + L",0");
+    set(base + L"\\shell\\open\\command", nullptr, L"\"" + path + L"\"");
+}
+
+/// What the PLAY button does: online without a usable nickname asks for one first (NickPopup).
+void PressPlay() {
+    App& a = g_app;
+    if (a.game.Flag("online", true) && (NickProblem(CurrentNick()) || NickTaken())) a.ask_nick = true;
+    else StartGame();
+}
+
+bool GameReady() {
+    const App& a = g_app;
+    return a.game_info.kind == Kind::Complete && a.game_checked && a.game_ok && a.job == Job::None && a.python;
+}
+
+void BringLauncherToFront() {
+    ShowWindow(g_app.hwnd, SW_RESTORE);
+    SetForegroundWindow(g_app.hwnd);
+}
+
+std::string Format(const char* format, const std::string& a, const std::string& b = {}) {
+    char buf[512];
+    std::snprintf(buf, sizeof buf, format, a.c_str(), b.c_str());
+    return buf;
+}
+
+/// An invite accepted in Discord, for a server we use (or agreed to switch to): the host
+/// becomes a friend (the game lists friends' lobbies as joinable) and the game starts.
+void AcceptDiscordJoin(const std::string& server, const std::string& nick) {
+    App& a = g_app;
+    a.game.Set("online", "1");
+    a.game.Set("online_server", server);
+    std::string friends = Trim(a.game.Get("online_friends"));
+    if (!ListHas(friends, nick)) friends = friends.empty() ? nick : friends + "," + nick;
+    a.game.Set("online_friends", friends);
+    SaveGameIni();  // a running game reads the new friend from bbport.ini
+    SyncOnlineBuffers();
+    {
+        std::scoped_lock lock{g_nick_check.mutex};  // the server may have changed
+        g_nick_check.results.clear();
+    }
+    // The game takes this as a PS4 invitation accepted in the system UI and joins the host's
+    // session by itself (src/runtime_services.c, SESSION_INVITATION). Sessions are named after
+    // their host. The file is stamped so a game that starts much later ignores it.
+    {
+        std::ofstream join(GameIni().parent_path() / L"ryunet_join.txt", std::ios::binary | std::ios::trunc);
+        join << "session=cusa13795-session-" << nick << "\nhost=" << nick << "\ntime=" << int64_t(std::time(nullptr))
+             << "\n";
+    }
+    if (a.game_running) {
+        a.notice = Format(T("Invitación de %s aceptada: el juego se une a su partida en unos segundos. Si no lo "
+                            "hace, abre Amigos en el juego y únete a %s.",
+                            "%s's invite accepted: the game joins their match in a few seconds. If it does "
+                            "not, open Friends in the game and join %s."),
+                          nick, nick);
+        return;
+    }
+    a.notice = Format(T("Invitación de %s aceptada: el juego se abre y se une a su partida (si no, abre Amigos "
+                        "y únete a %s).",
+                        "%s's invite accepted: the game starts and joins their match (if not, open Friends "
+                        "and join %s)."),
+                      nick, nick);
+    BringLauncherToFront();
+    a.pending_play = true;  // PollJobs presses PLAY as soon as the game folder is checked
+}
+
+/// A join secret from Discord: "ctr1|<server>|<nickname>", written by UpdateDiscord.
+void OnDiscordJoin(const std::string& secret) {
+    App& a = g_app;
+    const auto p1 = secret.find('|');
+    const auto p2 = p1 == std::string::npos ? p1 : secret.find('|', p1 + 1);
+    const std::string server = p2 == std::string::npos ? "" : secret.substr(p1 + 1, p2 - p1 - 1);
+    const std::string nick = p2 == std::string::npos ? "" : secret.substr(p2 + 1);
+    if (secret.compare(0, p1, "ctr1") != 0 || !ValidServer(server) || NickProblem(nick)) {
+        a.notice = T("Esa invitación de Discord no es de este launcher.", "That Discord invite is not from this launcher.");
+        BringLauncherToFront();
+        return;
+    }
+    if (Lower(nick) == Lower(CurrentNick())) return;  // our own invite
+    if (Lower(server) != Lower(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")))) {
+        // Never switch servers silently: a crafted invite could send us to any server.
+        a.join_server = server;
+        a.join_nick = nick;
+        a.ask_join_server = true;  // JoinServerPopup
+        BringLauncherToFront();
+        return;
+    }
+    AcceptDiscordJoin(server, nick);
+}
+
+/// A JSON string field with its escapes decoded (\" \\ \/ \n \t \uXXXX, surrogate pairs), as
+/// UTF-8; "" when missing.
+std::string JsonText(const std::string& body, const char* key) {
+    const std::string field = std::string("\"") + key + "\":\"";
+    size_t i = body.find(field);
+    if (i == std::string::npos) return {};
+    i += field.size();
+    std::string out;
+    const auto put = [&out](unsigned cp) {
+        if (cp < 0x80) {
+            out += char(cp);
+        } else if (cp < 0x800) {
+            out += char(0xC0 | (cp >> 6));
+            out += char(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += char(0xE0 | (cp >> 12));
+            out += char(0x80 | ((cp >> 6) & 0x3F));
+            out += char(0x80 | (cp & 0x3F));
+        } else {
+            out += char(0xF0 | (cp >> 18));
+            out += char(0x80 | ((cp >> 12) & 0x3F));
+            out += char(0x80 | ((cp >> 6) & 0x3F));
+            out += char(0x80 | (cp & 0x3F));
+        }
+    };
+    const auto hex4 = [&body](size_t at, unsigned& v) {
+        if (at + 4 > body.size()) return false;
+        v = 0;
+        for (size_t k = at; k < at + 4; ++k) {
+            const char c = body[k];
+            v = v * 16 + unsigned(c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99);
+            if (v > 0xFFFF) return false;
+        }
+        return true;
+    };
+    for (; i < body.size() && body[i] != '"'; ++i) {
+        if (body[i] != '\\' || i + 1 >= body.size()) {
+            out += body[i];
+            continue;
+        }
+        const char e = body[++i];
+        if (e == 'n') out += ' ';
+        else if (e == 't') out += ' ';
+        else if (e == 'u') {
+            unsigned cp = 0, low = 0;
+            if (!hex4(i + 1, cp)) break;
+            i += 4;
+            if (cp >= 0xD800 && cp < 0xDC00 && i + 6 < body.size() && body[i + 1] == '\\' && body[i + 2] == 'u' &&
+                hex4(i + 3, low) && low >= 0xDC00 && low < 0xE000) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                i += 6;
+            }
+            put(cp);
+        } else {
+            out += e;  // \" \ \/
+        }
+    }
+    return out;
+}
+
+/// The digits of a JSON number field ("" when missing); IDs past 32 bits stay exact.
+std::string JsonDigits(const std::string& body, const char* key) {
+    const std::string field = std::string("\"") + key + "\":";
+    const auto at = body.find(field);
+    if (at == std::string::npos) return {};
+    size_t end = at + field.size();
+    while (end < body.size() && std::isdigit(static_cast<unsigned char>(body[end]))) ++end;
+    return body.substr(at + field.size(), end - at - field.size());
+}
+
+/// Server announcements ("maintenance in 5 minutes"): /ryunet/announce, asked every 30 s while
+/// online play is on. A new one goes to the game in ryunet_announce.txt next to bbport.ini
+/// (the port draws it over the picture, gpu/shim/bbport_overlay.cpp) and to the launcher's
+/// notice line.
+struct AnnouncePoll {
+    std::mutex mutex;
+    ULONGLONG asked = 0;
+    bool in_flight = false;
+    std::string seen_id;   // the last announcement handed on
+    std::string pending;   // its text, for the launcher's notice (UI thread)
+};
+AnnouncePoll g_announce;
+
+void PollAnnouncement() {
+    App& a = g_app;
+    if (!a.game.Flag("online", true)) return;
+    const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+    std::string text;
+    {
+        std::scoped_lock lock{g_announce.mutex};
+        text.swap(g_announce.pending);
+        if (!g_announce.in_flight && !server.empty() && GetTickCount64() - g_announce.asked >= 30000) {
+            g_announce.in_flight = true;
+            g_announce.asked = GetTickCount64();
+            const fs::path file = GameIni().parent_path() / L"ryunet_announce.txt";
+            std::thread([server, file] {
+                const std::string body = HttpGet(server, L"/ryunet/announce");
+                const std::string id = JsonDigits(body, "id"), msg = JsonText(body, "text");
+                int expires_in = 0;
+                JsonNumber(body, "expires_in", expires_in);
+                std::scoped_lock done{g_announce.mutex};
+                g_announce.in_flight = false;
+                if (id.empty() || id == "0" || msg.empty() || expires_in <= 0 || id == g_announce.seen_id) return;
+                g_announce.seen_id = id;
+                g_announce.pending = msg;
+                std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                out << "id=" << id << "\nlevel=" << JsonText(body, "level") << "\nexpires="
+                    << int64_t(std::time(nullptr)) + expires_in << "\ntext=" << msg << "\n";
+            }).detach();
+        }
+    }
+    if (!text.empty()) a.notice = std::string(T("Aviso del servidor: ", "Server notice: ")) + text;
+}
+
 /// Called every frame: picks up finished background work.
+void ApplyRecoveredNick();
+
 void PollJobs() {
     App& a = g_app;
+    UpdateDiscord();
+    ApplyRecoveredNick();
+    PollAnnouncement();
+    DiscordPresence::SetAcceptJoinRequests(a.launcher.Flag("discord_accept_requests", true));
+    for (std::string secret; DiscordPresence::TakeJoin(secret);) OnDiscordJoin(secret);
+    if (a.pending_play && !a.game_running && GameReady()) {
+        a.pending_play = false;
+        PressPlay();
+    }
     if (a.probe_done && a.probe.joinable()) a.probe.join();
     if (!a.job_finished) return;
     const Job finished = a.job.exchange(Job::None);
@@ -878,14 +1579,26 @@ void PollJobs() {
         a.game_running = false;
         a.show_exit = true;
         a.game.Load(GameIni());  // the in-game menu may have changed settings
+        SyncOnlineBuffers();
+        {
+            std::scoped_lock lock{g_nick_check.mutex};  // a free nickname is now ours
+            g_nick_check.results.clear();
+        }
         a.saves_dirty = true;
-        ShowWindow(a.hwnd, SW_RESTORE);
-        SetForegroundWindow(a.hwnd);
+        if (a.hwnd) {
+            if (a.launcher.Flag("close_on_play", false)) {
+                PostQuitMessage(0);
+            } else {
+                ShowWindow(a.hwnd, SW_RESTORE);
+                SetForegroundWindow(a.hwnd);
+            }
+        }
     }
 }
 
 void StartProbe() {
     App& a = g_app;
+    if (a.probe.joinable()) a.probe.join();
     a.probe_done = false;
     a.probe = std::thread([] {
         App& app = g_app;
@@ -1163,6 +1876,7 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/60 FPS Unlock", "patch_60fps"},
     {"CrashTeamRacing.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
+    {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
 };
 
 std::string XmlUnescape(std::string s) {
@@ -1288,11 +2002,6 @@ void WritePatchConfig(const std::vector<std::string>& enabled, const std::vector
 // ---------------------------------------------------------------------------------------------
 // UI
 
-const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
-const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
-const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
-const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
-
 std::string Describe(const FolderInfo& f) {
     switch (f.kind) {
     case Kind::Empty: return T("sin elegir", "not chosen");
@@ -1354,6 +2063,9 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
     }
 }
 
+bool CreateDesktopShortcut(std::string& out_error);
+bool AddToSteam(std::string& out_msg);
+
 void PlayTab() {
     App& a = g_app;
     const bool busy = a.job != Job::None;
@@ -1388,6 +2100,26 @@ void PlayTab() {
             ImGui::TextColored(kYellow, "%s", T("Comprobando el juego...", "Checking the game..."));
         } else if (a.game_ok) {
             ImGui::TextColored(kGreen, "%s %s", T("Listo:", "Ready:"), Describe(a.game_info).c_str());
+            if (a.game.Flag("online", true)) {
+                std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
+                if (srv.empty()) srv = "octr.ryu7w7.xyz";
+                const std::string nick = CurrentNick().empty() ? std::string("-") : CurrentNick();
+                const std::string friends = a.game.Get("online_friends", "");
+                if (!friends.empty()) {
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s  |  %s: %s",
+                                       T("Servidor", "Server"), srv.c_str(),
+                                       T("Apodo", "Nick"), nick.c_str(),
+                                       T("Amigos", "Friends"), friends.c_str());
+                } else {
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
+                                       T("Servidor", "Server"), srv.c_str(),
+                                       T("Apodo", "Nick"), nick.c_str());
+                }
+                if (const char* problem = NickProblem(CurrentNick()))
+                    ImGui::TextColored(kYellow, "%s %s", problem, T("Se te pedirá al pulsar Jugar.", "You will be asked when you press Play."));
+            } else {
+                ImGui::TextColored(kGrey, "[Online] %s", T("Modo offline (actívalo en la pestaña Online)", "Offline mode (enable it in the Online tab)"));
+            }
         } else {
             ImGui::TextColored(kRed, "%s", T("Estos archivos no sirven:", "These files do not work:"));
             ImGui::PushTextWrapPos(0.0f);
@@ -1479,10 +2211,23 @@ void PlayTab() {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.45f, 0.20f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.58f, 0.26f, 1.0f));
         ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
-        if (ImGui::Button(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height))) StartGame();
+        if (ImGui::Button(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height))) PressPlay();
         ImGui::PopFont();
         ImGui::PopStyleColor(2);
         ImGui::EndDisabled();
+    }
+
+    if (ready && !a.game_running) {
+        ImGui::Spacing();
+        if (ImGui::Button(T("Crear acceso directo en el Escritorio", "Create Desktop Shortcut"))) {
+            std::string err;
+            if (CreateDesktopShortcut(err)) {
+                a.notice = T("Acceso directo creado en el Escritorio con éxito (inicia directo sin el launcher).",
+                             "Desktop shortcut created successfully (launches directly without launcher).");
+            } else {
+                a.notice = err;
+            }
+        }
     }
 
     std::string status;
@@ -1630,6 +2375,13 @@ void SettingsTab() {
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
 
     ImGui::SeparatorText(T("Pantalla", "Display"));
+    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
+             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
+               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
+               "Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
+               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+               "Needs a restart."));
     const std::string temporal = GameTemporal();
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
@@ -1697,6 +2449,8 @@ void SettingsTab() {
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
     }
     GameFlag("fullscreen", T("Pantalla completa", "Fullscreen"), false);
+    GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
+             T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
     GameFlag("show_fps", T("Contador de FPS en la esquina", "FPS counter in the corner"), false);
     {
         std::scoped_lock lock{a.mutex};
@@ -1721,6 +2475,20 @@ void SettingsTab() {
     }
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
     ChoiceCombo(T("Presentación", "Presentation"), "present_mode", kPresentModes, "Mailbox");
+
+    ImGui::SeparatorText(T("Sonido", "Sound"));
+    {
+        int volume = std::clamp(a.game.Int("volume", 100), 0, 200);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+        if (ImGui::SliderInt(T("Volumen del juego", "Game volume"), &volume, 0, 200, "%d%%")) {
+            a.game.Set("volume", std::to_string(volume));
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        HelpMarker(T("100% es el nivel al que se mezcló el juego. Por encima, los picos más fuertes se suavizan en vez "
+                     "de distorsionar. Mientras juegas también se cambia en el menú del juego (Insert o L3+R3).",
+                     "100% is the level the game was mixed at. Above it, the loudest peaks are rounded off instead of "
+                     "distorting. While you play it can also be changed in the in-game menu (Insert or L3+R3)."));
+    }
 
     ImGui::SeparatorText(T("Mando", "Controller"));
     {
@@ -1760,17 +2528,472 @@ void SettingsTab() {
         StartProbe();
     }
     ImGui::EndDisabled();
-    ImGui::TextColored(kGrey, "%s", T("El teclado funciona siempre a la vez. La pantalla dividida se asigna en el menú del juego.",
-                                      "The keyboard always works too. Split-screen ports are assigned in the in-game menu."));
+    {
+        // bbport.ini port.N=keyboard (N 2..4): that split-screen player plays on the keyboard and
+        // player 1 on the controller alone (src/runtime_pad.c). None: the keyboard drives player 1 too.
+        const auto port_key = [](int n) { return "port." + std::to_string(n); };
+        int current = 1;
+        for (int n = 2; n <= 4; ++n)
+            if (Lower(Trim(a.game.Get(port_key(n)))) == "keyboard") current = n;
+        const auto name = [](int n) {
+            return n == 1 ? std::string(T("Jugador 1 (junto al mando)", "Player 1 (with the controller)"))
+                          : std::string(T("Jugador ", "Player ")) + std::to_string(n);
+        };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+        if (ImGui::BeginCombo(T("Teclado", "Keyboard"), name(current).c_str())) {
+            for (int n = 1; n <= 4; ++n) {
+                if (!ImGui::Selectable(name(n).c_str(), n == current) || n == current) continue;
+                for (int k = 2; k <= 4; ++k)
+                    if (Lower(Trim(a.game.Get(port_key(k)))) == "keyboard") a.game.Set(port_key(k), "");
+                if (n > 1) a.game.Set(port_key(n), "keyboard");
+                SaveGameIni();
+            }
+            ImGui::EndCombo();
+        }
+        HelpMarker(T("Para jugar dos en pantalla dividida, uno con teclado y otro con mando, elige Jugador 2: el mando "
+                     "queda para el jugador 1 y el teclado para el 2 (Espacio es X). Si juegas solo con teclado, déjalo "
+                     "en Jugador 1. También se cambia en el menú del juego (Insert o L3+R3).",
+                     "For two players in split screen, one on the keyboard and one on a controller, choose Player 2: "
+                     "the controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on "
+                     "the keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."));
+    }
+    ImGui::TextColored(kGrey, "%s", T("Más mandos para la pantalla dividida: menú del juego (Insert o L3+R3), Controllers.",
+                                      "More controllers for split screen: in-game menu (Insert or L3+R3), Controllers."));
 
     ImGui::SeparatorText(T("Consola", "Console"));
     if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
     ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
     HelpMarker(T("Los idiomas que trae esta versión del juego (CUSA13795, América): inglés, español latinoamericano, "
-                 "francés y portugués de Brasil. El español de España no está en ella. Se aplica al pulsar Jugar.",
+                 "francés y portugués de Brasil. Sus archivos no tienen textos de otros idiomas: el español de España, "
+                 "el alemán, el italiano y los demás vienen solo en las versiones de otras regiones. Se aplica al "
+                 "pulsar Jugar.",
                  "The languages this build of the game has (CUSA13795, the Americas): English, Latin American "
-                 "Spanish, French and Brazilian Portuguese. Spain's Spanish is not in it. Applied when you press Play."));
+                 "Spanish, French and Brazilian Portuguese. Its files hold no text in other languages: Spain's "
+                 "Spanish, German, Italian and the rest come only in other regions' builds. Applied when you press "
+                 "Play."));
+
+    ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
+    LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
+                 T("Oculta completamente la ventana del launcher mientras juegas y la restaura automáticamente al salir.",
+                   "Hides the launcher window completely while playing and restores it automatically when exiting."));
+    LauncherFlag("close_on_play", T("Cerrar launcher tras jugar", "Close launcher after playing"), false,
+                 T("Cierra el launcher por completo una vez que sales del juego.",
+                   "Closes the launcher completely once you exit the game."));
+}
+
+/// Linking the nickname to the player's Discord account, so that a reinstall or another PC
+/// recovers it. The browser half is discord_link.cpp; the server trades the code for the
+/// account (ryunet-demonware-ctr/server/discord_link.go).
+struct DiscordLinkState {
+    std::mutex mutex;
+    bool busy = false;
+    bool error = false;
+    std::string message;     // the last outcome, under the buttons
+    std::string other_nick;  // "other_nick": the nickname this Discord account already has
+    std::string recovered;   // a recovered nickname for the UI thread to put in the field
+};
+DiscordLinkState g_discord_link;
+
+/// Link the current nickname, unlink it, or recover the Discord account's own nickname (for a
+/// reinstalled launcher that does not know it any more).
+enum class DiscordLinkMode { Link, Unlink, Recover };
+
+void StartDiscordLink(DiscordLinkMode mode) {
+    const bool unlink = mode == DiscordLinkMode::Unlink;
+    App& a = g_app;
+    const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+    const std::string nick = mode == DiscordLinkMode::Recover ? std::string() : CurrentNick();
+    const std::string app_id = DiscordAppId();
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        if (g_discord_link.busy) return;
+        g_discord_link.busy = true;
+        g_discord_link.error = false;
+        g_discord_link.message.clear();
+        g_discord_link.other_nick.clear();
+    }
+    std::thread([server, nick, app_id, unlink] {
+        std::string message, other, recovered;
+        bool error = true;
+        const auto form = [](const char* key, const std::string& value) {
+            return std::string(key) + "=" + DiscordLink::FormEncode(value);
+        };
+        if (unlink) {
+            const std::string body = HttpRequest(server, L"POST", L"/ryunet/discord/unlink", form("nick", nick), 10000);
+            if (JsonBool(body, "unlinked")) {
+                error = false;
+                message = T("Apodo desvinculado de Discord.", "Nickname unlinked from Discord.");
+            } else {
+                message = T("No se pudo desvincular.", "Could not unlink.");
+            }
+        } else {
+            const DiscordLink::Result auth = DiscordLink::Authorize(app_id, 180, g_spanish);
+            if (!auth.ok) {
+                message = auth.error == "denied"  ? T("Cancelaste la autorización en Discord.", "You cancelled the authorization in Discord.")
+                          : auth.error == "busy"  ? T("Los puertos 53134 a 53136 están ocupados: cierra otros launchers abiertos.",
+                                                      "Ports 53134 to 53136 are in use: close other open launchers.")
+                          : auth.error == "timeout" ? T("La autorización de Discord no llegó a tiempo (3 minutos).",
+                                                        "Discord's authorization did not arrive in time (3 minutes).")
+                                                    : T("No se pudo autorizar con Discord.", "Could not authorize with Discord.");
+            } else {
+                const std::string body =
+                    HttpRequest(server, L"POST", L"/ryunet/discord/link",
+                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000);
+                const std::string status = JsonField(body, "status"), account = JsonField(body, "discord");
+                if (status == "linked") {
+                    error = false;
+                    message = Format(T("Listo: %s queda vinculado a tu cuenta de Discord %s. Si reinstalas o cambias de PC, "
+                                       "pulsa Recuperar con Discord.",
+                                       "Done: %s is linked to your Discord account %s. If you reinstall or change PC, "
+                                       "press Recover with Discord."),
+                                     nick, account);
+                } else if (status == "recovered") {
+                    error = false;
+                    recovered = nick.empty() ? JsonField(body, "nick") : nick;
+                    message = Format(T("Recuperado: %s vuelve a ser tuyo en esta instalación (Discord: %s).",
+                                       "Recovered: %s is yours again on this installation (Discord: %s)."),
+                                     recovered, account);
+                } else if (status == "own_nick") {
+                    error = false;
+                    recovered = JsonField(body, "nick");
+                    message = Format(T("Esta instalación ya tenía el apodo %s, sin vincular a Discord. Ya está puesto: pulsa "
+                                       "Vincular con Discord para poder recuperarlo en cualquier PC.",
+                                       "This installation already had the nickname %s, not linked to Discord. It is filled "
+                                       "in: press Link with Discord to recover it on any PC."),
+                                     recovered);
+                } else if (status == "no_nick") {
+                    message = Format(T("Tu cuenta de Discord %s no tiene ningún apodo vinculado en este servidor: escribe "
+                                       "uno y pulsa Vincular con Discord.",
+                                       "Your Discord account %s has no nickname linked on this server: type one and "
+                                       "press Link with Discord."),
+                                     account);
+                } else if (status == "other_nick") {
+                    other = JsonField(body, "nick");
+                    message = Format(T("Tu cuenta de Discord ya tiene el apodo %s: cada cuenta tiene uno.",
+                                       "Your Discord account already has the nickname %s: one per account."),
+                                     other);
+                } else if (status == "taken") {
+                    message = T("Ese apodo es de otra persona o de otra cuenta de Discord.",
+                                "That nickname belongs to someone else or to another Discord account.");
+                } else if (status == "invalid" || status == "reserved") {
+                    message = T("El servidor no aceptó la solicitud.", "The server did not accept the request.");
+                } else if (body.empty()) {
+                    message = T("No se pudo contactar con el servidor.", "Could not reach the server.");
+                } else {
+                    message = T("El servidor no pudo confirmar la cuenta con Discord. Prueba otra vez.",
+                                "The server could not confirm the account with Discord. Try again.");
+                }
+            }
+        }
+        {
+            std::scoped_lock lock{g_discord_link.mutex};
+            g_discord_link.busy = false;
+            g_discord_link.error = error;
+            g_discord_link.message = message;
+            g_discord_link.other_nick = other;
+            g_discord_link.recovered = recovered;
+        }
+        std::scoped_lock lock{g_nick_check.mutex};  // ask the server for the new state
+        g_nick_check.results.clear();
+    }).detach();
+}
+
+/// The running authorization or the last outcome, with "Use <nickname>" when Discord named one.
+void DiscordLinkStatusLines() {
+    App& a = g_app;
+    bool busy, error;
+    std::string message, other;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        busy = g_discord_link.busy;
+        error = g_discord_link.error;
+        message = g_discord_link.message;
+        other = g_discord_link.other_nick;
+    }
+    if (busy) {
+        ImGui::TextColored(kGrey, "%s", T("Autoriza tu cuenta en la pestaña de Discord que se abrió en el navegador...",
+                                          "Authorize your account in the Discord tab that opened in the browser..."));
+        return;
+    }
+    if (message.empty()) return;
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(error ? kYellow : kGreen, "%s", message.c_str());
+    ImGui::PopTextWrapPos();
+    if (!other.empty() && ImGui::SmallButton(Format(T("Usar %s", "Use %s"), other).c_str())) {
+        std::snprintf(a.online_name_buf, sizeof a.online_name_buf, "%s", other.c_str());
+        a.game.Set("online_name", a.online_name_buf);
+        a.game.Set("user_name", a.online_name_buf);
+        SaveGameIni();
+        std::scoped_lock lock{g_discord_link.mutex};
+        g_discord_link.message.clear();
+        g_discord_link.other_nick.clear();
+    }
+}
+
+/// With no usable nickname yet (a reinstall, another PC): recover the one linked to Discord.
+void DiscordRecoverOffer() {
+    if (!DiscordLinkAvailable()) return;
+    bool busy;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        busy = g_discord_link.busy;
+    }
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button(T("Recuperar mi apodo con Discord", "Recover my nickname with Discord")))
+        StartDiscordLink(DiscordLinkMode::Recover);
+    ImGui::EndDisabled();
+    HelpMarker(T("¿Reinstalaste el juego o cambiaste de PC y tu apodo estaba vinculado a Discord? Autoriza la misma "
+                 "cuenta de Discord y el launcher pondrá tu apodo, aunque no lo recuerdes.",
+                 "Did you reinstall the game or change PC, and your nickname was linked to Discord? Authorize the "
+                 "same Discord account and the launcher fills in your nickname, even if you do not remember it."));
+    DiscordLinkStatusLines();
+}
+
+/// The recovered nickname, put in the field by the UI thread (PollJobs).
+void ApplyRecoveredNick() {
+    App& a = g_app;
+    std::string nick;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        nick.swap(g_discord_link.recovered);
+    }
+    if (nick.empty() || NickProblem(nick)) return;
+    std::snprintf(a.online_name_buf, sizeof a.online_name_buf, "%s", nick.c_str());
+    a.game.Set("online_name", a.online_name_buf);
+    a.game.Set("user_name", a.online_name_buf);
+    SaveGameIni();
+}
+
+/// Under the nickname: its Discord account, and Link / Recover / Unlink.
+void DiscordAccountSection() {
+    if (NickProblem(CurrentNick())) {
+        DiscordRecoverOffer();
+        return;
+    }
+    const NickCheck::Result info = NickInfo();
+    bool busy;
+    std::string message;
+    {
+        std::scoped_lock lock{g_discord_link.mutex};
+        busy = g_discord_link.busy;
+        message = g_discord_link.message;
+    }
+    if (!info.link_available && message.empty()) return;  // unknown yet, or this server cannot link
+    ImGui::BeginDisabled(busy);
+    if (info.status == "yours" && info.linked) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Cuenta de Discord: %s", "Discord account: %s"), info.discord).c_str());
+        ImGui::SameLine();
+        // Unlinking frees the nickname field and stops Discord recovery: a second press confirms.
+        static ULONGLONG unlink_armed = 0;
+        const bool armed = unlink_armed && GetTickCount64() - unlink_armed < 5000;
+        if (ImGui::SmallButton(armed ? T("Pulsa otra vez para desvincular", "Press again to unlink") : T("Desvincular", "Unlink"))) {
+            if (armed) {
+                unlink_armed = 0;
+                StartDiscordLink(DiscordLinkMode::Unlink);
+            } else {
+                unlink_armed = GetTickCount64();
+            }
+        }
+        if (!armed && ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", T("Deja de estar vinculado: podrás cambiar el apodo, pero ya no lo recuperarás con Discord "
+                                      "si reinstalas.",
+                                      "Unlinks it: you can change the nickname, but can no longer recover it with Discord "
+                                      "if you reinstall."));
+    } else if (info.status == "yours" || info.status == "free") {
+        if (ImGui::Button(T("Vincular con Discord", "Link with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
+        if (info.status == "free") {
+            // A reinstall shows a free nickname the player just typed; theirs may be linked.
+            ImGui::SameLine();
+            if (ImGui::SmallButton(T("¿Ya tenías un apodo vinculado? Recupéralo", "Had a linked nickname already? Recover it")))
+                StartDiscordLink(DiscordLinkMode::Recover);
+        }
+        HelpMarker(T("Tu apodo queda ligado a tu cuenta de Discord: si reinstalas el juego o juegas en otro PC, lo "
+                     "recuperas autorizando Discord otra vez. Se abre Discord en el navegador para que lo autorices; "
+                     "el launcher solo recibe tu identificador de Discord, nunca tu contraseña.",
+                     "Your nickname is tied to your Discord account: if you reinstall the game or play on another PC, "
+                     "you recover it by authorizing Discord again. Discord opens in the browser for you to authorize; "
+                     "the launcher only receives your Discord ID, never your password."));
+    } else if (info.status == "taken" && info.linked) {
+        if (ImGui::Button(T("Recuperar con Discord", "Recover with Discord"))) StartDiscordLink(DiscordLinkMode::Link);
+        HelpMarker(T("Si este apodo es tuyo, autoriza la misma cuenta de Discord con la que lo vinculaste y "
+                     "podrás usarlo en esta instalación.",
+                     "If this nickname is yours, authorize the same Discord account you linked it with and you can "
+                     "use it on this installation."));
+    } else if (info.status == "taken") {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kGrey, "%s",
+                           T("Si es tuyo y lo perdiste al reinstalar, pide al administrador del servidor que lo libere, "
+                             "o espera: un apodo sin vincular y sin uso se libera a los 60 días.",
+                             "If it is yours and you lost it when reinstalling, ask the server's administrator to "
+                             "release it, or wait: an unlinked nickname nobody uses is released after 60 days."));
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndDisabled();
+    DiscordLinkStatusLines();
+}
+
+void OnlineTab() {
+    App& a = g_app;
+    ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
+                                      "Online play through a RyuNET server. Applied when you press Play."));
+
+    ImGui::SeparatorText(T("Servidor", "Server"));
+    {
+        GameFlag("online", T("Habilitar modo online", "Enable online mode"), true,
+                 T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
+                   "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
+
+        const bool online_on = a.game.Flag("online", true);
+        ImGui::BeginDisabled(!online_on);
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20.0f);
+        if (ImGui::InputText(T("Servidor RyuNET (Server)", "RyuNET Server"), a.online_server_buf, sizeof(a.online_server_buf))) {
+            a.game.Set("online_server", a.online_server_buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            if (Trim(a.online_server_buf).empty()) {
+                std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
+                a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+                a.game.Set("online_server", a.online_server_buf);
+            }
+            SaveGameIni();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Por defecto", "Default"))) {
+            std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
+            a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+            a.game.Set("online_server", a.online_server_buf);
+            SaveGameIni();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("127.0.0.1")) {
+            std::strncpy(a.online_server_buf, "127.0.0.1", sizeof(a.online_server_buf) - 1);
+            a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+            a.game.Set("online_server", a.online_server_buf);
+            SaveGameIni();
+        }
+        HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
+                     "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SeparatorText(T("Jugador", "Player"));
+    {
+        ImGui::BeginDisabled(!a.game.Flag("online", true));
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+        // A nickname linked to this player's Discord account is their identity: it is changed by
+        // unlinking it first (DiscordAccountSection), not by typing over it.
+        const NickCheck::Result nick_info = NickInfo();
+        const bool nick_locked = nick_info.status == "yours" && nick_info.linked;
+        ImGui::BeginDisabled(nick_locked);
+        NickInput(T("Apodo (Nickname)", "Nickname"));
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        ImGui::EndDisabled();
+        HelpMarker(nick_locked
+                       ? T("Este apodo está vinculado a tu cuenta de Discord y queda fijo. Para cambiarlo, pulsa "
+                           "Desvincular abajo.",
+                           "This nickname is linked to your Discord account and stays fixed. To change it, press "
+                           "Unlink below.")
+                       : T("Tu nombre en el online, obligatorio: de 3 a 16 letras, números, _ o -. Cada apodo es una cuenta "
+                           "distinta en el servidor (monedas, objetos del Pit Stop), así que no uses el de otra persona.",
+                           "Your online name, required: 3 to 16 letters, digits, _ or -. Each nickname is a separate account "
+                           "on the server (coins, Pit Stop items), so do not use someone else's."));
+        if (const char* problem = NickProblem(CurrentNick())) {
+            ImGui::TextColored(kYellow, "%s", problem);
+            if (a.game.Flag("online", true)) DiscordRecoverOffer();
+        } else if (a.game.Flag("online", true)) {
+            NickAvailabilityLine();
+            DiscordAccountSection();
+        }
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+        if (ImGui::InputText(T("Amigos (Friends)", "Friends"), a.online_friends_buf, sizeof(a.online_friends_buf))) {
+            a.game.Set("online_friends", a.online_friends_buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        HelpMarker(T("Lista de amigos para Partidas Privadas, separados por comas (ejemplo: ESDRONIX,Amigo2).",
+                     "List of friends for Private Matches, separated by commas (example: ESDRONIX,Friend2)."));
+
+        // Which Pit Stop items (characters, skins, karts) count as yours online: the server's,
+        // bought with coins and tied to the nickname, or the save's (run.py sends it at login).
+        ImGui::Spacing();
+        ImGui::TextUnformatted(T("Personajes, skins y karts en online:", "Characters, skins and karts online:"));
+        const bool from_save = Lower(Trim(a.game.Get("online_inventory", "server"))) == "save";
+        if (ImGui::RadioButton(T("Progresión en el servidor", "Progress on the server"), !from_save)) {
+            a.game.Set("online_inventory", "server");
+            SaveGameIni();
+        }
+        HelpMarker(T("Lo consigues jugando: ganas monedas en las carreras y compras en el Pit Stop. Lo que compras "
+                     "queda guardado en el servidor, ligado a tu apodo.",
+                     "You earn it by playing: races give coins and you buy in the Pit Stop. What you buy is kept on "
+                     "the server, tied to your nickname."));
+        if (ImGui::RadioButton(T("De mi partida guardada (100%)", "From my save (100%)"), from_save)) {
+            a.game.Set("online_inventory", "save");
+            SaveGameIni();
+        }
+        HelpMarker(T("Online tienes lo mismo que en tu partida guardada, por ejemplo una partida al 100% importada en "
+                     "la pestaña Guardados. El Pit Stop no vende nada en este modo: no gastas monedas en objetos que no "
+                     "verías.",
+                     "Online you have what your save has, for example a 100% save imported in the Saves tab. The Pit "
+                     "Stop sells nothing in this mode: no coins are spent on items you would not see."));
+
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SeparatorText("Discord");
+    LauncherFlag("discord_rpc", T("Mostrar actividad en Discord", "Show activity on Discord"), true,
+                 T("Mientras juegas, tu estado de Discord muestra CTR Nitro-Fueled, si juegas online o sin conexión, "
+                   "tu apodo y el tiempo de juego. Necesita la aplicación de Discord abierta en este PC.",
+                   "While you play, your Discord status shows CTR Nitro-Fueled, whether you play online or offline, "
+                   "your nickname and the time played. Needs the Discord app running on this PC."));
+    if (a.launcher.Flag("discord_rpc", true)) {
+        const char* status = "";
+        ImVec4 color = kGrey;
+        switch (DiscordPresence::GetStatus()) {
+        case DiscordPresence::Status::Connected:
+            status = T("Conectado a Discord.", "Connected to Discord.");
+            color = ImVec4(0.45f, 0.8f, 0.45f, 1.0f);
+            break;
+        case DiscordPresence::Status::NoDiscord:
+            status = T("Discord no está abierto; se conectará solo cuando lo abras.",
+                       "Discord is not running; it connects on its own once you open it.");
+            break;
+        case DiscordPresence::Status::NoAppId:
+            status = T("Falta el ID de la aplicación de Discord (discord_app_id en launcher.ini).",
+                       "The Discord application ID is missing (discord_app_id in launcher.ini).");
+            color = kYellow;
+            break;
+        case DiscordPresence::Status::Error:
+            status = T("Discord rechazó la conexión:", "Discord refused the connection:");
+            color = kYellow;
+            break;
+        case DiscordPresence::Status::Off:
+            status = T("Conectando...", "Connecting...");
+            break;
+        }
+        ImGui::TextColored(color, "%s", status);
+        if (DiscordPresence::GetStatus() == DiscordPresence::Status::Error) {
+            ImGui::SameLine();
+            ImGui::TextColored(kGrey, "%s", DiscordPresence::LastError().c_str());
+        }
+
+        LauncherFlag("discord_accept_requests", T("Aceptar a quien pida unirse", "Accept people who ask to join"), true,
+                     T("Cuando alguien pulsa \"Pedir unirse\" en tu perfil, se le acepta solo: recibe lo mismo que con "
+                       "una invitación tuya (tu apodo y tu servidor).",
+                       "When someone presses \"Ask to Join\" on your profile, they are accepted automatically: they "
+                       "get the same as from an invite of yours (your nickname and your server)."));
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kGrey, "%s",
+                           T("Invitar a una privada o a tu grupo: mientras juegas online, en un chat de Discord pulsa "
+                             "+ y elige \"Invitar a jugar\". Quien acepte te tendrá en sus amigos y se le abrirá el "
+                             "juego; dentro, abre Amigos y únete a ti. Hace falta este launcher y Discord en los dos PC.",
+                             "Invite to a private match or your party: while you play online, press + in a Discord "
+                             "chat and choose \"Invite to play\". Whoever accepts gets you as a friend and their game "
+                             "starts; in it, they open Friends and join you. Both PCs need this launcher and Discord."));
+        ImGui::PopTextWrapPos();
+    }
 }
 
 void PatchesTab() {
@@ -1824,6 +3047,15 @@ void PatchesTab() {
         ImGui::PushTextWrapPos(0.0f);
         if (needs_neo) ImGui::TextColored(kGrey, "%s", T("Lo controla Ajustes > Resolución interna (1080p con el modo PS4 Pro).",
                                                           "Controlled by Settings > Internal resolution (1080p with PS4 Pro mode)."));
+        if (p.ini_key && std::strcmp(p.ini_key, "patch_unlock_all") == 0) {
+            ImGui::TextColored(kYellow, "%s",
+                               T("Desbloquea lo que el juego da al cumplir sus condiciones de desbloqueo, con el mismo "
+                                 "interruptor que usaban las demos de feria (E3/PAX). El autor recomienda copiar antes tu "
+                                 "partida (pestaña Guardados). Se aplica al iniciar el juego.",
+                                 "Unlocks what the game grants when its unlock conditions are met, with the same switch "
+                                 "the trade-show demos (E3/PAX) used. The author advises backing up your save first "
+                                 "(Saves tab). Applied when the game starts."));
+        }
         if (!p.note.empty()) ImGui::TextColored(kGrey, "%s", p.note.c_str());
         ImGui::TextColored(kGrey, "%s", p.key.c_str());
         ImGui::PopTextWrapPos();
@@ -1837,11 +3069,10 @@ void PatchesTab() {
                              "carpeta patches y pulsa Recargar. Solo aparecen los que son para CUSA13795 versión 01.21.",
                              "Copy patch .xml files in shadPS4 format (like PS-Game-Patch's or GoldHEN's) into the patches "
                              "folder and press Reload. Only those for CUSA13795 version 01.21 are listed."));
-    ImGui::TextColored(kGrey, "%s", T("Por ahora no existen trucos públicos para CTR Nitro-Fueled (como desbloquear todos los "
-                                      "personajes). Para tener el juego desbloqueado puedes importar una partida en la pestaña "
-                                      "Guardados.",
-                                      "There are no public cheats for CTR Nitro-Fueled yet (like unlocking every character). To "
-                                      "have the game unlocked you can import a save in the Saves tab."));
+    ImGui::TextColored(kGrey, "%s", T("Para tener el juego desbloqueado: activa Unlock Everything (arriba) o importa una partida "
+                                      "al 100% en la pestaña Guardados.",
+                                      "To have the game unlocked: turn on Unlock Everything (above) or import a 100% save in "
+                                      "the Saves tab."));
     ImGui::PopTextWrapPos();
     if (ImGui::Button(T("Abrir la carpeta de parches", "Open the patches folder"))) {
         std::error_code ec;
@@ -2169,6 +3400,74 @@ void DlcTab() {
     ImGui::TextColored(kGrey, "%s", T("Los cambios se aplican la próxima vez que pulses Jugar.", "Changes apply the next time you press Play."));
 }
 
+/// Asked when PLAY is pressed online without a usable nickname: the game only starts once one
+/// is chosen (or online is turned off for this launch).
+void NickPopup() {
+    App& a = g_app;
+    if (a.ask_nick) {
+        ImGui::OpenPopup("nick_required");
+        a.ask_nick = false;
+    }
+    if (!ImGui::BeginPopupModal("nick_required", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ImGui::TextUnformatted(T("Elige tu apodo para jugar online", "Choose your nickname to play online"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextColored(kGrey, "%s", T("Es tu nombre en el online y tu cuenta en el servidor: tus monedas y objetos del Pit Stop "
+                                      "van ligados a él. De 3 a 16 letras, números, _ o -.",
+                                      "It is your online name and your account on the server: your coins and Pit Stop items "
+                                      "belong to it. 3 to 16 letters, digits, _ or -."));
+    ImGui::PopTextWrapPos();
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+    NickInput(T("Apodo", "Nickname"));
+    const char* problem = NickProblem(CurrentNick());
+    if (problem) ImGui::TextColored(kYellow, "%s", problem);
+    else NickAvailabilityLine();
+    if (problem || NickTaken()) DiscordRecoverOffer();  // a reinstall: the nickname linked to Discord
+    ImGui::BeginDisabled(problem != nullptr || NickTaken());
+    if (ImGui::Button(T("Guardar y jugar", "Save and play"))) {
+        SaveGameIni();
+        ImGui::CloseCurrentPopup();
+        StartGame();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(T("Cancelar", "Cancel"))) {
+        a.game.Load(GameIni());  // drop what was typed: every other setting is already saved
+        SyncOnlineBuffers();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+/// A Discord invite for a server other than ours: switching is the player's call.
+void JoinServerPopup() {
+    App& a = g_app;
+    if (a.ask_join_server) {
+        ImGui::OpenPopup("join_server");
+        a.ask_join_server = false;
+    }
+    if (!ImGui::BeginPopupModal("join_server", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    ImGui::Text(T("Invitación de %s", "Invite from %s"), a.join_nick.c_str());
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    const std::string mine = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
+    ImGui::TextColored(kYellow, T("Es para el servidor %s y tú usas %s.", "It is for the server %s and you use %s."),
+                       a.join_server.c_str(), mine.c_str());
+    ImGui::TextColored(kGrey, "%s", T("Cámbialo solo si confías en ese servidor: verá tu apodo y tu partida online. "
+                                      "Puedes volver al tuyo en la pestaña Online.",
+                                      "Only switch if you trust that server: it will see your nickname and your online "
+                                      "play. You can switch back in the Online tab."));
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button(T("Cambiar de servidor y unirme", "Switch server and join"))) {
+        AcceptDiscordJoin(a.join_server, a.join_nick);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void SaveConfirmations() {
     App& a = g_app;
     if (a.pending_action) {
@@ -2409,6 +3708,664 @@ void KeyboardTab() {
                                       "Grey: default key. Keys go by their place on the keyboard."));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Gamepad tab: bbport.ini pad.<input>=<SDL gamepad button names> (src/runtime_pad.c reads them).
+
+struct PadInput {
+    const char* id;
+    const char* es;
+    const char* en;
+    const char* fallback;
+};
+
+constexpr PadInput kPadInputs[] = {
+    {"cross", "X (Acelerar / Seleccionar)", "Cross (Accelerate / Select)", "a"},
+    {"square", "Cuadrado (Frenar / Marcha atrás)", "Square (Brake / Reverse)", "x"},
+    {"circle", "Círculo", "Circle", "b"},
+    {"triangle", "Triángulo", "Triangle", "y"},
+    {"l1", "L1 / LB (Salto / Derrape)", "L1 / LB (Hop / Drift)", "leftshoulder"},
+    {"r1", "R1 / RB (Salto / Derrape)", "R1 / RB (Hop / Drift)", "rightshoulder"},
+    {"l2", "L2 / LT (Usar objeto / Ítem)", "L2 / LT (Use item)", "lefttrigger"},
+    {"r2", "R2 / RT (Mirar atrás)", "R2 / RT (Look back)", "righttrigger"},
+    {"l3", "L3 (Click stick izq.)", "L3 (Left stick click)", "leftstick"},
+    {"r3", "R3 (Click stick der.)", "R3 (Right stick click)", "rightstick"},
+    {"options", "Options / Start (Pausa)", "Options / Start (Pause)", "start"},
+    {"touchpad", "Touchpad / Back / Select", "Touchpad / Back / Select", "back,touchpad"},
+    {"up", "Cruceta arriba", "D-pad up", "dpup"},
+    {"down", "Cruceta abajo", "D-pad down", "dpdown"},
+    {"left", "Cruceta izquierda", "D-pad left", "dpleft"},
+    {"right", "Cruceta derecha", "D-pad right", "dpright"},
+};
+
+std::string PadButtonLabel(const std::string& name) {
+    static const std::map<std::string, std::pair<const char*, const char*>> labels = {
+        {"a", {"Cruz / A (Sur)", "Cross / A (South)"}},
+        {"b", {"Círculo / B (Este)", "Circle / B (East)"}},
+        {"x", {"Cuadrado / X (Oeste)", "Square / X (West)"}},
+        {"y", {"Triángulo / Y (Norte)", "Triangle / Y (North)"}},
+        {"leftshoulder", {"L1 / LB", "L1 / LB"}},
+        {"rightshoulder", {"R1 / RB", "R1 / RB"}},
+        {"lefttrigger", {"Gatillo L2 / LT", "Trigger L2 / LT"}},
+        {"righttrigger", {"Gatillo R2 / RT", "Trigger R2 / RT"}},
+        {"leftstick", {"Click L3 (Stick Izq.)", "L3 Click (Left Stick)"}},
+        {"rightstick", {"Click R3 (Stick Der.)", "R3 Click (Right Stick)"}},
+        {"start", {"Options / Start", "Options / Start"}},
+        {"back", {"Share / Back / Select", "Share / Back / Select"}},
+        {"touchpad", {"Touchpad", "Touchpad"}},
+        {"dpup", {"Cruceta Arriba", "D-pad Up"}},
+        {"dpdown", {"Cruceta Abajo", "D-pad Down"}},
+        {"dpleft", {"Cruceta Izquierda", "D-pad Left"}},
+        {"dpright", {"Cruceta Derecha", "D-pad Right"}},
+        {"guide", {"Botón Guía / PS", "Guide / PS"}},
+        {"misc1", {"Captura / Misc", "Capture / Misc"}},
+        {"paddle1", {"Palanca 1", "Paddle 1"}},
+        {"paddle2", {"Palanca 2", "Paddle 2"}},
+        {"paddle3", {"Palanca 3", "Paddle 3"}},
+        {"paddle4", {"Palanca 4", "Paddle 4"}},
+    };
+    const auto it = labels.find(name);
+    return it != labels.end() ? T(it->second.first, it->second.second) : name;
+}
+
+#pragma pack(push, 1)
+struct LauncherXInputGamepad {
+    WORD wButtons;
+    BYTE bLeftTrigger;
+    BYTE bRightTrigger;
+    SHORT sThumbLX;
+    SHORT sThumbLY;
+    SHORT sThumbRX;
+    SHORT sThumbRY;
+};
+struct LauncherXInputState {
+    DWORD dwPacketNumber;
+    LauncherXInputGamepad Gamepad;
+};
+#pragma pack(pop)
+
+typedef DWORD (WINAPI *PFN_LauncherXInputGetState)(DWORD dwUserIndex, void* pState);
+
+const char* PollGamepadButton() {
+    static HMODULE s_xinput = nullptr;
+    static PFN_LauncherXInputGetState s_getState = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        s_xinput = LoadLibraryA("xinput1_4.dll");
+        if (!s_xinput) s_xinput = LoadLibraryA("xinput1_3.dll");
+        if (!s_xinput) s_xinput = LoadLibraryA("xinput9_1_0.dll");
+        if (s_xinput) {
+            s_getState = (PFN_LauncherXInputGetState)GetProcAddress(s_xinput, "XInputGetState");
+        }
+    }
+    if (!s_getState) return nullptr;
+
+    for (DWORD i = 0; i < 4; ++i) {
+        LauncherXInputState state{};
+        if (s_getState(i, &state) == 0) {
+            if (state.Gamepad.bLeftTrigger > 80) return "lefttrigger";
+            if (state.Gamepad.bRightTrigger > 80) return "righttrigger";
+            if (state.Gamepad.wButtons & 0x1000) return "a";
+            if (state.Gamepad.wButtons & 0x2000) return "b";
+            if (state.Gamepad.wButtons & 0x4000) return "x";
+            if (state.Gamepad.wButtons & 0x8000) return "y";
+            if (state.Gamepad.wButtons & 0x0100) return "leftshoulder";
+            if (state.Gamepad.wButtons & 0x0200) return "rightshoulder";
+            if (state.Gamepad.wButtons & 0x0040) return "leftstick";
+            if (state.Gamepad.wButtons & 0x0080) return "rightstick";
+            if (state.Gamepad.wButtons & 0x0010) return "start";
+            if (state.Gamepad.wButtons & 0x0020) return "back";
+            if (state.Gamepad.wButtons & 0x0001) return "dpup";
+            if (state.Gamepad.wButtons & 0x0002) return "dpdown";
+            if (state.Gamepad.wButtons & 0x0004) return "dpleft";
+            if (state.Gamepad.wButtons & 0x0008) return "dpright";
+        }
+    }
+    return nullptr;
+}
+
+std::atomic<int> g_pad_capture{-1};
+bool g_pad_waiting_release = false;
+
+void GamepadTab() {
+    App& a = g_app;
+    ImGui::TextWrapped("%s", T("Mapeo de botones del mando (Jugador 1). Compatible con mandos de Xbox, PlayStation (DualShock / DualSense), Switch Pro y mandos genéricos. "
+                               "Pulsa \"Cambiar\" y presiona el botón en tu mando o selecciónalo en la pantalla. Se guarda en bbport.ini y se aplica en el próximo inicio.",
+                               "Player 1 gamepad button mapping. Supports Xbox, PlayStation (DualShock / DualSense), Switch Pro and generic controllers. "
+                               "Press \"Change\" and press the button on your controller or choose it on screen. Saved to bbport.ini, applies on next launch."));
+
+    const int capturing = g_pad_capture;
+    if (capturing >= 0) {
+        const char* polled = PollGamepadButton();
+        if (g_pad_waiting_release) {
+            if (!polled) g_pad_waiting_release = false;
+        } else if (polled) {
+            const PadInput& in = kPadInputs[capturing];
+            a.game.Set(std::string("pad.") + in.id, polled);
+            SaveGameIni();
+            g_pad_capture = -1;
+        }
+    }
+
+    if (capturing >= 0 && capturing < int(std::size(kPadInputs))) {
+        const PadInput& in = kPadInputs[capturing];
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Border, kYellow);
+        ImGui::BeginChild("pad_assign_box", ImVec2(0, 160), true);
+        ImGui::TextColored(kYellow, "%s: %s", T("ASIGNAR BOTÓN PARA", "ASSIGN BUTTON FOR"), T(in.es, in.en));
+        ImGui::TextColored(kGrey, "%s", T("Presiona cualquier botón o gatillo en tu mando, o haz clic en uno de abajo:",
+                                          "Press any button or trigger on your controller, or click one below:"));
+        ImGui::Spacing();
+
+        auto AddBtn = [&](const char* id, const char* label) {
+            if (ImGui::Button(label)) {
+                a.game.Set(std::string("pad.") + in.id, id);
+                SaveGameIni();
+                g_pad_capture = -1;
+            }
+            ImGui::SameLine();
+        };
+
+        AddBtn("a", "Cruz / A");
+        AddBtn("b", "Círculo / B");
+        AddBtn("x", "Cuadrado / X");
+        AddBtn("y", "Triángulo / Y");
+        AddBtn("leftshoulder", "L1 / LB");
+        AddBtn("rightshoulder", "R1 / RB");
+        ImGui::NewLine();
+        AddBtn("lefttrigger", "Gatillo L2 / LT");
+        AddBtn("righttrigger", "Gatillo R2 / RT");
+        AddBtn("dpup", "Cruceta Arriba");
+        AddBtn("dpdown", "Cruceta Abajo");
+        AddBtn("dpleft", "Cruceta Izq.");
+        AddBtn("dpright", "Cruceta Der.");
+        ImGui::NewLine();
+        AddBtn("leftstick", "L3 (Stick Izq.)");
+        AddBtn("rightstick", "R3 (Stick Der.)");
+        AddBtn("start", "Start / Options");
+        AddBtn("back", "Select / Back");
+        AddBtn("touchpad", "Touchpad");
+        if (ImGui::Button(T("Cancelar (Esc)", "Cancel (Esc)"))) {
+            g_pad_capture = -1;
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+    }
+
+    ImGui::SeparatorText(T("Botones del mando", "Gamepad buttons"));
+    if (ImGui::BeginTable("pad_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn(T("Acción", "Action"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn(T("Botón asignado", "Assigned button"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11.0f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < int(std::size(kPadInputs)); ++i) {
+            const PadInput& in = kPadInputs[i];
+            const std::string key = std::string("pad.") + in.id;
+            const bool custom = a.game.values.count(key) > 0;
+            const auto buttons = SplitKeys(custom ? a.game.Get(key) : in.fallback);
+
+            ImGui::PushID(i + 200);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T(in.es, in.en));
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            if (capturing == i) {
+                ImGui::TextColored(kYellow, "%s", T("Esperando botón...", "Waiting for button..."));
+            } else if (buttons.empty()) {
+                ImGui::TextColored(kGrey, "%s", T("(sin botón asignado)", "(unbound)"));
+            } else {
+                std::string text;
+                for (const auto& b : buttons) text += (text.empty() ? "" : "  /  ") + PadButtonLabel(b);
+                if (custom) ImGui::TextUnformatted(text.c_str());
+                else ImGui::TextColored(kGrey, "%s", text.c_str());
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(capturing >= 0);
+            if (ImGui::SmallButton(T("Cambiar", "Change"))) {
+                g_pad_capture = i;
+                g_pad_waiting_release = (PollGamepadButton() != nullptr);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(T("Quitar", "Clear"))) {
+                a.game.Set(key, "");
+                SaveGameIni();
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!custom);
+            if (ImGui::SmallButton(T("Original", "Default"))) {
+                a.game.Erase(key);
+                SaveGameIni();
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText(T("Preajustes rápidos", "Quick presets"));
+    ImGui::BeginDisabled(capturing >= 0);
+    if (ImGui::Button(T("Cruceta Abajo = L2 (Usar Ítem)", "D-pad Down = L2 (Use Item)"))) {
+        a.game.Set("pad.l2", "dpdown");
+        a.game.Set("pad.down", "lefttrigger");
+        SaveGameIni();
+        a.notice = T("Preajuste aplicado: Cruceta Abajo configurada como L2 (Ítem) y Gatillo L2 como Cruceta Abajo.",
+                     "Preset applied: D-pad Down set to L2 (Item) and Trigger L2 set to D-pad Down.");
+    }
+    HelpMarker(T("Intercambia la Cruceta Abajo con el Gatillo L2. Ideal para disparar objetos con la flecha de abajo.",
+                 "Swaps D-pad Down with Trigger L2. Ideal for using items with down arrow."));
+    ImGui::SameLine();
+    if (ImGui::Button(T("Restaurar todos los botones", "Restore all pad buttons"))) {
+        for (const auto& in : kPadInputs) a.game.Erase(std::string("pad.") + in.id);
+        SaveGameIni();
+        a.notice = T("Todos los botones del mando se restauraron a los valores originales.",
+                     "All gamepad buttons restored to defaults.");
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::TextColored(kGrey, "%s", T("Gris: asignación por defecto. Blanco: botón personalizado guardado en bbport.ini.",
+                                      "Grey: default binding. White: custom binding saved to bbport.ini."));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shortcuts & Steam integration (Desktop shortcut and Steam custom artwork / shortcuts.vdf)
+
+uint32_t Crc32(const void* data, size_t size) {
+    static uint32_t table[256];
+    static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; ++j)
+                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        init = true;
+    }
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i)
+        c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    return ~c;
+}
+
+fs::path FindSteamPath() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        wchar_t buf[MAX_PATH];
+        DWORD size = sizeof(buf);
+        DWORD type = 0;
+        if (RegQueryValueExW(key, L"SteamPath", nullptr, &type, (LPBYTE)buf, &size) == ERROR_SUCCESS) {
+            RegCloseKey(key);
+            std::wstring s = buf;
+            std::replace(s.begin(), s.end(), L'/', L'\\');
+            return fs::path(s);
+        }
+        RegCloseKey(key);
+    }
+    for (const auto& p : {L"C:\\Program Files (x86)\\Steam", L"C:\\Program Files\\Steam", L"D:\\Steam"}) {
+        std::error_code ec;
+        if (fs::is_directory(p, ec)) return fs::path(p);
+    }
+    return {};
+}
+
+struct SteamShortcut {
+    uint32_t appid = 0;
+    std::string app_name;
+    std::string exe;
+    std::string start_dir;
+    std::string icon;
+    std::string shortcut_path;
+    std::string launch_options;
+    int32_t is_hidden = 0;
+    int32_t allow_desktop_config = 1;
+    int32_t allow_overlay = 1;
+    int32_t open_vr = 0;
+    int32_t devkit = 0;
+    std::string devkit_game_id;
+    int32_t devkit_override_app_id = 0;
+    int32_t last_play_time = 0;
+    std::string flatpak_app_id;
+    std::string sortas;
+    std::vector<std::string> tags;
+};
+
+[[maybe_unused]] std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
+    std::vector<SteamShortcut> list;
+    size_t i = 0;
+    auto read_sz = [&]() -> std::string {
+        size_t start = i;
+        while (i < buf.size() && buf[i] != 0) ++i;
+        std::string s(reinterpret_cast<const char*>(&buf[start]), i - start);
+        if (i < buf.size()) ++i;
+        return s;
+    };
+    if (buf.size() < 12 || buf[i++] != 0) return list;
+    std::string root = read_sz();
+    if (root != "shortcuts") return list;
+    while (i < buf.size() && buf[i] != 8) {
+        if (buf[i++] != 0) break;
+        std::string idx = read_sz();
+        SteamShortcut sc;
+        auto iequals = [](const std::string& s1, const std::string& s2) {
+            if (s1.size() != s2.size()) return false;
+            for (size_t k = 0; k < s1.size(); ++k)
+                if (::tolower((unsigned char)s1[k]) != ::tolower((unsigned char)s2[k])) return false;
+            return true;
+        };
+        while (i < buf.size() && buf[i] != 8) {
+            uint8_t type = buf[i++];
+            std::string key = read_sz();
+            if (type == 1) { // String
+                std::string val = read_sz();
+                if (iequals(key, "appname")) sc.app_name = val;
+                else if (iequals(key, "exe")) sc.exe = val;
+                else if (iequals(key, "startdir")) sc.start_dir = val;
+                else if (iequals(key, "icon")) sc.icon = val;
+                else if (iequals(key, "shortcutpath")) sc.shortcut_path = val;
+                else if (iequals(key, "launchoptions")) sc.launch_options = val;
+                else if (iequals(key, "devkitgameid")) sc.devkit_game_id = val;
+                else if (iequals(key, "flatpakappid")) sc.flatpak_app_id = val;
+                else if (iequals(key, "sortas")) sc.sortas = val;
+            } else if (type == 2) { // Int32
+                if (i + 4 > buf.size()) break;
+                uint32_t val = 0;
+                std::memcpy(&val, &buf[i], 4);
+                i += 4;
+                if (iequals(key, "appid")) sc.appid = val;
+                else if (iequals(key, "ishidden")) sc.is_hidden = val;
+                else if (iequals(key, "allowdesktopconfig")) sc.allow_desktop_config = val;
+                else if (iequals(key, "allowoverlay")) sc.allow_overlay = val;
+                else if (iequals(key, "openvr")) sc.open_vr = val;
+                else if (iequals(key, "devkit")) sc.devkit = val;
+                else if (iequals(key, "devkitoverrideappid")) sc.devkit_override_app_id = val;
+                else if (iequals(key, "lastplaytime")) sc.last_play_time = val;
+            } else if (type == 0) { // Submap, e.g. tags
+                while (i < buf.size() && buf[i] != 8) {
+                    uint8_t subtype = buf[i++];
+                    std::string tag_idx = read_sz();
+                    if (subtype == 1) sc.tags.push_back(read_sz());
+                    else if (subtype == 2) i += 4;
+                }
+                if (i < buf.size() && buf[i] == 8) ++i;
+            }
+        }
+        if (i < buf.size() && buf[i] == 8) ++i;
+        list.push_back(sc);
+    }
+    return list;
+}
+
+[[maybe_unused]] std::vector<uint8_t> SerializeShortcuts(const std::vector<SteamShortcut>& list) {
+    std::vector<uint8_t> out;
+    auto write_byte = [&](uint8_t b) { out.push_back(b); };
+    auto write_sz = [&](const std::string& s) {
+        out.insert(out.end(), s.begin(), s.end());
+        out.push_back(0);
+    };
+    auto write_str = [&](const std::string& key, const std::string& val) {
+        write_byte(1);
+        write_sz(key);
+        write_sz(val);
+    };
+    auto write_int = [&](const std::string& key, int32_t val) {
+        write_byte(2);
+        write_sz(key);
+        uint8_t b[4];
+        std::memcpy(b, &val, 4);
+        out.insert(out.end(), b, b + 4);
+    };
+
+    write_byte(0);
+    write_sz("shortcuts");
+    for (size_t idx = 0; idx < list.size(); ++idx) {
+        const auto& sc = list[idx];
+        write_byte(0);
+        write_sz(std::to_string(idx));
+        write_int("appid", sc.appid);
+        write_str("appname", sc.app_name);
+        write_str("exe", sc.exe);
+        write_str("StartDir", sc.start_dir);
+        write_str("icon", sc.icon);
+        write_str("ShortcutPath", sc.shortcut_path);
+        write_str("LaunchOptions", sc.launch_options);
+        write_int("IsHidden", sc.is_hidden);
+        write_int("AllowDesktopConfig", sc.allow_desktop_config);
+        write_int("AllowOverlay", sc.allow_overlay);
+        write_int("OpenVR", sc.open_vr);
+        write_int("Devkit", sc.devkit);
+        write_str("DevkitGameID", sc.devkit_game_id);
+        write_int("DevkitOverrideAppID", sc.devkit_override_app_id);
+        write_int("LastPlayTime", sc.last_play_time);
+        write_str("FlatpakAppID", sc.flatpak_app_id);
+        write_str("sortas", sc.sortas);
+        write_byte(0);
+        write_sz("tags");
+        for (size_t t = 0; t < sc.tags.size(); ++t) {
+            write_byte(1);
+            write_sz(std::to_string(t));
+            write_sz(sc.tags[t]);
+        }
+        write_byte(8);
+        write_byte(8);
+    }
+    write_byte(8);
+    return out;
+}
+
+bool CreateDesktopShortcut(std::string& out_error) {
+    App& a = g_app;
+    wchar_t desktop[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop))) {
+        out_error = T("No se pudo obtener la ruta del Escritorio.", "Could not get Desktop path.");
+        return false;
+    }
+    fs::path link_path = fs::path(desktop) / L"CTR Nitro-Fueled.lnk";
+    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
+    std::error_code ec;
+    if (!fs::is_regular_file(target_exe, ec)) {
+        wchar_t mod_path[MAX_PATH];
+        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
+        target_exe = mod_path;
+    }
+
+    IShellLinkW* psl = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl);
+    if (FAILED(hr)) {
+        out_error = T("Error inicializando IShellLink.", "Error initializing IShellLink.");
+        return false;
+    }
+    psl->SetPath(target_exe.c_str());
+    psl->SetArguments(L"--launch");
+    psl->SetWorkingDirectory(a.root.c_str());
+    psl->SetDescription(L"Crash Team Racing Nitro-Fueled PC");
+
+    fs::path icon = a.root / L"packaging" / L"windows" / L"icons" / L"ctr.ico";
+    if (fs::is_regular_file(icon, ec)) {
+        psl->SetIconLocation(icon.c_str(), 0);
+    } else {
+        psl->SetIconLocation(target_exe.c_str(), 0);
+    }
+
+    IPersistFile* ppf = nullptr;
+    hr = psl->QueryInterface(IID_IPersistFile, (void**)&ppf);
+    if (SUCCEEDED(hr)) {
+        hr = ppf->Save(link_path.c_str(), TRUE);
+        ppf->Release();
+    }
+    psl->Release();
+    if (FAILED(hr)) {
+        out_error = T("No se pudo guardar el acceso directo en el Escritorio.", "Could not save shortcut to Desktop.");
+        return false;
+    }
+    return true;
+}
+
+[[maybe_unused]] bool AddToSteam(std::string& out_msg) {
+    App& a = g_app;
+    fs::path steam_path = FindSteamPath();
+    if (steam_path.empty()) {
+        out_msg = T("No se encontró la instalación de Steam en este equipo.", "Steam installation not found on this computer.");
+        return false;
+    }
+    fs::path userdata = steam_path / L"userdata";
+    std::error_code ec;
+    if (!fs::is_directory(userdata, ec)) {
+        out_msg = T("No se encontró la carpeta userdata de Steam.", "Steam userdata folder not found.");
+        return false;
+    }
+
+    bool steam_was_running = false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe{sizeof pe};
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
+                    steam_was_running = true;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+
+    if (steam_was_running) {
+        fs::path steam_exe = steam_path / L"steam.exe";
+        if (fs::is_regular_file(steam_exe, ec)) {
+            RunCaptured(steam_exe.wstring(), Quote(steam_exe.wstring()) + L" -shutdown", steam_path, 4000);
+            Sleep(1500);
+        }
+    }
+
+    fs::path assets_dir;
+    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid",
+                                  fs::path(L"C:\\Users\\RyuPC\\Downloads\\steamgrid")}) {
+        if (fs::is_directory(candidate, ec)) {
+            assets_dir = candidate;
+            break;
+        }
+    }
+
+    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
+    if (!fs::is_regular_file(target_exe, ec)) {
+        wchar_t mod_path[MAX_PATH];
+        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
+        target_exe = mod_path;
+    }
+
+    const std::string app_name = "Crash Team Racing Nitro-Fueled";
+    const std::string exe_str = "\"" + PathText(target_exe) + "\"";
+    const std::string start_dir_str = "\"" + PathText(a.root) + "\"";
+
+    fs::path icon_path;
+    if (!assets_dir.empty() && fs::is_regular_file(assets_dir / L"icono.jpg", ec)) {
+        icon_path = assets_dir / L"icono.jpg";
+    } else if (fs::is_regular_file(a.root / L"packaging" / L"windows" / L"icons" / L"ctr.ico", ec)) {
+        icon_path = a.root / L"packaging" / L"windows" / L"icons" / L"ctr.ico";
+    } else {
+        icon_path = target_exe;
+    }
+
+    const std::string key = exe_str + app_name;
+    const uint32_t crc = Crc32(key.data(), key.size());
+    const uint32_t appid = crc | 0x80000000;
+    const std::string id32 = std::to_string(appid);
+    const std::string id64 = std::to_string(((uint64_t)appid << 32) | 0x02000000);
+
+    int profiles_updated = 0;
+    for (const auto& entry : fs::directory_iterator(userdata, fs::directory_options::skip_permission_denied, ec)) {
+        if (!entry.is_directory()) continue;
+        const std::string dirname = entry.path().filename().string();
+        if (dirname.empty() || !std::all_of(dirname.begin(), dirname.end(), ::isdigit)) continue;
+
+        fs::path config_dir = entry.path() / L"config";
+        fs::path grid_dir = config_dir / L"grid";
+        fs::create_directories(grid_dir, ec);
+
+        if (!assets_dir.empty()) {
+            const std::pair<const wchar_t*, const char*> mapping[] = {
+                {L"portada.png", "p.png"},
+                {L"fondo.png", "_hero.png"},
+                {L"logo.png", "_logo.png"},
+                {L"portada_ancha.png", ".png"},
+                {L"icono.jpg", "_icon.jpg"}
+            };
+            for (const auto& [src_name, suffix] : mapping) {
+                fs::path src = assets_dir / src_name;
+                if (fs::is_regular_file(src, ec)) {
+                    fs::copy_file(src, grid_dir / TextPath(id32 + suffix), fs::copy_options::overwrite_existing, ec);
+                    fs::copy_file(src, grid_dir / TextPath(id64 + suffix), fs::copy_options::overwrite_existing, ec);
+                }
+            }
+        }
+
+        fs::path vdf_path = config_dir / L"shortcuts.vdf";
+        std::vector<SteamShortcut> shortcuts;
+        if (fs::is_regular_file(vdf_path, ec)) {
+            std::ifstream f(vdf_path, std::ios::binary);
+            if (f) {
+                std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                shortcuts = ParseShortcuts(buf);
+            }
+        }
+
+        bool found = false;
+        for (auto& sc : shortcuts) {
+            if (sc.app_name == app_name || sc.exe.find("CTR-NitroFueled-PC.exe") != std::string::npos) {
+                sc.appid = appid;
+                sc.app_name = app_name;
+                sc.exe = exe_str;
+                sc.start_dir = start_dir_str;
+                sc.icon = PathText(icon_path);
+                sc.launch_options = "--launch";
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            SteamShortcut sc;
+            sc.appid = appid;
+            sc.app_name = app_name;
+            sc.exe = exe_str;
+            sc.start_dir = start_dir_str;
+            sc.icon = PathText(icon_path);
+            sc.launch_options = "--launch";
+            shortcuts.push_back(sc);
+        }
+
+        auto serialized = SerializeShortcuts(shortcuts);
+        std::ofstream out(vdf_path, std::ios::binary | std::ios::trunc);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
+            profiles_updated++;
+        }
+    }
+
+    if (profiles_updated > 0) {
+        if (steam_was_running) {
+            out_msg = T("¡Añadido a Steam con portadas con éxito!\nSteam se cerró automáticamente para aplicar los cambios; vuelve a abrirlo para ver el juego en tu biblioteca.",
+                        "Successfully added to Steam with custom artwork!\nSteam was closed automatically to apply changes; reopen it to see the game in your library.");
+        } else {
+            out_msg = T("¡Añadido a Steam con portadas con éxito!\nAbre Steam para ver el juego en tu biblioteca.",
+                        "Successfully added to Steam with custom artwork!\nOpen Steam to see the game in your library.");
+        }
+        return true;
+    } else {
+        out_msg = T("No se encontró ningún perfil de usuario en Steam.", "No user profiles found in Steam.");
+        return false;
+    }
+}
+
 void ToolsTab() {
     App& a = g_app;
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
@@ -2425,6 +4382,19 @@ void ToolsTab() {
                                "Save a detailed log (logs\\, with frame statistics)"), false,
                  T("Para reportar fallos o tirones: adjunta el archivo de logs\\ en un issue.",
                    "To report crashes or stutter: attach the file from logs\\ to an issue."));
+
+    ImGui::SeparatorText(T("Acceso directo", "Desktop shortcut"));
+    if (ImGui::Button(T("Crear acceso directo en el Escritorio", "Create Desktop Shortcut"))) {
+        std::string err;
+        if (CreateDesktopShortcut(err)) {
+            a.notice = T("Acceso directo creado en el Escritorio con éxito (inicia directo sin el launcher).",
+                         "Desktop shortcut created successfully (launches directly without launcher).");
+        } else {
+            a.notice = err;
+        }
+    }
+    HelpMarker(T("Crea un acceso directo en tu Escritorio para iniciar directamente el juego con su icono sin abrir la ventana del launcher.",
+                 "Creates a shortcut on your Desktop to start the game directly with its icon without the launcher window."));
 
     ImGui::SeparatorText(T("Caché de shaders", "Shader cache"));
     ImGui::PushTextWrapPos(0.0f);
@@ -2519,6 +4489,20 @@ void Frame() {
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Online")) {
+            ImGui::BeginChild("online");
+            OnlineTab();
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(T("Mando", "Gamepad"))) {
+            ImGui::BeginChild("gamepad");
+            GamepadTab();
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        } else if (g_pad_capture >= 0) {
+            g_pad_capture = -1;
+        }
         if (ImGui::BeginTabItem(T("Teclado", "Keyboard"))) {
             ImGui::BeginChild("keyboard");
             KeyboardTab();
@@ -2553,6 +4537,8 @@ void Frame() {
     }
 
     SaveConfirmations();
+    NickPopup();
+    JoinServerPopup();
     if (a.confirm_clear_cache) {
         ImGui::OpenPopup("clear_cache");
         a.confirm_clear_cache = false;
@@ -2605,6 +4591,7 @@ void LoadState() {
     }
     a.launcher.Load(LauncherIni());
     a.game.Load(GameIni());
+    SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
     g_spanish = lang.empty() ? PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH : lang == "es";
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
@@ -2692,6 +4679,13 @@ void CleanupDevice() {
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // Gamepad tab: Esc cancels capture
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_pad_capture >= 0) {
+        if (wparam == VK_ESCAPE) {
+            g_pad_capture = -1;
+            return 0;
+        }
+    }
     // Keyboard tab: the next key's scan code, before ImGui sees it.
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_key_capture >= 0) {
         const unsigned code = unsigned((lparam >> 16) & 0xff) | ((lparam & (1 << 24)) ? 0x100u : 0u);
@@ -2753,6 +4747,49 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 #endif
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    int cmd_argc = 0;
+    LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
+    bool direct_launch = false;
+    if (cmd_argv) {
+        for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
+                _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
+                _wcsicmp(cmd_argv[i], L"--direct") == 0) {
+                direct_launch = true;
+                break;
+            }
+        }
+        LocalFree(cmd_argv);
+    }
+
+    LoadState();
+
+    if (direct_launch) {
+        if (g_app.worker.joinable()) g_app.worker.join();
+        PollJobs();
+        if (GameReady()) {
+            if (g_app.launcher.Flag("discord_rpc", true))
+                RegisterDiscordLaunch(DiscordAppId());
+            StartGame();
+            while (g_app.game_running) {
+                MSG msg;
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                PollJobs();
+                UpdateDiscord();
+                Sleep(50);
+            }
+            DiscordPresence::Shutdown();
+            if (g_app.worker.joinable()) g_app.worker.join();
+            if (g_app.probe.joinable()) g_app.probe.join();
+            CoUninitialize();
+            return g_app.exit_code;
+        }
+    }
+
     ImGui_ImplWin32_EnableDpiAwareness();
     const float scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
 
@@ -2804,7 +4841,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
-    LoadState();
+    if (g_app.launcher.Flag("discord_rpc", true))
+        RegisterDiscordLaunch(DiscordAppId());
 
     bool done = false;
     while (!done) {
@@ -2845,6 +4883,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
     }
 
+    DiscordPresence::Shutdown();
     // Background work finishes on its own; a running game keeps running.
     if (g_app.worker.joinable()) {
         if (g_app.job == Job::Play) g_app.worker.detach();

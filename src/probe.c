@@ -135,6 +135,7 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+const char *runtime_thread_current_name(void);
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -148,7 +149,6 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
-const char *runtime_thread_current_name(void);
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -242,17 +242,240 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             c->Rip=(DWORD64)(uintptr_t)bb_longjmp;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+        CONTEXT *c=info->ContextRecord;
+        if (image && (c->Rip==(uintptr_t)image+0x1590b7e || c->Rip==(uintptr_t)image+0x1590b82)) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null sentinel in TLSF malloc (rax=%p, rbx=%p, pool=%p)\n",(void *)c->Rax,(void *)c->Rbx,(void *)c->Rdi); }
+            if (!c->Rax) c->Rax=c->Rdi;
+            if (!c->Rbx) c->Rbx=c->Rdi;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && (c->Rip==(uintptr_t)image+0x1590825 || c->Rip==(uintptr_t)image+0x1590829)) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null sentinel in TLSF free (r10=%p, rax=%p, pool=%p)\n",(void *)c->R10,(void *)c->Rax,(void *)c->Rdi); }
+            if (!c->R10) c->R10=c->Rdi;
+            if (!c->Rax) c->Rax=c->Rdi;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x1590a0f) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null bucket in TLSF insert (rdx=%p, r9=%p, pool=%p)\n",(void *)c->Rdx,(void *)c->R9,(void *)c->Rdi); }
+            if (!c->Rdx) {
+                c->Rdx=c->Rdi;
+                if (c->R9) {
+                    uint64_t sentinel=c->Rdi;
+                    WriteProcessMemory(GetCurrentProcess(),(void *)(c->R9+0x10),&sentinel,sizeof(sentinel),NULL);
+                }
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x15905d5) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null bucket in TLSF add_pool (rcx=%p, rsi=%p, pool=%p)\n",(void *)c->Rcx,(void *)c->Rsi,(void *)c->Rdi); }
+            if (!c->Rcx) {
+                c->Rcx=c->Rdi;
+                if (c->Rsi) {
+                    uint64_t sentinel=c->Rdi;
+                    WriteProcessMemory(GetCurrentProcess(),(void *)(c->Rsi+0x10),&sentinel,sizeof(sentinel),NULL);
+                }
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x1590d50) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null bucket in TLSF malloc-split (rcx=%p, r11=%p, pool=%p)\n",(void *)c->Rcx,(void *)c->R11,(void *)c->Rdi); }
+            if (!c->Rcx) {
+                c->Rcx=c->Rdi;
+                if (c->R11) {
+                    uint64_t sentinel=c->Rdi;
+                    WriteProcessMemory(GetCurrentProcess(),(void *)(c->R11+0x10),&sentinel,sizeof(sentinel),NULL);
+                }
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x1590ec5) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null bucket in TLSF insert-2 (rbx=%p, r8=%p, pool=%p)\n",(void *)c->Rbx,(void *)c->R8,(void *)c->Rdi); }
+            if (!c->Rbx) {
+                c->Rbx=c->Rdi;
+                if (c->Rsi) {
+                    uint64_t sentinel=c->Rdi;
+                    WriteProcessMemory(GetCurrentProcess(),(void *)c->Rsi,&sentinel,sizeof(sentinel),NULL);
+                }
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x159133a) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null bucket in TLSF insert-3 (rsi=%p, r11=%p, pool=%p)\n",(void *)c->Rsi,(void *)c->R11,(void *)c->Rdi); }
+            if (!c->Rsi) {
+                c->Rsi=c->R14 ? c->R14 : c->Rdi;
+                if (c->R11) {
+                    uint64_t sentinel=c->Rsi;
+                    WriteProcessMemory(GetCurrentProcess(),(void *)(c->R11+0x10),&sentinel,sizeof(sentinel),NULL);
+                }
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x42e6dd) {
+            static int warned=0;
+            if (!warned) { warned=1; fprintf(stderr,"Runtime: recovered null task in queue step (r14=%p, rbx=%p)\n",(void *)c->R14,(void *)c->Rbx); }
+            if (!c->R14) {
+                c->Rip=(uintptr_t)image+0x42e874;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        /* TLSF free() coalescing unlink */
+        if (image && ((c->Rip >= (uintptr_t)image + 0x1590f46 && c->Rip <= (uintptr_t)image + 0x1590f70) ||
+                      (c->Rip >= (uintptr_t)image + 0x159101b && c->Rip <= (uintptr_t)image + 0x1591040))) {
+            static int count = 0;
+            if (!count) fprintf(stderr, "Runtime: bailing corrupt TLSF free (rip=%p, next=%p, prev=%p, pool=%p)\n",
+                (void *)c->Rip, (void *)c->Rcx, (void *)c->Rbx, (void *)c->Rdi);
+            ++count;
+            c->Rip = (uintptr_t)image + 0x1590eea;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && c->Rip==(uintptr_t)image+0x40e5f9) {
+            static int count=0;
+            if (!count) fprintf(stderr,"Runtime: bypassed null vtable in task cleanup (rax=%p, rdi=%p, r14=%p)\n",(void *)c->Rax,(void *)c->Rdi,(void *)c->R14);
+            ++count;
+            if (!c->Rax) {
+                c->Rip=(uintptr_t)image+0x40e5fc;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        if (image && c->Rip==(uintptr_t)image+0x40e569) {
+            static int count=0;
+            if (!count) fprintf(stderr,"Runtime: bypassed null vtable in task cleanup 2 (rax=%p, rdi=%p)\n",(void *)c->Rax,(void *)c->Rdi);
+            ++count;
+            if (!c->Rax) {
+                c->Rip=(uintptr_t)image+0x40e56c;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        if (image && c->Rip==(uintptr_t)image+0x40e759) {
+            static int count=0;
+            if (!count) fprintf(stderr,"Runtime: bypassed null vtable in task cleanup 3 (rax=%p, rdi=%p)\n",(void *)c->Rax,(void *)c->Rdi);
+            ++count;
+            if (!c->Rax) {
+                c->Rip=(uintptr_t)image+0x40e75c;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        if (image && c->Rip==(uintptr_t)image+0x40ee05) {
+            static int count=0;
+            if (!count) fprintf(stderr,"Runtime: bypassed null vtable in task cleanup 4 (rax=%p, rdi=%p)\n",(void *)c->Rax,(void *)c->Rdi);
+            ++count;
+            if (!c->Rax) {
+                c->Rip=(uintptr_t)image+0x40ee08;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        /* Task::cancel (0x3f28a0) fault recovery */
+        if (image && ((c->Rip >= (uintptr_t)image + 0x3f28a9 && c->Rip <= (uintptr_t)image + 0x3f28ad) ||
+                      (c->Rip >= (uintptr_t)image + 0x3f28b6 && c->Rip <= (uintptr_t)image + 0x3f28c8))) {
+            static int count = 0;
+            if (!count) fprintf(stderr, "Runtime: bypassed invalid task cancel at guest offset 0x%lx (rbx=%p)\n",
+                (unsigned long)(c->Rip - (uintptr_t)image), (void *)c->Rbx);
+            ++count;
+            c->Rip = (uintptr_t)image + 0x3f28af;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if (image && !c->Rip) {
+            uintptr_t ret_addr = 0;
+            ReadProcessMemory(GetCurrentProcess(), (void *)c->Rsp, &ret_addr, sizeof(ret_addr), NULL);
+            if (ret_addr == (uintptr_t)image + 0x42e73a) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task start() at 0x42e734 (r14=%p)\n", (void *)c->R14);
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e7a2) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task error handler at 0x42e79c (r14=%p)\n", (void *)c->R14);
+                ++count;
+                c->Rsp += 8;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e83f) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task method at 0x42e839 (r14=%p)\n", (void *)c->R14);
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e96b) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task run() at 0x42e965 (r15=%p)\n", (void *)c->R15);
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e981) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task cleanup at 0x42e97b (r15=%p)\n", (void *)c->R15);
+                ++count;
+                c->Rsp += 8;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x3f28c8) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task cancel method at 0x3f28c2\n");
+                ++count;
+                c->Rsp += 8;
+                c->Rip = (uintptr_t)image + 0x3f28af;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x3f2706) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task method at 0x3f2700\n");
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e9df) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task method at 0x42e9dc\n");
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x42e9f2) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task method at 0x42e9ec\n");
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            if (ret_addr == (uintptr_t)image + 0x4308ce) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bypassed null task method at 0x4308c8\n");
+                ++count;
+                c->Rsp += 8;
+                c->Rax = 1;
+                c->Rip = ret_addr;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
     }
     if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
         code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
-        /* Faults in guest code, the loader or the runtime end the process with a report; drivers
-         * and system libraries may handle their own exceptions. */
-        uintptr_t rip=(uintptr_t)info->ContextRecord->Rip;
-        HMODULE self=GetModuleHandleA(NULL), module=NULL;
-        int ours=(image && rip-(uintptr_t)image<0x20000000) ||
-                 (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)rip,&module) && module==self) ||
-                 !module;
-        if (ours) return fatal_exception(info);
+        return fatal_exception(info);
     }
     /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
     if (code==0xC0000008 /* STATUS_INVALID_HANDLE */) return fatal_exception(info);
@@ -276,6 +499,17 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 }
 #endif
 #ifndef _WIN32
+static ssize_t read_self_memory(void *out, uintptr_t address, size_t size) {
+    struct iovec local={out,size}, remote={(void *)address,size};
+    ssize_t n=process_vm_readv(getpid(),&local,1,&remote,1,0);
+    if (n==(ssize_t)size) return n;
+    /* Some sandboxes deny process_vm_readv even for the current process. */
+    int fd=open("/proc/self/mem",O_RDONLY|O_CLOEXEC);
+    if (fd<0) return n;
+    n=pread(fd,out,size,(off_t)address);
+    close(fd);
+    return n;
+}
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
@@ -303,6 +537,29 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (!rip) {
+        /* An indirect call to zero leaves its return address at RSP. A jump or return to zero
+         * may leave something else there, so report this as a candidate call site. */
+        uintptr_t rsp=(uintptr_t)uc->uc_mcontext.gregs[REG_RSP], caller=0;
+        if (rsp && read_self_memory(&caller,rsp,sizeof(caller))==(ssize_t)sizeof(caller)) {
+            if (caller-(uintptr_t)image<0x10000000)
+                snprintf(line,sizeof(line),"  stack return candidate: guest offset 0x%lx\n",
+                         (unsigned long)(caller-(uintptr_t)image));
+            else if (dladdr((void *)caller,&where) && where.dli_fname)
+                snprintf(line,sizeof(line),"  stack return candidate: %s+0x%lx (%s)\n",where.dli_fname,
+                         (unsigned long)(caller-(uintptr_t)where.dli_fbase),where.dli_sname ? where.dli_sname : "?");
+            else
+                snprintf(line,sizeof(line),"  stack return candidate: %p\n",(void *)caller);
+            { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+        }
+        snprintf(line,sizeof(line),"  rsp=%p rbp=%p rax=%p rbx=%p rcx=%p rdx=%p\n",
+                 (void *)rsp,(void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RBP],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RAX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RBX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RCX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RDX]);
+        { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+    }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Outside the image and any shared object (generated code, a freed mapping): the mapping
      * from /proc/self/maps, and the thread. */
@@ -323,6 +580,11 @@ static void fault(int sig, siginfo_t *info, void *context) {
         }
         if (maps) fclose(maps);
         if (!found) { ssize_t written_=write(2, "none\n", 5); (void)written_; }
+        const char *guest_name=runtime_thread_current_name();
+        if (guest_name) {
+            snprintf(line,sizeof(line),"  guest thread: %s\n",guest_name);
+            { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+        }
     }
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];
@@ -358,8 +620,7 @@ static void dump_frames(ucontext_t *uc) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
         { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
         uintptr_t frame[2];
-        struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
-        if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
+        if (!rbp || read_self_memory(frame,rbp,sizeof(frame))!=(ssize_t)sizeof(frame)) break;
         if (frame[0]<=rbp) break;
         rbp=frame[0]; rip=frame[1];
     }
@@ -563,6 +824,8 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
+        char title_id[16]="";
+        if (sfo_value(sfo,"TITLE_ID",title_id,sizeof(title_id),NULL)) runtime_np_set_title(title_id);
     }
     bbgpu_register_kernel();
 #ifdef _WIN32
@@ -759,7 +1022,12 @@ int main(int argc, char **argv) {
     protect(image, round_page(size), 0);
     int executable_entry = 0;
     for (uint64_t i = 0; i < ns; ++i) {
-        protect(image + segments[i].address, round_page(segments[i].size), (unsigned)segments[i].flags);
+        unsigned flags = (unsigned)segments[i].flags;
+        if (!(flags & 1)) {
+            /* Non-code segments (data, bss, relro) need read-write access */
+            flags |= 2;
+        }
+        protect(image + segments[i].address, round_page(segments[i].size), flags);
         if ((segments[i].flags & 1) && entry >= segments[i].address && entry - segments[i].address < segments[i].size)
             executable_entry = 1;
     }

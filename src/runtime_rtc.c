@@ -144,6 +144,24 @@ static ABI int32_t rtc_rfc2822_local(char *out, const uint64_t *utc_tick) {
     return 0;
 }
 
+static ABI int32_t rtc_parse_date_time(DateTime *t, const char *str) {
+    if (!t || !str) return ERR_INVALID_POINTER;
+    memset(t, 0, sizeof(*t));
+    int y=0, m=0, d=0, H=0, M=0, S=0;
+    if (sscanf(str, "%d-%d-%dT%d:%d:%d", &y, &m, &d, &H, &M, &S) >= 3 ||
+        sscanf(str, "%d/%d/%d %d:%d:%d", &y, &m, &d, &H, &M, &S) >= 3 ||
+        sscanf(str, "%d-%d-%d %d:%d:%d", &y, &m, &d, &H, &M, &S) >= 3) {
+        t->year = (uint16_t)y;
+        t->month = (uint16_t)m;
+        t->day = (uint16_t)d;
+        t->hour = (uint16_t)H;
+        t->minute = (uint16_t)M;
+        t->second = (uint16_t)S;
+        return 0;
+    }
+    return (int32_t)0x80B50003; /* INVALID_VALUE */
+}
+
 static const RuntimeExport exports[]={
     {"sceRtcGetCurrentClockLocalTime",rtc_current_local}, {"sceRtcGetCurrentClock",rtc_current_clock},
     {"sceRtcGetCurrentTick",rtc_current_tick}, {"sceRtcGetCurrentNetworkTick",rtc_current_tick},
@@ -151,5 +169,6 @@ static const RuntimeExport exports[]={
     {"sceRtcGetDayOfWeek",rtc_day_of_week}, {"sceRtcGetTick",rtc_get_tick}, {"sceRtcSetTick",rtc_set_tick},
     {"sceRtcGetTickResolution",rtc_tick_resolution}, {"sceRtcSetTime_t",rtc_set_time_t},
     {"sceRtcGetTime_t",rtc_get_time_t}, {"sceRtcFormatRFC2822LocalTime",rtc_rfc2822_local},
+    {"sceRtcParseDateTime",rtc_parse_date_time},
 };
 uintptr_t runtime_rtc_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

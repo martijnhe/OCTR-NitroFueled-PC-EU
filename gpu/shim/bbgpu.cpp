@@ -410,6 +410,10 @@ extern "C" int bbgpu_pad_rescan_take(void) {
     return BbOverlay::TakePadRescan() ? 1 : 0;
 }
 
+extern "C" int bbgpu_audio_volume(void) {
+    return BbSettings::Get().volume.load(std::memory_order_relaxed);
+}
+
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
     if (!g_window) return 0;
     g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");

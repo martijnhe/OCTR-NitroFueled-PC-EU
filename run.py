@@ -11,13 +11,22 @@ previous process to end first.
 Works from the MSYS2 CLANG64 Python or a python.org Python.
 """
 import ctypes
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
@@ -49,11 +58,17 @@ def no_console():
 
 
 def emit(text):
-    sys.stdout.write(text)
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except Exception:
+        pass
     if LOG:
-        LOG.write(text)
-        LOG.flush()
+        try:
+            LOG.write(text)
+            LOG.flush()
+        except Exception:
+            pass
 
 
 def say(message):
@@ -129,6 +144,146 @@ def apply_render_res(env, config):
     say(f'Internal resolution: {plan["label"]} ({path} rendering path)')
 
 
+# The server derives the player's ID from the nickname, so everyone left on a shared default
+# name was the same player online (one wallet, and matchmaking evicting each other). These names
+# are refused online; the launcher asks for a real one before it starts the game.
+RESERVED_NICKS = {'ryupc', 'ryunet', 'player', 'jugador', 'guest'}
+OFFLINE_NAME = 'Player'
+
+
+def nick_ok(name):
+    return (3 <= len(name) <= 16 and all(c.isascii() and (c.isalnum() or c in '_-') for c in name)
+            and name.lower() not in RESERVED_NICKS)
+
+
+def online_key(data):
+    """This installation's secret: the server lets the first key to use a nickname keep it, so
+    nobody else can play under it. Created once, next to run.py; the launcher reads the same
+    file. Copying the folder to another PC keeps the nicknames; losing the file loses them."""
+    path = Path(data) / 'ryunet_online.key'
+    # A second copy outside the game folder (as the launcher keeps it), so that a deleted, moved
+    # or re-downloaded folder on the same PC keeps the nicknames.
+    appdata = os.environ.get('APPDATA')
+    backup = Path(appdata) / 'CTR-NitroFueled-PC' / 'ryunet_online.key' if appdata else None
+
+    def read(p):
+        try:
+            k = p.read_text(encoding='ascii', errors='replace').strip().lower() if p else ''
+        except OSError:
+            return ''
+        return k if len(k) == 64 and all(c in '0123456789abcdef' for c in k) else ''
+
+    key = read(path) or read(backup) or secrets.token_hex(32)
+    if read(path) != key:
+        try:
+            path.write_text(key + '\n', encoding='ascii')
+        except OSError as e:
+            say(f'Could not save the online key ({e}): the nickname cannot be kept for this installation.')
+            return ''
+    if backup and not read(backup):
+        try:
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_text(key + '\n', encoding='ascii')
+        except OSError:
+            pass
+    return key
+
+
+def server_key(key, host):
+    """What one server sees of the key: HMAC-SHA256(key, host). Each server gets a different
+    value, so a server you try (or one an invite points to) cannot reuse it on another to take
+    your nicknames. The launcher derives it the same way for its nickname check."""
+    return hmac.new(bytes.fromhex(key), host.strip().lower().encode('utf-8'), hashlib.sha256).hexdigest()
+
+
+def setup_online(env, config, data):
+    ini_values = {}
+    try:
+        for l in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
+            k, sep, v = l.partition('=')
+            if sep and not k.startswith('#'):
+                ini_values[k.strip()] = v.strip()
+    except OSError:
+        pass
+
+    name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
+    online = env.get('BB_ONLINE', ini_values.get('online', '0'))
+    if online == '1' and not nick_ok(name):
+        fail('Online play needs your own nickname: 3 to 16 letters, digits, _ or -, and not a default '
+             'name like RyuPC. Set it in the launcher (Online tab) or as online_name= in bbport.ini.\n'
+             'El juego online necesita tu propio apodo: de 3 a 16 letras, números, _ o -, y no un nombre '
+             'por defecto como RyuPC. Ponlo en el launcher (pestaña Online) o como online_name= en bbport.ini.')
+    env['BB_USER_NAME'] = name or OFFLINE_NAME
+
+    if online != '1':
+        return
+
+    env['BB_ONLINE'] = '1'
+    env['BB_NET_TRACE'] = '1'
+    server = env.get('BB_ONLINE_SERVER', ini_values.get('online_server', 'octr.ryu7w7.xyz'))
+    if not server or server.strip() == '':
+        server = 'octr.ryu7w7.xyz'
+    host = server
+    auth_port = env.get('BB_ONLINE_HTTP_PORT', ini_values.get('online_http_port', '8080'))
+    if ':' in server and not server.startswith('['):
+        h, _, p = server.partition(':')
+        if p.isdigit():
+            host = h
+            auth_port = p
+
+    env['BB_ONLINE_SERVER'] = host
+    env['BB_ONLINE_NAME'] = name
+    key = online_key(data)
+    if key:
+        env['BB_ONLINE_KEY'] = server_key(key, host)
+    # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
+    # instead of the ones bought on the server, which are tied to the nickname.
+    if env.get('BB_ONLINE_INVENTORY', ini_values.get('online_inventory', 'server')).strip().lower() == 'save':
+        env['BB_ONLINE_INVENTORY'] = 'save'
+    else:
+        env.pop('BB_ONLINE_INVENTORY', None)
+    account_id = env.get('BB_ONLINE_ACCOUNT_ID', ini_values.get('online_account_id', ''))
+    if account_id:
+        env['BB_ONLINE_ACCOUNT_ID'] = account_id
+    online_port = env.get('BB_ONLINE_PORT', ini_values.get('online_port', ''))
+    if online_port:
+        env['BB_ONLINE_PORT'] = online_port
+    friends = env.get('BB_ONLINE_FRIENDS', ini_values.get('online_friends', ''))
+    if friends:
+        env['BB_ONLINE_FRIENDS'] = friends
+
+    overrides_file = data / 'host_overrides.json'
+    overrides = {
+        "lavender-ps4-auth3.prod.demonware.net": f"http://{host}:{auth_port}",
+        "lavender-ps4-auth3.cert.demonware.net": f"http://{host}:{auth_port}",
+        "lavender-ps4-auth3.dev.demonware.net":  f"http://{host}:{auth_port}",
+        "prod.umbrella.demonware.net": f"http://{host}:{auth_port}",
+        "cert.umbrella.demonware.net": f"http://{host}:{auth_port}",
+        "dev.umbrella.demonware.net":  f"http://{host}:{auth_port}",
+        "prod.uno.demonware.net": f"http://{host}:{auth_port}",
+        "cert.uno.demonware.net": f"http://{host}:{auth_port}",
+        "dev.uno.demonware.net":  f"http://{host}:{auth_port}",
+        "lavender-ps4-lobby.prod.demonware.net": host,
+        "lavender-ps4-lobby.cert.demonware.net": host,
+        "lavender-ps4-lobby.dev.demonware.net":  host,
+        "stun.us.demonware.net": host,
+        "stun.eu.demonware.net": host,
+        "stun.jp.demonware.net": host,
+        "stun.au.demonware.net": host,
+        # Telemetry / CDN hosts the game contacts directly over HTTPS: keep
+        # them local (the server answers 404, which the game tolerates) and
+        # never touch the real servers.
+        "pipes-prod-glutton.public.aws.demonware.net": f"http://{host}:{auth_port}",
+        "objectstore.prod.demonware.net": f"http://{host}:{auth_port}",
+        # Demonware friends API (eboot rodata ~0x1bef504, base http://friends.dev...):
+        # list / invitation / pending / pair. Routed to the server's friends
+        # handler; without this the game gets EHOSTUNREACH and shows no friends.
+        "friends.dev.demonware.net": f"http://{host}:{auth_port}",
+    }
+    overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
+    say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
+
+
 def pump(stream):
     for raw in iter(stream.readline, b''):
         # The game writes CRLF; the log is a text file that adds its own CR.
@@ -153,6 +308,23 @@ def main():
     if not Path(config).exists() and (PORT / 'bbport.default.ini').is_file():
         shutil.copyfile(PORT / 'bbport.default.ini', config)
 
+    if 'BB_LANGUAGE' not in env:
+        try:
+            for l in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
+                k, _, v = l.partition('=')
+                if k.strip() in ('game_language', 'language') and v.strip():
+                    env['BB_LANGUAGE'] = v.strip()
+                    break
+        except OSError:
+            pass
+
+    if 'BB_ASYNC_SUBMIT' not in env:
+        v = ini_value(config, 'async_submit')
+        if v is not None:
+            env['BB_ASYNC_SUBMIT'] = v
+
+    setup_online(env, config, data)
+
     probe = Path(env['BB_PROBE']) if env.get('BB_PROBE') else find_executable('sacredfire.exe')
     if not probe or not probe.is_file():
         fail('sacredfire.exe not found: build it with build.sh in the MSYS2 CLANG64 shell.')
@@ -175,11 +347,24 @@ def main():
         LOG = open(logs / f'{stamp}.log', 'w', encoding='utf-8', errors='replace')
         say(f'Log: {logs / (stamp + ".log")}')
     else:
-        LOG = open(data / 'last_run.log', 'a' if restarted else 'w', encoding='utf-8', errors='replace')
+        user_name = env.get('BB_USER_NAME', env.get('BB_ONLINE_NAME', ''))
+        log_name = f'last_run_{user_name}.log' if user_name and user_name != OFFLINE_NAME else 'last_run.log'
+        try:
+            LOG = open(data / log_name, 'a' if restarted else 'w', encoding='utf-8', errors='replace')
+        except OSError:
+            LOG = open(data / f'last_run_{os.getpid()}.log', 'w', encoding='utf-8', errors='replace')
     say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")}{" (restart)" if restarted else ""}')
 
     # BB_GAME_DIR: the merged CTR dump (update 1.21 copied over the base game).
-    game = Path(env.get('BB_GAME_DIR', PORT / 'orig' / TITLE_ID))
+    game_dir_env = env.get('BB_GAME_DIR')
+    if game_dir_env:
+        game = Path(game_dir_env)
+    elif (PORT / f'{TITLE_ID}-1.21' / 'eboot.bin').is_file():
+        game = PORT / f'{TITLE_ID}-1.21'
+    elif (PORT / TITLE_ID / 'eboot.bin').is_file():
+        game = PORT / TITLE_ID
+    else:
+        game = Path(env.get('BB_GAME_DIR', PORT / 'orig' / TITLE_ID))
     if not (game / 'eboot.bin').is_file():
         if (game / 'Image0' / 'eboot.bin').is_file():
             fail(f'{game} has the PS4 PKG Tool layout (Image0 and Sc0): prepare it in the launcher first.')
@@ -195,6 +380,8 @@ def main():
     info = run_python('scripts/game_check.py', '--info', game, capture=True).split()
     title_id, app_version = (info + [TITLE_ID, APP_VERSION][len(info):])[:2]
     say(f'Game profile: {env["BB_GAME_PROFILE"]}')
+    if 'BB_LANGUAGE' in env:
+        say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,

@@ -100,7 +100,10 @@ def link(game, out):
         if p['filesz'] > p['memsz']:
             raise ValueError('invalid libc segment size')
         image[base+p['vaddr']:base+p['vaddr']+p['filesz']] = span(libc['elf'],p['offset'],p['filesz'])
-        segments.append((base+p['vaddr'],p['memsz'],p['flags']))
+        seg_flags = p['flags']
+        if not (seg_flags & 1):
+            seg_flags |= 2
+        segments.append((base+p['vaddr'],p['memsz'],seg_flags))
     # Preserve main-program spelling for the existing host resolver. New kernel
     # NIDs get the main module's spelling only if identity AND version match.
     identities = {main['identity'](name):i for i,name in enumerate(names)}

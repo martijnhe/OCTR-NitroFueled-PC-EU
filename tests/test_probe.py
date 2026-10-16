@@ -118,6 +118,12 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(r.returncode, 132)
         self.assertIn('at guest offset 0x0,', r.stderr)
 
+    def test_null_call_reports_guest_caller(self):
+        # xor eax,eax; call rax leaves the next guest instruction at the top of the stack.
+        r = self.run_image(package(b'\x31\xc0\xff\xd0\xc3'))
+        self.assertEqual(r.returncode, 139, r.stderr)
+        self.assertIn('stack return candidate: guest offset 0x4', r.stderr)
+
     def test_runtime_returns_from_verified_init_env(self):
         # Align stack, call _init_env through +32, then tail-jump to unknown +40.
         code = b'\x48\x83\xec\x08\xff\x15\x16\0\0\0\x48\x83\xc4\x08\xff\x25\x14\0\0\0'

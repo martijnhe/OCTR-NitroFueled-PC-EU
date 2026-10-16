@@ -151,8 +151,17 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     }
 }
 
+/* sacredfire: back-edges a draw shader invocation may take in all. CTR's screen-space reflection
+ * pixel shaders march a ray for a step count read from a constant buffer; a garbage count kept
+ * the GPU in one draw past Windows' 2 s limit and the device was lost (code 23, nvlddmkm event
+ * 153; logs: STUCK draw, ps 56bc5e4b / ebf67419 / 6912144d). Past the budget every loop exits at
+ * its next back-edge: a wrong pixel instead of a crash. No real draw shader comes near it (it
+ * would take milliseconds per pixel); compute shaders are left alone. */
+constexpr u32 DrawLoopBudget = 16384;
+
 void Traverse(EmitContext& ctx, const IR::Program& program) {
     IR::Block* current_block{};
+    Id loop_budget{}; // u32 Private counter, defined at the first loop of a draw shader
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
@@ -197,6 +206,17 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             break;
         case IR::AbstractSyntaxNode::Type::Repeat: {
             Id cond{ctx.Def(node.data.repeat.cond)};
+            if (ctx.sw_stage != SwStage::Compute) {
+                if (loop_budget.value == 0) {
+                    loop_budget = ctx.DefineVariable(ctx.U32[1], std::nullopt,
+                                                     spv::StorageClass::Private, ctx.u32_zero_value);
+                }
+                const Id taken{ctx.OpIAdd(ctx.U32[1], ctx.OpLoad(ctx.U32[1], loop_budget),
+                                          ctx.u32_one_value)};
+                ctx.OpStore(loop_budget, taken);
+                cond = ctx.OpLogicalAnd(ctx.U1[1], cond,
+                                        ctx.OpULessThan(ctx.U1[1], taken, ctx.ConstU32(DrawLoopBudget)));
+            }
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
             const Id merge_label{node.data.repeat.merge->Definition<Id>()};
             ctx.OpBranchConditional(cond, loop_header_label, merge_label);

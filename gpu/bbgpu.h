@@ -34,6 +34,9 @@ int bbgpu_overlay_captures_input(void);
 /* SacredFire: 1 once after the in-game menu's "Rescan controllers" button (runtime_pad.c restarts
  * SDL's gamepad subsystem and enumerates devices afresh); cleared by the call. */
 int bbgpu_pad_rescan_take(void);
+/* The player's game volume in percent, 0..200 (bbport.ini volume; the in-game menu changes it
+ * while the game runs). runtime_audio.c reads it for every buffer. */
+int bbgpu_audio_volume(void);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* Number of symbols registered by the vendored libraries (diagnostics). */

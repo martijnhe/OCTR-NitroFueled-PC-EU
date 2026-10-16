@@ -13,6 +13,9 @@
 #include <SDL3/SDL.h>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -671,7 +674,10 @@ void Menu() {
                 std::lock_guard lk{BbSettings::PortsMutex()};
                 current = s.ports[size_t(p)].data();
             }
+            // Ports 2-4 can take the keyboard: that player plays on it and port 1 keeps its gamepad.
+            const char* keyboard = BbSettings::MenuText("Keyboard", "Клавиатура");
             std::string label = current.empty() ? (p == 0 ? BbSettings::MenuText("(first / last used)", "(первый / последний использованный)") : BbSettings::MenuText("(none)", "(нет)")) : current;
+            if (p > 0 && current == "keyboard") label = keyboard;
             for (const auto& [guid, text] : pads) {
                 if (guid == current) label = text;
             }
@@ -681,6 +687,14 @@ void Menu() {
                 if (ImGui::Selectable(p == 0 ? BbSettings::MenuText("(first / last used)", "(первый / последний использованный)") : BbSettings::MenuText("(none)", "(нет)"), current.empty())) {
                     std::lock_guard lk{BbSettings::PortsMutex()};
                     s.ports[size_t(p)][0] = 0;
+                    changed = true;
+                }
+                if (p > 0 && ImGui::Selectable(keyboard, current == "keyboard")) {
+                    std::lock_guard lk{BbSettings::PortsMutex()};
+                    for (auto& other : s.ports) {  // one player on the keyboard
+                        if (std::strcmp(other.data(), "keyboard") == 0) other[0] = 0;
+                    }
+                    std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "keyboard");
                     changed = true;
                 }
                 for (const auto& [guid, text] : pads) {
@@ -696,8 +710,22 @@ void Menu() {
         if (changed) {
             BbSettings::Save();
         }
-        ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected",
-                                                 "Порты 2-4 входят как Player 2-4, пока подключён их геймпад"));
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected "
+                                                       "(the keyboard: always; port 1 then has the gamepad only)",
+                                                 "Порты 2-4 входят как Player 2-4, пока подключён их геймпад "
+                                                 "(клавиатура: всегда; у порта 1 тогда только геймпад)"));
+    }
+
+    // SacredFire: the game's volume (runtime_audio.c reads it for every buffer).
+    ImGui::SeparatorText(BbSettings::MenuText("Sound", "Звук"));
+    {
+        int volume = s.volume;
+        const bool changed = ImGui::SliderInt(BbSettings::MenuText("Volume", "Громкость"), &volume, 0, 200, "%d%%");
+        Store(s.volume, std::clamp(volume, 0, 200), changed);
+        Hint(BbSettings::MenuText("100% is the level the game was mixed at; above it the loudest peaks are "
+                                  "rounded off. Applies at once.",
+                                  "100% — уровень, на котором сведена игра; выше самые громкие пики "
+                                  "сглаживаются. Сразу."));
     }
 
     // SacredFire: performance (both apply at once).
@@ -749,6 +777,9 @@ void Menu() {
                                   "Applies at once; BB_FULLSCREEN=1 at start.",
                                   "Полный экран на дисплее игры (BB_DISPLAY). "
                                   "Сразу; BB_FULLSCREEN=1 при запуске."));
+        Checkbox(BbSettings::MenuText("Borderless window", "Без рамок"), s.borderless);
+        Hint(BbSettings::MenuText("Remove window borders in windowed mode.",
+                                  "Убрать рамку окна в оконном режиме."));
     }
 
     ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
@@ -810,6 +841,113 @@ void FpsCounter() {
                 : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
                                                            : "");
     ImGui::End();
+}
+
+// RyuNET server announcements ("maintenance in 5 minutes"): the launcher writes
+// ryunet_announce.txt next to bbport.ini (id, level, expires, text) and each new one is drawn
+// over the picture for a few seconds. No input is taken: the game goes on underneath.
+struct Announcement {
+    std::string text;
+    int level = 0; // 0 info, 1 warn, 2 urgent
+    std::chrono::steady_clock::time_point until{};
+};
+std::mutex announce_mutex;
+Announcement announce;
+std::string announce_last_id;
+std::chrono::steady_clock::time_point announce_checked{};
+std::filesystem::file_time_type announce_stamp{};
+constexpr float kAnnounceSeconds = 12.0f;
+
+std::filesystem::path AnnouncePath() {
+    const char* config = std::getenv("BB_CONFIG");
+    const std::filesystem::path dir =
+        config && *config ? std::filesystem::path(config).parent_path() : std::filesystem::path();
+    return dir / "ryunet_announce.txt";
+}
+
+/// At most once a second: a new announcement in the file starts showing.
+void PollAnnouncement() {
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock{announce_mutex};
+    if (now - announce_checked < std::chrono::seconds(1)) {
+        return;
+    }
+    announce_checked = now;
+    std::error_code ec;
+    const auto path = AnnouncePath();
+    const auto stamp = std::filesystem::last_write_time(path, ec);
+    if (ec || stamp == announce_stamp) {
+        return;
+    }
+    announce_stamp = stamp;
+    std::ifstream in(path, std::ios::binary);
+    std::string line, id, text, level;
+    long long expires = 0;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.rfind("id=", 0) == 0) {
+            id = line.substr(3);
+        } else if (line.rfind("level=", 0) == 0) {
+            level = line.substr(6);
+        } else if (line.rfind("expires=", 0) == 0) {
+            expires = std::atoll(line.c_str() + 8);
+        } else if (line.rfind("text=", 0) == 0) {
+            text = line.substr(5);
+        }
+    }
+    if (id.empty() || text.empty() || id == announce_last_id || expires <= static_cast<long long>(std::time(nullptr))) {
+        return;
+    }
+    announce_last_id = id;
+    announce.text = text;
+    announce.level = level == "urgent" ? 2 : level == "warn" ? 1 : 0;
+    announce.until = now + std::chrono::milliseconds(static_cast<int>(kAnnounceSeconds * 1000));
+    std::printf("Overlay: server announcement (%s): %s\n", level.c_str(), text.c_str());
+}
+
+bool AnnouncementActive() {
+    PollAnnouncement();
+    std::scoped_lock lock{announce_mutex};
+    return std::chrono::steady_clock::now() < announce.until;
+}
+
+void AnnouncementBanner() {
+    Announcement a;
+    {
+        std::scoped_lock lock{announce_mutex};
+        a = announce;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= a.until) {
+        return;
+    }
+    const float left = std::chrono::duration<float>(a.until - now).count();
+    const float alpha = std::clamp(std::min((kAnnounceSeconds - left) / 0.3f, left / 1.0f), 0.0f, 1.0f);
+    static const ImVec4 colors[3] = {ImVec4(0.12f, 0.33f, 0.62f, 1.0f), ImVec4(0.72f, 0.47f, 0.05f, 1.0f),
+                                     ImVec4(0.68f, 0.12f, 0.12f, 1.0f)};
+    const ImVec4 bg = colors[std::clamp(a.level, 0, 2)];
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float width = std::min(viewport->WorkSize.x * 0.7f, 900.0f * base_scale);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, viewport->WorkPos.y + 24.0f * base_scale),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * base_scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * base_scale, 10.0f * base_scale));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(bg.x, bg.y, bg.z, 0.9f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
+    ImGui::Begin("##announcement", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextDisabled("RyuNET");
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(a.text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
 }
 
 void TextPrompt() {
@@ -1062,7 +1200,8 @@ bool Visible() {
             ultrawide_prompt = true;
         }
     }
-    return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps);
+    return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
+                           AnnouncementActive());
 }
 
 bool MenuOpen() {
@@ -1116,6 +1255,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
     }
+    AnnouncementBanner();
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

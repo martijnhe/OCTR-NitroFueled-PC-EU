@@ -4,6 +4,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import patches
 from patches import (EBOOT_BASE, GAME_PATCH_KEYS, compile_external, eboot_segments, encode,
@@ -220,6 +221,15 @@ class GamePatchTests(unittest.TestCase):
             elf = tiny_elf(b'\0' * (at - 0x13a9d00) + code + b'\0' * 32, vaddr=0x13a9d00)
             writes = compile_external(selected, eboot_segments(elf), elf)
             self.assertEqual(writes, [(at + 5, bytes.fromhex('41899688040000'))])
+
+    def test_online_environment_overrides_ini_patch(self):
+        found = external_patches(ROOT / 'patches')
+        online = 'CrashTeamRacingOnline.xml/Online: custom Demonware key'
+        keys = lambda ini: [key for key, _, _ in external_selection(found, None, ini)]
+        with patch.dict('os.environ', {'BB_ONLINE': '0'}):
+            self.assertNotIn(online, keys({'online': '1'}))
+        with patch.dict('os.environ', {'BB_ONLINE': '1'}):
+            self.assertIn(online, keys({'online': '0'}))
 
     def test_read_settings(self):
         with tempfile.TemporaryDirectory() as tmp:

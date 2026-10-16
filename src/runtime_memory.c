@@ -251,7 +251,19 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     free(runs);
     return at;
 }
+/* The section is SEC_RESERVE: guest memory is committed (charged against RAM plus the page
+ * file) as the guest maps it, not all at start. Committing the whole pool, 6.5 GiB in PS4 Pro
+ * mode, failed with error 1450 whenever other programs held most of the commit limit, and the
+ * game stopped at start (code 3). A page committed through the backing view is committed in
+ * the section, so every view of it reads the same storage. Pages stay committed once used. */
+static int host_commit(uint64_t phys, uint64_t size) {
+    if (VirtualAlloc(backing_base+phys,size,MEM_COMMIT,PAGE_READWRITE)) return 0;
+    fprintf(stderr,"Runtime: cannot commit %" PRIu64 " MiB of guest memory (error %lu); close other programs or enlarge the page file\n",
+            size>>20,GetLastError());
+    return -1;
+}
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+    if (!reserved && host_commit(phys,size)) return -1; /* before carving: the old mapping stays */
     size_t i=carve_host(address,address+size);
     if (reserved) return 0;
     regions[i].phys=phys; regions[i].mapped=1;
@@ -269,15 +281,25 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) {
     }
     return 0;
 }
-/* Released pages read as zero when reused, like the memfd's punched holes. */
-static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
+/* Released pages read as zero when reused, like the memfd's punched holes. Pages never committed
+ * are zero already (and not accessible): only committed runs are cleared. */
+static void host_discard(uint64_t phys, uint64_t size) {
+    for (uint64_t at=phys, end=phys+size; at<end;) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery(backing_base+at,&m,sizeof(m))) win_fail("VirtualQuery",(uintptr_t)(backing_base+at),end-at);
+        uint64_t next=(uint64_t)((unsigned char *)m.BaseAddress+m.RegionSize-backing_base);
+        if (next>end) next=end;
+        if (m.State==MEM_COMMIT) memset(backing_base+at,0,next-at);
+        at=next;
+    }
+}
 /* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (backing_base) return 0;
     runtime_memory_reserve();
     uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
-    if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
+    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_RESERVE,bytes,NULL,NULL,0);
+    if (!section) { fprintf(stderr,"Runtime: cannot reserve %" PRIu64 " MiB of guest memory (error %lu)\n",bytes>>20,GetLastError()); return -1; }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
 }

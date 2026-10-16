@@ -1,7 +1,8 @@
 /* libScePad on SDL3 gamepads and the keyboard. SDL events are pumped by the window thread
  * (gpu/shim/window.cpp); here state is only sampled.
  *
- * Keyboard layout (also with a gamepad connected: both drive the game):
+ * Keyboard layout (also with a gamepad connected: both drive the game, unless a split-screen port
+ * 2..4 is bound to the keyboard, bbport.ini port.N=keyboard: that player plays on it alone):
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
  *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, Z L3, C R3,
  *   Enter Options, Tab left touchpad, Backspace right touchpad,
@@ -77,6 +78,10 @@ static SDL_Gamepad *gamepad;
 #define PORTS 4
 typedef struct { char want[64]; SDL_Gamepad *pad; int opened, present; } Port;
 static Port ports[PORTS]; /* ports[0].want overrides BB_GAMEPAD for port 1 */
+/* port.N=keyboard (N 2..4): that player plays on the keyboard, always logged in, and port 1 keeps
+ * its gamepad alone (one person on the keyboard, another on a gamepad). */
+static int is_keyboard(const char *want) { return !SDL_strcasecmp(want,"keyboard"); }
+static int keyboard_port(void) { for (int p=1;p<PORTS;++p) if (is_keyboard(ports[p].want)) return p; return 0; }
 static unsigned pad_rescan_attempts; /* misses in a row looking for a bound controller (current_gamepad) */
 static struct timespec config_mtime; static uint64_t config_checked;
 static void load_ports(void) {
@@ -122,7 +127,8 @@ static void refresh_ports(uint64_t now) {
 /* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). */
 static int is_preferred(SDL_JoystickID id, const char *want);
 static int claimed_by_other_port(SDL_JoystickID id, int except) {
-    for (int p=1;p<PORTS;++p) if (p!=except && ports[p].want[0] && is_preferred(id,ports[p].want)) return 1;
+    for (int p=1;p<PORTS;++p)
+        if (p!=except && ports[p].want[0] && !is_keyboard(ports[p].want) && is_preferred(id,ports[p].want)) return 1;
     return 0;
 }
 /* Per-port stick calibration (the functions follow the axis helpers below). */
@@ -138,7 +144,7 @@ static void cal_reset(PadCal *c);
 /* The gamepad of port p (1..3), opened when its named controller is connected; NULL otherwise. */
 static SDL_Gamepad *port_gamepad(int p) {
     Port *port=&ports[p];
-    if (!port->want[0]) { if (port->pad) { SDL_CloseGamepad(port->pad); port->pad=NULL; } return NULL; }
+    if (!port->want[0] || is_keyboard(port->want)) { if (port->pad) { SDL_CloseGamepad(port->pad); port->pad=NULL; } return NULL; }
     if (port->pad && !SDL_GamepadConnected(port->pad)) { SDL_CloseGamepad(port->pad); port->pad=NULL; }
     if (port->pad) return port->pad;
     int count=0;
@@ -159,7 +165,7 @@ static SDL_Gamepad *port_gamepad(int p) {
 __attribute__((weak)) void runtime_services_user_change(int user, int login);
 static void update_port_presence(void) {
     for (int p=1;p<PORTS;++p) {
-        const int present=port_gamepad(p)!=NULL;
+        const int present=port_gamepad(p)!=NULL || is_keyboard(ports[p].want);
         if (present!=ports[p].present) { ports[p].present=present; if (runtime_services_user_change) runtime_services_user_change(p+1,present); }
     }
 }
@@ -332,16 +338,25 @@ static SDL_Gamepad *current_gamepad(void) {
      * rescans stop until the button, a binding change or a connected pad starts them again. */
     enum { PAD_RESCAN_ATTEMPTS=6 };
     int port_missing=0;
-    for (int p=1;p<PORTS;++p) if (ports[p].want[0] && !ports[p].pad) port_missing=1;
+    for (int p=1;p<PORTS;++p) if (ports[p].want[0] && !is_keyboard(ports[p].want) && !ports[p].pad) port_missing=1;
     const int requested=bbgpu_pad_rescan_take();
     if (requested) attempts=0;
+    static int allow_auto_reinit = -1;
+    if (allow_auto_reinit < 0) allow_auto_reinit = (getenv("BB_PAD_AUTO_RESTART") != NULL);
     const int rescan_due=now-last_reinit>5000000 && attempts<PAD_RESCAN_ATTEMPTS;
-    if (!gamepad || requested || (port_missing && rescan_due) || (want && !on_preferred && now-last_scan>1000000)) {
+    if (!gamepad || requested || (allow_auto_reinit && port_missing && rescan_due) || (want && !on_preferred && now-last_scan>1000000)) {
         last_scan=now;
         int count=0, pick=-1;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        for (int i=0; want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want) && !claimed_by_other_port(ids[i],0)) pick=i;
-        if (requested || (((want ? pick<0 : count==0) || port_missing) && rescan_due)) { /* the plain scan found nothing usable */
+        /* The chosen gamepad bound to another port is connected, not missing: port 1 does without
+         * it, and no restart of the gamepad subsystem drops that port's pad every 5 s. */
+        int want_seen=0;
+        for (int i=0; want && ids && i<count; ++i)
+            if (is_preferred(ids[i],want)) { want_seen=1; if (pick<0 && !claimed_by_other_port(ids[i],0)) pick=i; }
+        /* Under Windows/Wine, SDL_QuitSubSystem/SDL_InitSubSystem blocks for 400-500 ms while wineserver/HID
+         * re-enumerates devices, causing periodic 5-second stutters if any port is unfulfilled.
+         * Only perform a full subsystem restart if explicitly requested via the menu button, or if BB_PAD_AUTO_RESTART=1. */
+        if (requested || (allow_auto_reinit && (((want ? !want_seen : count==0) || port_missing) && rescan_due))) { /* the plain scan found nothing usable */
             last_reinit=now;
             SDL_free(ids); ids=NULL;
             if (gamepad) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
@@ -350,10 +365,13 @@ static SDL_Gamepad *current_gamepad(void) {
             ids=SDL_GetGamepads(&count);
             if (requested) printf("Runtime: controllers re-enumerated on request: %d found\n",count);
             else if (reinits++<3) printf("Runtime: %s; devices re-enumerated: %d found\n",want && pick<0 ? "chosen gamepad not seen" : "no gamepad or a port's controller missing",count);
-            for (int i=0; want && ids && i<count && pick<0; ++i) if (is_preferred(ids[i],want)) pick=i;
+            pick=-1; /* an index into the list before the restart */
+            want_seen=0;
+            for (int i=0; want && ids && i<count; ++i)
+                if (is_preferred(ids[i],want)) { want_seen=1; if (pick<0 && !claimed_by_other_port(ids[i],0)) pick=i; }
             /* Found what was missing: attempts start over; else one more miss, the last one reported. */
-            int still_missing=(want ? pick<0 : count==0);
-            for (int p=1;p<PORTS && !still_missing;++p) if (ports[p].want[0] && !ports[p].pad) {
+            int still_missing=(want ? !want_seen : count==0);
+            for (int p=1;p<PORTS && !still_missing;++p) if (ports[p].want[0] && !is_keyboard(ports[p].want) && !ports[p].pad) {
                 still_missing=1;
                 for (int i=0; ids && i<count; ++i) if (is_preferred(ids[i],ports[p].want)) still_missing=0;
             }
@@ -593,12 +611,13 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
 }
 static void sample_host(PadData *d) {
     SDL_Gamepad *g=current_gamepad();
-    sample_host_from(d,g,1,&cals[0]);
+    sample_host_from(d,g,!keyboard_port(),&cals[0]);
 }
-/* Ports 2..4: their own gamepad only, no keyboard, no scripted input. */
+/* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard); no scripted input. */
 static void sample_port(PadData *d, int p) {
     current_gamepad(); /* keeps the port table fresh */
-    sample_host_from(d,port_gamepad(p),0,&cals[p]);
+    const int keyboard=is_keyboard(ports[p].want);
+    sample_host_from(d,keyboard ? NULL : port_gamepad(p),keyboard,&cals[p]);
 }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

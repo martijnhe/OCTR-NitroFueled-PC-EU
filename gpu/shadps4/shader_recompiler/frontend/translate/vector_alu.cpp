@@ -923,12 +923,16 @@ void Translator::V_CVT_F32_U32(const GcnInst& inst) {
 
 void Translator::V_CVT_U32_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    SetDst(inst.dst[0], ir.ConvertFToU(32, src0));
+    const IR::F32 clamped{ir.FPClamp(src0, ir.Imm32(0.0f), ir.Imm32(4294967040.0f))};
+    const IR::F32 safe_val{ir.Select(ir.FPIsNan(src0), ir.Imm32(0.0f), clamped)};
+    SetDst(inst.dst[0], ir.ConvertFToU(32, safe_val));
 }
 
 void Translator::V_CVT_I32_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    SetDst(inst.dst[0], ir.ConvertFToS(32, src0));
+    const IR::F32 clamped{ir.FPClamp(src0, ir.Imm32(-2147483648.0f), ir.Imm32(2147483520.0f))};
+    const IR::F32 safe_val{ir.Select(ir.FPIsNan(src0), ir.Imm32(0.0f), clamped)};
+    SetDst(inst.dst[0], ir.ConvertFToS(32, safe_val));
 }
 
 void Translator::V_CVT_F16_F32(const GcnInst& inst) {
@@ -964,12 +968,18 @@ void Translator::V_CVT_F32_F16(const GcnInst& inst) {
 
 void Translator::V_CVT_RPI_I32_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    SetDst(inst.dst[0], ir.ConvertFToI(32, true, ir.FPFloor(ir.FPAdd(src0, ir.Imm32(0.5f)))));
+    const IR::F32 rounded{ir.FPFloor(ir.FPAdd(src0, ir.Imm32(0.5f)))};
+    const IR::F32 clamped{ir.FPClamp(rounded, ir.Imm32(-2147483648.0f), ir.Imm32(2147483520.0f))};
+    const IR::F32 safe_val{ir.Select(ir.FPIsNan(src0), ir.Imm32(0.0f), clamped)};
+    SetDst(inst.dst[0], ir.ConvertFToI(32, true, safe_val));
 }
 
 void Translator::V_CVT_FLR_I32_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    SetDst(inst.dst[0], ir.ConvertFToI(32, true, ir.FPFloor(src0)));
+    const IR::F32 floored{ir.FPFloor(src0)};
+    const IR::F32 clamped{ir.FPClamp(floored, ir.Imm32(-2147483648.0f), ir.Imm32(2147483520.0f))};
+    const IR::F32 safe_val{ir.Select(ir.FPIsNan(src0), ir.Imm32(0.0f), clamped)};
+    SetDst(inst.dst[0], ir.ConvertFToI(32, true, safe_val));
 }
 
 void Translator::V_CVT_OFF_F32_I4(const GcnInst& inst) {

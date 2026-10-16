@@ -202,7 +202,11 @@ def main():
         shutil.copy2(script, folder / 'scripts')
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
-    shutil.copy2(ROOT / 'patches' / 'CrashTeamRacing.xml', folder / 'patches')
+    for patch in (ROOT / 'patches').glob('*.xml'):
+        shutil.copy2(patch, folder / 'patches')
+    steamgrid_dir = PORTABLE.parent / 'steamgrid'
+    if steamgrid_dir.is_dir():
+        shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
     if (ROOT / 'out' / 'aerolib.inl').is_file():
         shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in

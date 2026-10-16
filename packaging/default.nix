@@ -12,7 +12,7 @@ let
   assetDirs = [ "scripts" "patches" "launcher" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
-    "run.sh" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
+    "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
     "out/VERSION" "tools" "tools/gen_import_names.py"
   ] ++ assetDirs;
   src = builtins.path {
@@ -121,7 +121,7 @@ pkgs.stdenv.mkDerivation {
     runHook preInstall
     d=$out/share/sacredfire
     mkdir -p $d/bin $out/bin
-    cp run.sh $d/
+    cp run.sh run.py $d/   # run.py: scripts/online_config.py reuses its online setup
     cp out/VERSION $d/VERSION   # the build's source revision (build.sh); run.sh and the launcher show it
     cp -r scripts patches launcher $d/
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).

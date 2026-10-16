@@ -9,6 +9,7 @@
 #ifdef __cplusplus
 #include <cmath>
 #include <new>
+#include <mutex>
 #else
 #include <math.h>
 #endif

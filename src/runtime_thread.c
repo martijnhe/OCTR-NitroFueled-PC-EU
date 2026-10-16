@@ -214,6 +214,12 @@ static ABI int32_t attr_get_stack_addr_size(ThreadAttr **slot,void **addr,uint64
     if (!a || !addr || !size) return ERR(22);
     *addr=a->stack_addr; *size=a->stack; return 0;
 }
+static ABI int32_t attr_get_stackaddr(ThreadAttr **slot,void **stackaddr) {
+    ThreadAttr *a=find_attr(slot);
+    if (!a || !stackaddr) return ERR(22);
+    *stackaddr=a->stack_addr;
+    return 0;
+}
 static ABI int32_t attr_set_detach(ThreadAttr **slot,int state) {
     ThreadAttr *a=find_attr(slot);
     if (!a || (state!=0 && state!=1)) return ERR(22);
@@ -417,6 +423,8 @@ static ABI int32_t posix_attr_set_param(ThreadAttr **a,const int *p) { return po
 static ABI int32_t posix_create(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg) { return posix(create(t,a,e,arg,"posix")); }
 static ABI int32_t posix_create_name(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg,const char *name) { return posix(create(t,a,e,arg,name)); }
 static ABI int32_t posix_join(GuestThread *t,void **r) { return posix(thread_join(t,r)); }
+static ABI int32_t posix_attr_get_stack(ThreadAttr **a,void **addr,uint64_t *s) { return posix(attr_get_stack_addr_size(a,addr,s)); }
+static ABI int32_t posix_attr_get_stacksize(ThreadAttr **a,uint64_t *s) { return posix(attr_get_stack(a,s)); }
 
 uintptr_t runtime_thread_resolve(const char *name) {
     static const struct { const char *nid; void *fn; } table[]={
@@ -428,6 +436,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"4+h9EzwKF4I#libkernel",attr_set_policy}, {"DzES9hQF4f4#libkernel",attr_set_param},
         {"3qxgM4ezETA#libkernel",attr_set_affinity}, {"eXbUSpEaTsA#libkernel",attr_set_inherit},
         {"JaRMy+QcpeU#libkernel",attr_get_detach}, {"-fA+7ZlGDQs#libkernel",attr_get_stack}, {"-quPa4SEJUw#libkernel",attr_get_stack_addr_size},
+        {"Ru36fiTtJzA#libkernel",attr_get_stackaddr},
         {"FXPWHNk8Of0#libkernel",attr_get_param}, {"El+cQ20DynU#libkernel",attr_set_guard},
         {"6UgtwV+0zb4#libkernel",thread_create}, {"onNY9Byn-W8#libkernel",thread_join},
         {"4qGrR6eoP9Y#libkernel",thread_detach}, {"3kg7rT0NQIs#libkernel",thread_exit},
@@ -439,6 +448,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"euKRgm0Vn2M",posix_attr_set_param}, {"OxhIB8LB-PQ",posix_create},
         {"Jmi+9w9u0E4",posix_create_name}, {"h9CcP3J0oVM",posix_join},
         {"FJrT5LuUBAU",thread_exit},
+        {"vQm4fDEsWi8",posix_attr_get_stack}, {"0qOtCR-ZHck",posix_attr_get_stacksize},
         {"How7B8Oet6k#libkernel",thread_getname}, {"EI-5-jlq2dE#libkernel",thread_getthreadid}, {"qBDmpCyGssE#libkernel",thread_cancel},
         {"FIs3-UQT9sg",posix_getschedparam}, {"Xs9hdiD7sAA",posix_setschedparam},
     };

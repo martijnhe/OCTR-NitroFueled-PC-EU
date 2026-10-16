@@ -51,10 +51,12 @@ inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
 /// (https://github.com/illusionyy/PS-Game-Patch, patches/xml/CrashTeamRacingUS-Orbis.xml):
 /// "60 FPS Unlock" and "Disable Motion Blur" by illusion, "Resolution Patch (1080p for PS4 Pro)"
 /// by TroyWarez. SacredFire only corrected the last one's address (docs/sacredfire/08-patches.md).
+/// "Unlock Everything" by Camiloop (patches/CrashTeamRacingUnlockAll.xml).
 inline constexpr Effect GamePatches[] = {
     {"patch_60fps", "60 FPS unlock (illusion)", "60 FPS (illusion)", false},
     {"patch_no_motion_blur", "Disable motion blur (illusion)", "Без размытия в движении (illusion)", false},
     {"patch_pro_1080p", "1080p in PS4 Pro mode (TroyWarez; with BB_NEO=1)", "1080p в режиме PS4 Pro (TroyWarez; с BB_NEO=1)", false},
+    {"patch_unlock_all", "Unlock everything (Camiloop; back up your save)", "Открыть всё (Camiloop; сделайте копию сохранения)", false},
 };
 inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatches[0]));
 /// SacredFire: bbport.ini render_res, the scene size CTR renders (through its PS4 Pro path above
@@ -109,9 +111,19 @@ struct Values {
     /// shader no longer stops the game; a pass drawn every frame may miss a frame or two.
     /// Experimental (STATUS.md, issue #2). Applies at once. BB_ASYNC_PIPELINES overrides it.
     std::atomic<bool> async_pipelines{false};
+    /// SacredFire: the game's 2x MSAA (G-buffer and forward passes). Off by default: on the host
+    /// GPU, single-sample colour drawn over the 2x depth buffer blends twice along triangle edges
+    /// (dotted lines in skies and light shafts, GitHub issues #16/#18), and at the internal
+    /// resolutions this port offers MSAA adds little. Read once at start (restart to apply);
+    /// BB_NO_MSAA=1/0 overrides it. AmdGpu::BbNoMsaa() is the switch the renderer reads.
+    std::atomic<bool> msaa{false};
     /// SacredFire: exclusive fullscreen on the game's display (BB_DISPLAY). Applies at once;
     /// BB_FULLSCREEN=1 at start. Saved to bbport.ini by the menu.
     std::atomic<bool> fullscreen{false};
+    std::atomic<bool> borderless{false};
+    /// SacredFire: the game's volume in percent, 0..200 (bbport.ini volume, the launcher's and
+    /// the menu's slider). Applies at once (runtime_audio.c, bbgpu_audio_volume).
+    std::atomic<int> volume{100};
     /// The settings menu's position (fraction of the screen), -1 until it is moved.
     std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.

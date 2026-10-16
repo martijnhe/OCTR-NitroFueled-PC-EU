@@ -239,7 +239,10 @@ def prepare(game, out):
         f.write(struct.pack('<8sQQQQQQ', b'BBPROBE2', size, header[4], len(loads), len(relocs), len(names),
                             int(libc_evidence['init_env_is_ret'])))
         for p in loads:
-            f.write(struct.pack('<QQQ', p['vaddr'], p['memsz'], p['flags']))
+            seg_flags = p['flags']
+            if not (seg_flags & 1):
+                seg_flags |= 2
+            f.write(struct.pack('<QQQ', p['vaddr'], p['memsz'], seg_flags))
         for name in names:
             encoded = name.encode()
             if len(encoded) >= 128:

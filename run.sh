@@ -45,6 +45,18 @@ if [[ -z ${PYTHON:-} ]]; then
     fi
 fi
 if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1; fi
+# Configure the private online server before patches.py selects the game's key patch.
+online_env=$(mktemp "$out/online-env.XXXXXX")
+if ! "$PYTHON" scripts/online_config.py --config "$BB_CONFIG" --data "$data" --env-file "$online_env"; then
+    rm -f "$online_env"
+    exit 1
+fi
+while IFS= read -r -d '' setting; do export "$setting"; done < "$online_env"
+rm -f "$online_env"
+if [[ ${BB_ONLINE:-0} == 1 ]]; then
+    export BB_SESSIONS_DIR=${BB_SESSIONS_DIR:-$data/sessions}
+    mkdir -p "$BB_SESSIONS_DIR"
+fi
 # BB_GAME_DIR: the game's folder (eboot.bin, sce_module, ...); default: orig/CUSA13795, SacredFire's
 # read-only link tree of the merged CTR dump (update 1.21 over the base game).
 game=${BB_GAME_DIR:-orig/CUSA13795}

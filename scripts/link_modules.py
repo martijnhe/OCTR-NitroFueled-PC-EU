@@ -141,7 +141,10 @@ def link(game, out, module_names=DEFAULT_MODULES):
             if p['filesz'] > p['memsz']:
                 raise ValueError(f'{filename}: invalid segment size')
             image[base + p['vaddr']:base + p['vaddr'] + p['filesz']] = span(m['elf'], p['offset'], p['filesz'])
-            segments.append((base + p['vaddr'], p['memsz'], p['flags']))
+            seg_flags = p['flags']
+            if not (seg_flags & 1):
+                seg_flags |= 2
+            segments.append((base + p['vaddr'], p['memsz'], seg_flags))
         tls = next((p for p in m['ph'] if p['type'] == 7), None)
         module_id = 0
         if tls:
