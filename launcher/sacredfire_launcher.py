@@ -90,12 +90,29 @@ DEFAULTS = {
 INI_DEFAULTS = {"show_fps": "0", **{key: "0" for key, _, _ in PATCHES}}
 
 
+def game_next_to_appimage():
+    """A game folder (with eboot.bin) in the AppImage's own folder, so a folder holding the
+    AppImage and the merged game needs no setup: one named like an update (1.21) first."""
+    appimage = os.environ.get("APPIMAGE", "")
+    if not appimage:
+        return ""
+    try:
+        found = sorted(d for d in Path(appimage).resolve().parent.iterdir()
+                       if d.is_dir() and (d / "eboot.bin").is_file())
+    except OSError:
+        return ""
+    found.sort(key=lambda d: "1.21" not in d.name)
+    return str(found[0]) if found else ""
+
+
 def load_settings():
     settings = dict(DEFAULTS)
     try:
         settings.update(json.loads(CONFIG_FILE.read_text()))
     except (OSError, ValueError):
         pass
+    if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
+        settings["game_dir"] = game_next_to_appimage() or settings["game_dir"]
     return settings
 
 

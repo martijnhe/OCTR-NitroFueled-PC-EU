@@ -298,7 +298,9 @@ binaries are built in `nix-shell shell.nix` so the bundle can collect their libr
 `nix bundle` packs them with the GTK launcher, Python and Mesa's Vulkan drivers (the header of
 the script has the exact steps). Running it opens the launcher; `--play` starts the game. Data
 lives in `~/.local/share/sacredfire`, launcher settings in `~/.config/sacredfire-launcher`.
-Without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
+A game folder next to the AppImage (a folder with `eboot.bin` in the AppImage's own folder, one
+with 1.21 in its name first) is used when none is chosen: copy the AppImage and the merged game
+into one folder and it starts with no setup. without a game folder chosen, the launcher shows the Game row as *not chosen* with Play disabled
 until a folder passes the game check.
 
 **Adding the AppImage to Steam**: the AppImage does it on its first start (once; not when Steam
