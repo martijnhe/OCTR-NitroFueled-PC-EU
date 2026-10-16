@@ -47,6 +47,40 @@ at the monitor's size and the camera follows its aspect). Three things look wron
 BbOverlay does with its settings); a bbport.ini key `ultrawide_cinematics=pillarbox|full` and a
 menu checkbox; tests for the patch side.
 
+## Ultrawide: title screen and kart customization screen backdrops
+
+**State (EU 1.21, 3440x1440):** videos and story cutscenes are pillarboxed, the race fly-over
+intro (`CCutsceneData::_isFlybyIntro`, +0x30) stays ultrawide. The title screen (Crash with the
+trophy) and the kart customization screen before a race are not cutscenes (the cutscene manager's
+active fields stay 0 there): they are 3D sets whose checkered backdrop card is only as wide as a
+16:9 view, so at 21:9 the camera sees past its edges (sky and black at the sides; on the
+customization screen mostly the right side). The menus over them already spread to the edges.
+
+**Wanted:** the backdrop filling the width with the 3D scene staying sharp and the menus intact,
+i.e. on these two screens a camera with the horizontal coverage of 16:9 (a smaller vertical FOV:
+at 2.389 the 16:9 coverage is 63.7 degrees where the camera has 79.755).
+
+**Found so far:**
+- `CPreRenderUpdatePass` (vtable image offset 0x25567d8 in EU 1.21; found from its registration:
+  the last table of code pointers loaded before `lea r8,[name]`): fields `_cameraAspectRatioMultiplier`
+  +0x124, `_cameraName` +0x138 (a char*), `_renderCamera` +0x168. Six passes have camera `main`
+  (others: split1/2, splitcam1-4, main_reflections); all have multiplier 1.0 on every screen.
+- The main pass's `_renderCamera` (vtable 0x248d1d0): float +0x3c = 79.755 (field of view, degrees),
+  +0x40 = 2.389 (the output aspect), +0x64 near 32, +0x68 far 40000, position at +0xa0.
+  At the title screen the position rests at (5369.079, -145.723, -929.986), passing
+  (5375.165, -162.254, -965.714) on the way in. It is a usable signal for "title screen shows".
+- Writing +0x3c (63.7) or +0x40 (1.778) every frame changed nothing on screen: the projection
+  the GPU gets is built from another copy (or from `CCameraSetting` `_horizontalFov` +0x1c /
+  `_verticalFov` +0x20, or `igCamera::_horizontalFieldOfView` +0x50). Next: find where the
+  projection matrix is built from these (follow the reads of +0x3c/+0x40 of this camera, or the
+  writers of the view-projection constants), then scale its horizontal term on these two screens.
+- `CVehiclePersonalizationTopperSharedData` has the customization screen's camera FOVs
+  (`_guiStandardCameraFov` +0x20, `_guiSetCameraFov` +0x38, ...): possibly the place to change that
+  screen's camera.
+- Tried and dropped (2026-10-16): zooming the presented frame until the card fills the width. It
+  works but trims the top and bottom (the title's "Press X to begin"), softens the picture and
+  cuts the customization menu's edges.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only
