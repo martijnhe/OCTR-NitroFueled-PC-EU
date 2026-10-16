@@ -164,3 +164,64 @@ def launcher_command():
     else:
         exe = str((Path(__file__).resolve().parent / "bb-launcher.sh"))
     return exe, str(Path(exe).parent), "--play"
+
+
+# --- command line: install-desktop.sh adds the game to Steam (Steam Deck game mode) ----------
+
+def grid_artwork(path, appid, icon="", hero=""):
+    """Library artwork for a shortcut: config/grid/<appid>p.png (portrait capsule), <appid>.png
+    (wide capsule), <appid>_hero.png; Steam crops what does not fit."""
+    grid = Path(path).parent / "grid"
+    grid.mkdir(parents=True, exist_ok=True)
+    unsigned = appid & 0xFFFFFFFF
+    copies = [(icon, f"{unsigned}p.png"), (hero or icon, f"{unsigned}.png"), (hero, f"{unsigned}_hero.png")]
+    for source, name in copies:
+        if source and Path(source).is_file():
+            (grid / name).write_bytes(Path(source).read_bytes())
+
+
+def add_everywhere(exe, name, icon="", hero=""):
+    """The shortcut (and artwork) for every Steam user; returns (added, updated) counts."""
+    entry = make_entry(exe, str(Path(exe).parent), name=name, icon=icon)
+    added = updated = 0
+    for path in shortcut_files():
+        if add_shortcut(path, entry):
+            added += 1
+        else:
+            updated += 1
+        grid_artwork(path, entry["appid"], icon, hero)
+    return added, updated
+
+
+def main(argv):
+    import argparse
+    import time
+    p = argparse.ArgumentParser(description="Adds a non-Steam shortcut for every Steam user.")
+    p.add_argument("--exe", required=True)
+    p.add_argument("--name", default=NAME)
+    p.add_argument("--icon", default="")
+    p.add_argument("--hero", default="")
+    p.add_argument("--wait", action="store_true",
+                   help="if Steam runs, wait (up to a day) until it exits, then add the shortcut")
+    a = p.parse_args(argv)
+    if not shortcut_files():
+        print("Steam: no Steam user found; no shortcut added")
+        return 0
+    if steam_running():
+        if not a.wait:
+            print("Steam: running; close it and run again (it overwrites its shortcuts when it exits)")
+            return 1
+        deadline = time.time() + 86400
+        while steam_running() and time.time() < deadline:
+            time.sleep(10)
+        time.sleep(3)  # let Steam finish writing its files
+        if steam_running():
+            return 1
+    added, updated = add_everywhere(a.exe, a.name, a.icon, a.hero)
+    print(f'Steam: "{a.name}" added for {added} user(s), updated for {updated}; it shows after Steam starts')
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

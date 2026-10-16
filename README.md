@@ -21,6 +21,10 @@
 >   closed; see [TODO.md](TODO.md).
 > - **Internal resolution** (1440p and the others) now also applies when started through
 >   `run.sh` (Linux, Steam Deck), not only `run.py`.
+> - **Shortcuts:** `launcher/install-desktop.sh GAME_DIR` adds *Crash Team Racing Nitro-Fueled* to
+>   the application menu and to **Steam** (non-Steam game with the game's cover art, starts the
+>   game directly, so it works in Steam Deck game mode). If Steam is open, the shortcut is added
+>   as soon as it closes. `STEAM_SHORTCUT=0` skips Steam.
 > - Builds and runs on Linux as before (`bash build.sh`, `bash run.sh`; `BB_GAME_DIR` points at
 >   the game folder); no CPU-specific flags, so the same build works on the Steam Deck.
 

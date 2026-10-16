@@ -38,3 +38,16 @@ else
     echo "No game folder with eboot.bin: the direct-play entry needs launcher/install-desktop.sh GAME_DIR"
 fi
 command -v update-desktop-database >/dev/null && update-desktop-database "$dest" 2>/dev/null || true
+# Steam (Steam Deck game mode): a non-Steam shortcut "Crash Team Racing Nitro-Fueled" that starts
+# play.sh, with the game's cover as artwork. Steam overwrites its shortcuts when it exits, so while
+# it runs a background waiter adds the shortcut once it has closed. STEAM_SHORTCUT=0: skip.
+if [[ ${STEAM_SHORTCUT:-1} != 0 && -f $game/eboot.bin ]]; then
+    hero=; [[ -f $game/sce_sys/pic1.png ]] && hero=$(realpath -- "$game/sce_sys/pic1.png")
+    steam_args=(--exe "$here/play.sh" --name "Crash Team Racing Nitro-Fueled" --icon "${icon#applications-games}" --hero "$hero")
+    if python3 "$here/steam_shortcuts.py" "${steam_args[@]}"; then
+        :
+    elif pgrep -x steam >/dev/null; then
+        setsid nohup python3 "$here/steam_shortcuts.py" "${steam_args[@]}" --wait >/dev/null 2>&1 &
+        echo "Steam: running; the shortcut is added as soon as Steam closes"
+    fi
+fi
