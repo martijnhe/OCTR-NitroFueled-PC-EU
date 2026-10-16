@@ -62,9 +62,9 @@ if (( native )); then
 else
     # With DECK_CPU_MHZ the slower clock stands for the Deck's CPU; a CPU-time quota on top froze
     # the game whenever its share ran out (60-70 ms frames a Deck does not have).
-    quota=${DECK_CPU_QUOTA:-340%}
-    [[ -n ${DECK_CPU_MHZ:-} && -z ${DECK_CPU_QUOTA:-} ]] && quota=infinity
-    command=(systemd-run --user --scope --quiet -p MemoryMax=14G -p CPUQuota="$quota"
+    limits=(-p MemoryMax=14G)
+    if [[ -n ${DECK_CPU_QUOTA:-} || -z ${DECK_CPU_MHZ:-} ]]; then limits+=(-p CPUQuota="${DECK_CPU_QUOTA:-340%}"); fi
+    command=(systemd-run --user --scope --quiet "${limits[@]}"
         taskset -c "${DECK_CPUS:-0-3,6-9}"
         gamescope -W 1280 -H 800 -w 1280 -h 800 -r 60 -- "${game_command[@]}")
 fi
