@@ -458,6 +458,22 @@ def main():
             if plan and plan.get('output') and not ini_has(config, 'ultrawide_frontend=0'):
                 env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
                                                     capture=True).strip()
+            # CTR TV in place of the opening video: every start (ctrtv_at_start=1) or once (ctrtv_next=1,
+            # the in-game menu's "Watch CTR TV", removed here).
+            env.pop('BB_CTRTV', None)
+            episode = next((l.split('=', 1)[1].strip() for l in Path(config).read_text(encoding='utf-8', errors='replace')
+                            .splitlines() if l.startswith('ctrtv_episode=')), '') if Path(config).is_file() else ''
+            episode = episode if episode.replace('_', '').isalnum() else 'CTRTV_FebGP'
+            if ini_has(config, 'ctrtv_next=1'):
+                env['BB_CTRTV'] = episode
+                try:
+                    lines = Path(config).read_text(encoding='utf-8').splitlines()
+                    Path(config).write_text(''.join(l + '\n' for l in lines if not l.startswith('ctrtv_next=')),
+                                            encoding='utf-8')
+                except OSError:
+                    pass
+            elif ini_has(config, 'ctrtv_at_start=1'):
+                env['BB_CTRTV'] = episode
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)

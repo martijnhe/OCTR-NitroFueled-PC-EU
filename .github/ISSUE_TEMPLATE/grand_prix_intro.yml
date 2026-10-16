@@ -1,0 +1,65 @@
+name: CTR TV / Grand Prix intro
+description: Tell us which update had which Grand Prix intro or CTR TV episode (information only, no game files).
+title: "[Grand Prix intro] "
+labels: ["grand-prix-intro"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Each Grand Prix season of Crash Team Racing Nitro-Fueled came with its own start-up intro and
+        CTR TV episode, and the next update replaced them: the final update (1.21) only has the
+        February Grand Prix's `CTRTV_FebGP.bk2`. This port can play any `CTRTV_*.bk2` it finds in
+        your own game folder (menu: L3 + R3 > CTR TV > Episode).
+
+        If you dumped an older update from your own console, tell us what is in it, so the port can
+        support it and others can check their own dumps.
+
+        **Do not attach, upload or link game files** (videos, `.pak`, `.pkg`, dumps, saves): they are
+        Activision's and cannot be shared here. Names, sizes and checksums are enough.
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      options:
+        - European (CUSA14876)
+        - USA (CUSA13795)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Update version
+      description: The update's version (sce_sys/param.sfo APP_VER), for example 01.10.
+      placeholder: "01.10"
+    validations:
+      required: true
+  - type: input
+    id: grand_prix
+    attributes:
+      label: Grand Prix
+      description: Which Grand Prix season this update was for, if you know it.
+      placeholder: "Neon Circus"
+  - type: textarea
+    id: files
+    attributes:
+      label: Video files
+      description: |
+        The `CTRTV_*.bk2` and other new `.bk2` files in the update's `archives` folder, each with its
+        size in bytes and its SHA-256 (`sha256sum archives/*.bk2` on Linux,
+        `Get-FileHash archives\*.bk2` in PowerShell).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Did the start-up intro (the scene where a character jumps into the CTR logo) change in this update? Other things you noticed.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Game files
+      options:
+        - label: I did not attach, upload or link any game files.
+          required: true

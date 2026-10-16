@@ -61,6 +61,7 @@ fi
 # read-only link tree of the merged CTR dump (update 1.21 over the base game).
 game=${BB_GAME_DIR:-orig/CUSA13795}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
+export BB_GAME_DIR=$game  # the in-game menu lists the CTR TV episodes in its archives
 # The game check (scripts/game_check.py) compares the executable image with the supported one
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
@@ -246,6 +247,19 @@ if [[ -n ${mod_game:-} ]]; then
     # An interrupted wait must finish the child before removing its mounted view.
     if kill -0 "$mod_pid" 2>/dev/null; then wait "$mod_pid" || mod_status=$?; fi
     exit "$mod_status"
+fi
+# CTR TV (src/runtime_file.c): the opening video at start plays the February Grand Prix's CTR TV
+# broadcast, at every start (ctrtv_at_start=1) or once (ctrtv_next=1, the menu's "Watch CTR TV",
+# removed here so the next start is normal again).
+# The episode: ctrtv_episode (archives/<name>.bk2, the menu lists every CTRTV_*.bk2 of the game
+# folder), CTRTV_FebGP by default.
+unset BB_CTRTV
+episode=$(sed -n 's/^ctrtv_episode=\([A-Za-z0-9_]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
+if [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_next=1' "$BB_CONFIG"; then
+    export BB_CTRTV=${episode:-CTRTV_FebGP}
+    sed -i '/^ctrtv_next=/d' "$BB_CONFIG"
+elif [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_at_start=1' "$BB_CONFIG"; then
+    export BB_CTRTV=${episode:-CTRTV_FebGP}
 fi
 # Discord (online on, bbport.ini discord_rpc not 0): the presence, invites and "Ask to Join" while
 # the game runs (scripts/discord_presence.py, Linux); it follows this process, which becomes the game.

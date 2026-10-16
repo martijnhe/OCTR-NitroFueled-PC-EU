@@ -116,6 +116,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.ultrawide = i != 0 ? 1 : 0;
     } else if (key == "ultrawide_ask") {
         v.ultrawide_ask = i != 0;
+    } else if (key == "ctrtv_episode") {
+        std::snprintf(v.ctrtv_episode.data(), v.ctrtv_episode.size(), "%s", value.c_str());
     } else if (key == "online") {
         v.online = i != 0;
     } else if (key == "online_asked") {
@@ -406,6 +408,8 @@ void Save() {
     if (v.render_res >= 0) put("render_res", std::to_string(RenderResHeights[v.render_res]));
     if (v.ultrawide >= 0) put("ultrawide", flag(v.ultrawide == 1));
     put("ultrawide_ask", flag(v.ultrawide_ask));
+    if (v.ctrtv_next) put("ctrtv_next", "1");
+    if (v.ctrtv_episode[0]) put("ctrtv_episode", std::string(v.ctrtv_episode.data()));
     put("online", flag(v.online));
     put("online_asked", flag(v.online_asked));
     {

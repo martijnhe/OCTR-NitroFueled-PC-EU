@@ -20,6 +20,7 @@ draws with Vulkan. No emulator, no game files included.
 | **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch, on and off at any time. Nothing is written to your save or your online items: turned off, you have exactly what you bought or won again. Turning it on asks first (the Pit Stop does not work while it is on) and backs up your saves to `user/savedata-backups`. | off by default; menu *Unlock everything* / `unlock_all=1` |
 | **Online (RyuNET)** | Online races, matchmaking, private rooms, the friends list and the Pit Stop on the RyuNET server, from [Ryu7w7's OCTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC) v0.5, also for the European edition (its own key patch, `patches/CrashTeamRacingOnlineEU.xml`). Needs your own nickname: the first start asks for it (*Play online?*), later the menu's *Online (RyuNET)* section; the game restarts to go online. The nickname belongs to this PC's `ryunet_online.key` (a second copy in `~/.config/CTR-NitroFueled-PC/` on Linux); *Link with Discord* in the menu keeps it across reinstalls and other PCs (*Recover with Discord*), with your online items and friends. | off by default; first-start question / menu / `online=1` and `online_name=` in `bbport.ini` |
 | **Discord** | Linux and Steam Deck too: your Discord status shows the game while you play online ("Playing online", your nickname, the time played), with *Join* and the chat's *+ > Invite to play*; accepting an invite makes the host your friend and the game joins their private room. *Link with Discord* / *Recover with Discord* in the menu keep your online nickname. Works with the Discord app (also Flatpak) on the same PC. On Windows: the launcher's Online tab. | with online; `discord_rpc=0` turns the status off, `discord_accept_requests=0` stops accepting "Ask to Join" |
+| **CTR TV** | The Grand Prix's CTR TV broadcast in place of the opening video: once (*Watch CTR TV*, the game restarts) or at every start. 1.21 has the February Grand Prix's episode; an older update's `CTRTV_*.bk2` in your own game folder's `archives` shows up as another episode. | menu *CTR TV* / `ctrtv_at_start=1`, `ctrtv_episode=` |
 | **From upstream v0.5** | Game volume (0-200%), the keyboard as a split-screen player, fixes for error codes 3 (memory) and 23 (GPU hang). | menu |
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
 | **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
@@ -75,6 +76,19 @@ nickname of another PC on the Deck: menu (L3 + R3) > *Online (RyuNET)* > *Recove
 coins and friends belong to the nickname, so they are the same on both; game saves stay on each
 device (copy `user/savedata` to share them). Do not play online on two devices with one nickname
 at the same time.
+
+## Wanted: the Grand Prix intros (optional)
+
+Every Grand Prix season had its own start-up intro and CTR TV episode, and each update replaced
+the previous season's: the final update (1.21) only has the February Grand Prix's CTR TV
+(`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. The earlier ones were in the
+updates 1.10 to 1.20.
+
+If you dumped one of those updates from your own console, please
+[open an issue with the *CTR TV / Grand Prix intro* form](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/issues/new?template=grand_prix_intro.yml):
+the update's version, the Grand Prix, and the names, sizes and checksums of its `.bk2` files. With
+that the port can support them (CTR TV episodes already work: put them in your own `archives`).
+**No game files in issues, please**: they are Activision's and cannot be shared here.
 
 ## Not working yet
 

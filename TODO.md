@@ -124,6 +124,22 @@ Upstream's Discord parts are Windows-only (`launcher/windows/discord_link.cpp`,
   Flatpak and Snap Discord). The presence and the connection are tested; accepting an invite
   (ryunet_join.txt, the host as a friend) needs a second player to test.
 
+## Grand Prix intros and CTR TV episodes (optional)
+
+**State:** the menu's *CTR TV* plays a CTR TV episode in place of the opening video
+(`openinglogo.bk2` redirected in src/runtime_file.c, BB_CTRTV=<episode>); it lists every
+`CTRTV_*.bk2` in the game folder's archives. 1.21 (EU and USA) has only `CTRTV_FebGP.bk2`; the
+start screen (`octane_startscreen.pak`) has only Crash's intro (`Crash_MainMenu`,
+`Cutscene_CrashMainMenu`); 1.00 shares its opening videos with 1.21.
+
+**Wanted:** the earlier seasons' intros (updates 1.10 to 1.20: their CTR TV episodes and the
+start-screen intros where another character jumps into the logo, see "Intro Comparison + All
+Grand Prix Intros" on YouTube). Reports come in through the issue form
+`.github/ISSUE_TEMPLATE/grand_prix_intro.yml` (names, sizes, checksums; no game files). Then:
+check whether a start-screen intro is a `.pak` cutscene the game picks by Grand Prix data
+(`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
+choice for it.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only

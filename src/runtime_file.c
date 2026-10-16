@@ -147,6 +147,22 @@ static int translate(const char *guest,char *out,size_t size) {
     else snprintf(buffer,sizeof(buffer),"%s",guest);
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
         if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
+    /* SacredFire: CTR TV (BB_CTRTV=1; the in-game menu's "Watch CTR TV" for one start, or
+     * ctrtv_at_start): the opening video at start plays the last Grand Prix's CTR TV broadcast,
+     * the only one left in 1.21 (archives/CTRTV_FebGP.bk2), shown and skipped as the opening. */
+    static int ctrtv=-1;
+    static char episode[64]="CTRTV_FebGP";
+    if (ctrtv<0) {
+        const char *c=getenv("BB_CTRTV");
+        ctrtv=c && *c && strcmp(c,"0");
+        /* An episode's name (archives/<name>.bk2, letters, digits and _); "1": the February GP. */
+        if (ctrtv && strcmp(c,"1") && strlen(c)<sizeof(episode) && strspn(c,"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")==strlen(c))
+            snprintf(episode,sizeof(episode),"%s",c);
+    }
+    static const char opening[]="/archives/openinglogo.bk2";
+    const size_t length=strlen(buffer), opening_length=sizeof(opening)-1;
+    if (ctrtv && length>=opening_length && !strcasecmp(buffer+length-opening_length,opening))
+        snprintf(buffer+length-opening_length,sizeof(buffer)-(length-opening_length),"/archives/%s.bk2",episode);
     pthread_mutex_lock(&lock);
     size_t best=0; const Mount *m=NULL;
     for (size_t i=0;i<mount_count;++i) {

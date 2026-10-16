@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #ifndef _WIN32
@@ -79,7 +80,7 @@ void SetUnlockAll(bool on);
 void DiscordRun(const char* command);
 void DiscordPoll();
 void SetOnline(bool on, const char* name);
-void RestartForOnline();
+void RestartWithSettings();
 bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
 bool l3_down = false, r3_down = false;
@@ -700,8 +701,56 @@ void Menu() {
                                                 "Изменения применятся после перезапуска игры"));
         if (ImGui::Button(
                 BbSettings::MenuText("Apply and restart game", "Применить и перезапустить игру"))) {
-            RestartForOnline(); // saves; the new launch reads the online settings from bbport.ini
+            RestartWithSettings(); // saves; the new launch reads the online settings from bbport.ini
         }
+    }
+
+    // SacredFire: CTR TV, the February Grand Prix broadcast (the only one left in 1.21), in place of
+    // the opening video: once (a restart now) or at every start (src/runtime_file.c, run.sh).
+    ImGui::SeparatorText("CTR TV");
+    {
+        if (ImGui::Button(BbSettings::MenuText("Watch CTR TV (restarts the game)",
+                                               "Смотреть CTR TV (перезапуск игры)"))) {
+            s.ctrtv_next = true;
+            std::printf("Menu: CTR TV at the next start\n");
+            RestartWithSettings();
+        }
+        // The episodes in the game folder: 1.21 has the February GP's; an older update's dump may
+        // add its own CTRTV_*.bk2.
+        static std::vector<std::string> episodes;
+        if (ImGui::IsWindowAppearing() || episodes.empty()) {
+            episodes.clear();
+            if (const char* game = std::getenv("BB_GAME_DIR")) {
+                std::error_code ec;
+                for (const auto& f : std::filesystem::directory_iterator(std::filesystem::path(game) / "archives", ec)) {
+                    const std::string name = f.path().filename().string();
+                    if (name.size() > 10 && name.compare(0, 6, "CTRTV_") == 0 &&
+                        name.compare(name.size() - 4, 4, ".bk2") == 0)
+                        episodes.push_back(name.substr(0, name.size() - 4));
+                }
+            }
+            std::sort(episodes.begin(), episodes.end());
+            if (episodes.empty()) episodes.push_back("CTRTV_FebGP");
+        }
+        std::string chosen = s.ctrtv_episode[0] ? s.ctrtv_episode.data() : "CTRTV_FebGP";
+        if (episodes.size() > 1 && ImGui::BeginCombo(BbSettings::MenuText("Episode", "Выпуск"), chosen.c_str())) {
+            for (const auto& name : episodes) {
+                if (ImGui::Selectable(name.c_str(), name == chosen)) {
+                    std::snprintf(s.ctrtv_episode.data(), s.ctrtv_episode.size(), "%s", name.c_str());
+                    BbSettings::Save();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        for (int e = 0; e < BbSettings::EffectCount; ++e) {
+            if (std::strcmp(BbSettings::Effects[e].key, "ctrtv_at_start") != 0) continue;
+            Checkbox(BbSettings::MenuText("CTR TV at every start", "CTR TV при каждом запуске"), s.effects[e]);
+        }
+        Hint(BbSettings::MenuText(
+            "A Grand Prix's CTR TV broadcast plays in place of the opening video (Cross skips it). 1.21 has the "
+            "February one; earlier ones were replaced by later updates (an older update's CTRTV_*.bk2 in archives "
+            "shows up here as an episode).",
+            "Выпуск CTR TV февральского Гран-при вместо вступительного видео (Cross пропускает)."));
     }
 
     // SacredFire online (RyuNET): the nickname and online play, applied by a restart.
@@ -1138,7 +1187,7 @@ void UnlockConfirm() {
 // SacredFire online: the nickname typed in the question or the menu, saved, and the game started
 // again (run.sh / run.py set the server up and select the key patch at start). The variables of
 // this launch are dropped, so the new launch reads bbport.ini.
-void RestartForOnline() {
+void RestartWithSettings() {
     BbSettings::Save();
 #ifdef _WIN32
     _putenv("BB_ONLINE=");
@@ -1198,7 +1247,7 @@ void OnlinePrompt() {
         SetOnline(true, online_name_edit);
         online_prompt = false;
         std::printf("Online: on as %s, restarting\n", online_name_edit);
-        RestartForOnline();
+        RestartWithSettings();
     } else if (choice == 0) {
         auto& s = BbSettings::Get();
         s.online_asked = true;

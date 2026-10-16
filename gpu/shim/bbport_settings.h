@@ -38,6 +38,7 @@ inline constexpr Effect Effects[] = {
     {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
     {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
     {"ultrawide_cinematics", "Ultrawide: videos and cutscenes at 16:9", "Ультраширокий: видео и ролики в 16:9", true},
+    {"ctrtv_at_start", "CTR TV at every start (the February Grand Prix broadcast)", "CTR TV при каждом запуске", false},
     {"ultrawide_frontend", "Ultrawide: title and customization screens fill the width", "Ультраширокий: титульный экран и настройка карта на всю ширину", true},
     {"unlock_all", "Unlock everything (all Pit Stop items, characters, karts)", "Открыть всё (предметы Pit Stop, персонажи, карты)", false},
     {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
@@ -142,6 +143,10 @@ struct Values {
     std::atomic<bool> ultrawide_ask{false};
     /// SacredFire online (RyuNET; run.py setup_online at start): online, online_name (the player's
     /// own nickname, guarded by OnlineMutex()), online_asked (the first start asked).
+    /// CTR TV for the next start only (the menu's "Watch CTR TV"; run.sh takes it and removes it).
+    std::atomic<bool> ctrtv_next{false};
+    /// The CTR TV episode (archives/<name>.bk2; empty: CTRTV_FebGP). Menu thread only.
+    std::array<char, 64> ctrtv_episode{};
     std::atomic<bool> online{false};
     std::atomic<bool> online_asked{false};
     std::array<char, 32> online_name{};
