@@ -83,24 +83,29 @@ Every Grand Prix season had its own start-up intro and CTR TV episode, and each 
 the previous season's: the final update (1.21) only has the February Grand Prix's (Gasmoxia) CTR
 TV (`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. A season's files are in its own
 update and in the ones after it up to the next season's (PS4 update numbers, from
-[IGN's update list](https://www.ign.com/wikis/crash-team-racing-nitro-fueled/Updates_and_Patch_Notes)):
+[IGN's update list](https://www.ign.com/wikis/crash-team-racing-nitro-fueled/Updates_and_Patch_Notes)).
 
-| Grand Prix | Started | PS4 update | Start-up intro |
-|---|---|---|---|
-| Nitro Tour | July 3, 2019 | 1.04 | its own |
-| Back N. Time | August 2, 2019 | 1.08 | its own |
-| Spyro & Friends | August 30, 2019 | 1.09 | its own |
-| Spooky | October 3, 2019 | 1.12 | its own |
-| Neon Circus | November 8, 2019 | 1.14 | its own |
-| Winter Festival | December 12, 2019 | 1.16 | its own |
-| Rustland | January 16, 2020 | 1.17 | its own |
-| Gasmoxia | February 20, 2020 | 1.19 | its own; its CTR TV (`CTRTV_FebGP.bk2`) is still in 1.20 and 1.21 |
+What this port has (from the final update, 1.21) and what is missing:
+
+| Grand Prix | Started | PS4 update | Start-up intro | CTR TV episode |
+|---|---|---|---|---|
+| Nitro Tour | July 3, 2019 | 1.04 | ❌ missing | ❌ missing |
+| Back N. Time | August 2, 2019 | 1.08 | ❌ missing | ❌ missing |
+| Spyro & Friends | August 30, 2019 | 1.09 | ❌ missing | ❌ missing |
+| Spooky | October 3, 2019 | 1.12 | ❌ missing | ❌ missing |
+| Neon Circus | November 8, 2019 | 1.14 | ❌ missing | ❌ missing |
+| Winter Festival | December 12, 2019 | 1.16 | ❌ missing | ❌ missing |
+| Rustland | January 16, 2020 | 1.17 | ❌ missing | ❌ missing |
+| Gasmoxia | February 20, 2020 | 1.19 | ❌ missing | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
+
+- **We have:** Gasmoxia's CTR TV episode, and the start screen of 1.18 to 1.21 (Crash with his
+  Game Awards 2019 statue, added in 1.18): that one is not a Grand Prix intro.
+- **We miss:** all eight Grand Prix start-up intros and the other seven CTR TV episodes. Each
+  season's update replaced the season before it; the updates between seasons (1.05 to 1.07,
+  1.10, 1.13, 1.15, 1.18) still carry the season before them.
 
 Every season had its own start-up intro (see
-[Intro Comparison + All Grand Prix Intros](https://www.youtube.com/watch?v=SprMiaR1wDM)). In 1.18
-Crash got his Game Awards 2019 statue on the start screen: that is the screen of 1.21, the one this
-port shows. The updates between seasons (1.05 to 1.07, 1.10, 1.13, 1.15, 1.18) carry the season
-before them.
+[Intro Comparison + All Grand Prix Intros](https://www.youtube.com/watch?v=SprMiaR1wDM)).
 
 If you dumped one of those updates from your own console, please open an issue with one of the
 forms (the update's version, the Grand Prix, and the names, sizes and checksums of its files):

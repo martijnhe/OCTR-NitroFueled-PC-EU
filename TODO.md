@@ -132,6 +132,11 @@ Upstream's Discord parts are Windows-only (`launcher/windows/discord_link.cpp`,
 start screen (`octane_startscreen.pak`) has only Crash's intro (`Crash_MainMenu`,
 `Cutscene_CrashMainMenu`); 1.00 shares its opening videos with 1.21.
 
+**Have / missing:** have Gasmoxia's CTR TV (`CTRTV_FebGP.bk2`, 1.19, still in 1.21) and the 1.18
+start screen (Game Awards statue, not a Grand Prix intro). Missing: all eight start-up intros
+(Nitro Tour 1.04, Back N. Time 1.08, Spyro & Friends 1.09, Spooky 1.12, Neon Circus 1.14, Winter
+Festival 1.16, Rustland 1.17, Gasmoxia 1.19) and the seven other CTR TV episodes.
+
 **Wanted:** the earlier seasons' intros (PS4 updates: Nitro Tour 1.04, Back N. Time 1.08,
 Spyro & Friends 1.09, Spooky 1.12, Neon Circus 1.14, Winter Festival 1.16, Rustland 1.17;
 Gasmoxia 1.19 is `CTRTV_FebGP.bk2`, still in 1.21 (PS4 numbers, IGN). Every season's update had its own
