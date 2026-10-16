@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Crash Team Racing Nitro-Fueled
+GenericName=Racing game
+Comment=Play your copy of Crash Team Racing: Nitro-Fueled (SacredFire)
+Exec=@PLAY@
+Icon=@ICON@
+Terminal=false
+Categories=Game;
+Keywords=CTR;Crash;Nitro;Fueled;SacredFire;

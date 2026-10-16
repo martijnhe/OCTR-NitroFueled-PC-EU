@@ -52,3 +52,18 @@ menu checkbox; tests for the patch side.
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only
 where the signature matches once; otherwise patches.py logs "patch site ... not found" and skips
 it. Check it on a USA 1.21 dump and on EU 1.21.
+
+## Pit Stop offline (in progress)
+
+The Pit Stop is a Demonware marketplace (`CMarketplace*` tasks: GetBalances, GetInventory,
+DepositCurrency, ConsumeInventoryItems, Exchange...; host `cert.uno.demonware.net`): the Wumpa
+Coin balance and owned items live on Activision's servers, and Demonware login needs a PSN
+sign-in. The port answers PSN and network calls with "signed out", so the game shows "You are not
+connected to the internet" and locks the Pit Stop. Connecting to the real servers is out of scope.
+
+Plan: run the marketplace locally. Either patch the game's marketplace tasks to complete with
+local results (balance and inventory kept in a file next to the save), or answer its Demonware
+requests in the runtime. First steps: find where the game decides it is offline for the Pit Stop
+(`checkIfMarketplaceIsReady_VSC`, `CContentDeploymentStateOffline`), and how a task reports its
+result; check whether the catalogue (`CMarketplaceExchangeSkuData`, featured-SKU calendar) is in
+the game data or only on the server.
