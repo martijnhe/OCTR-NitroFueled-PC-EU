@@ -247,4 +247,9 @@ if [[ -n ${mod_game:-} ]]; then
     if kill -0 "$mod_pid" 2>/dev/null; then wait "$mod_pid" || mod_status=$?; fi
     exit "$mod_status"
 fi
+# Discord (online on, bbport.ini discord_rpc not 0): the presence, invites and "Ask to Join" while
+# the game runs (scripts/discord_presence.py, Linux); it follows this process, which becomes the game.
+if [[ ${BB_ONLINE:-0} == 1 ]] && ! grep -qx 'discord_rpc=0' "$BB_CONFIG" 2>/dev/null; then
+    setsid "$PYTHON" scripts/discord_presence.py --pid $$ --data "$data" --config "$BB_CONFIG" </dev/null &
+fi
 exec "$probe" "${probe_args[@]}"

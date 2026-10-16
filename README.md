@@ -2,10 +2,10 @@
   <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
 </p>
 
-# CTR Nitro-Fueled PC: EU edition, ultrawide and unlock-all
+# CTR Nitro-Fueled PC: EU edition, online, ultrawide and unlock-all
 
 **Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows,
-with the European edition, ultrawide monitors and everything unlocked.**
+with the European edition, online play, Discord, ultrawide monitors and everything unlocked.**
 
 This is a fork of [CTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC), itself built
 on [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire): the game's own code runs directly on
@@ -19,6 +19,8 @@ draws with Vulkan. No emulator, no game files included.
 | **European edition** | CUSA14876 runs, with the **1.21 update** (all Grand Prix tracks, characters and karts that came after launch). EU 1.00 without the update runs too. The USA edition (CUSA13795) keeps working. | automatic |
 | **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch, on and off at any time. Nothing is written to your save or your online items: turned off, you have exactly what you bought or won again. Turning it on asks first (the Pit Stop does not work while it is on) and backs up your saves to `user/savedata-backups`. | off by default; menu *Unlock everything* / `unlock_all=1` |
 | **Online (RyuNET)** | Online races, matchmaking, private rooms, the friends list and the Pit Stop on the RyuNET server, from [Ryu7w7's OCTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC) v0.5, also for the European edition (its own key patch, `patches/CrashTeamRacingOnlineEU.xml`). Needs your own nickname: the first start asks for it (*Play online?*), later the menu's *Online (RyuNET)* section; the game restarts to go online. The nickname belongs to this PC's `ryunet_online.key` (a second copy in `~/.config/CTR-NitroFueled-PC/` on Linux); *Link with Discord* in the menu keeps it across reinstalls and other PCs (*Recover with Discord*), with your online items and friends. | off by default; first-start question / menu / `online=1` and `online_name=` in `bbport.ini` |
+| **Discord** | Linux and Steam Deck too: your Discord status shows the game while you play online ("Playing online", your nickname, the time played), with *Join* and the chat's *+ > Invite to play*; accepting an invite makes the host your friend and the game joins their private room. *Link with Discord* / *Recover with Discord* in the menu keep your online nickname. Works with the Discord app (also Flatpak) on the same PC. On Windows: the launcher's Online tab. | with online; `discord_rpc=0` turns the status off, `discord_accept_requests=0` stops accepting "Ask to Join" |
+| **From upstream v0.5** | Game volume (0-200%), the keyboard as a split-screen player, fixes for error codes 3 (memory) and 23 (GPU hang). | menu |
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
 | **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
 | **Ultrawide** | On a monitor wider than 16:9 (2560x1080, 3440x1440, ...) the game draws at the monitor's own size; the HUD spreads to the edges. The first start asks *Ultrawide? Yes / No* (with *Ask me every time*). | menu *Ultrawide* / `ultrawide=1`, `ultrawide_ask` |
@@ -27,7 +29,7 @@ draws with Vulkan. No emulator, no game files included.
 | **Internal resolution** | 480p to native 4K (1440p is the PS4 Pro's own), now also on Linux and the Steam Deck. | menu *Internal resolution* / `render_res=1440` |
 | **DLC** | Your own add-on packages (Nitros Oxide Edition, pre-order pack, Firehawk kart) are reported installed. | put the `.pkg` files in `dlc/` |
 | **Shortcuts and Steam** | *Crash Team Racing Nitro-Fueled* in the application menu and in **Steam** (with the game's cover art), starting the game directly, so it works in Steam Deck game mode. The AppImage adds itself to Steam on its first start (while Steam runs: as soon as it closes, e.g. when switching to game mode). | at install; AppImage: first start (`STEAM_SHORTCUT=0` skips it) |
-| **Steam Deck** | Same build, no CPU-specific flags; light additions only (no extra processes). | |
+| **Steam Deck** | The same build as one AppImage (no CPU-specific flags). Put it in one folder with your merged game and start it: it starts the game directly (no launcher; `--launcher` opens it), finds the game next to it and adds itself to Steam. With online on, a small helper runs next to the game for Discord. | see *Steam Deck (AppImage)* below |
 
 The settings live in `bbport.ini` and in the in-game menu: **Insert** on the keyboard, or
 **L3 + R3** on a controller. Options marked "restart" in the menu offer *Apply and restart game*.
@@ -57,6 +59,22 @@ same packages with your package manager):
 After `merge` the game is in your application menu and in Steam as *Crash Team Racing
 Nitro-Fueled*. By hand: `bash build.sh`, then `BB_GAME_DIR=<game> bash run.sh`, and
 `launcher/install-desktop.sh <game>` for the shortcuts.
+
+## Steam Deck (AppImage)
+
+1. Copy `SacredFire-x86_64.AppImage` and your merged game folder (for example `CUSA14876-1.21`)
+   into one folder on the Deck, in desktop mode (for example `~/Games/CTR`).
+2. Start the AppImage once (allow it to run as a program in its properties). The game starts
+   at once, finds the game folder next to it and asks *Ultrawide?* (on an external monitor) and
+   *Play online?* (your own nickname; Steam + X shows the keyboard).
+3. Switch to game mode: *Crash Team Racing Nitro-Fueled* is in your Steam library.
+
+Your data (saves, settings, the online key) lives in `~/.local/share/sacredfire`. To use the
+nickname of another PC on the Deck: menu (L3 + R3) > *Online (RyuNET)* > *Recover with Discord*
+(after *Link with Discord* on that PC), or copy that PC's `ryunet_online.key` there. Online items,
+coins and friends belong to the nickname, so they are the same on both; game saves stay on each
+device (copy `user/savedata` to share them). Do not play online on two devices with one nickname
+at the same time.
 
 ## Not working yet
 

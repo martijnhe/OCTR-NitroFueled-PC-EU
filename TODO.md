@@ -104,7 +104,7 @@ presence names the running title id.
 - `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation
   (`runtime_services.c`, `runtime_net_overrides.c`); the game build itself passes.
 
-## Discord on Linux and the Steam Deck: presence and invites
+## Discord on Linux and the Steam Deck
 
 Upstream's Discord parts are Windows-only (`launcher/windows/discord_link.cpp`,
 `discord_presence.cpp`, in the Windows launcher). On Linux the nickname can only be kept by keeping
@@ -119,10 +119,10 @@ Upstream's Discord parts are Windows-only (`launcher/windows/discord_link.cpp`,
   and the in-game menu's Online section (Link / Recover with Discord, Status); link tested. Recover
   not tested yet (it moves the nickname to the recovering installation's key). Still open: the
   buttons in the Linux GTK launcher.
-- **Presence and invites** (Discord shows "playing CTR", invites join a private room): the
-  Discord IPC, a named pipe on Windows, is the Unix socket `$XDG_RUNTIME_DIR/discord-ipc-0` on
-  Linux (Flatpak Discord: `app/com.discordapp.Discord/discord-ipc-0`). Port the transport of
-  discord_presence.cpp, then the launcher's activity and join handling.
+- **Presence and invites**: done (2026-10-16): `scripts/discord_presence.py`, started by run.sh
+  next to the game when online is on (the IPC socket `$XDG_RUNTIME_DIR/discord-ipc-N`, also
+  Flatpak and Snap Discord). The presence and the connection are tested; accepting an invite
+  (ryunet_join.txt, the host as a friend) needs a second player to test.
 
 ## Ultrawide on USA 1.21 (CUSA13795)
 
