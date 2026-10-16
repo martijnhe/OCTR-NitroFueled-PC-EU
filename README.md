@@ -85,20 +85,22 @@ TV (`CTRTV_FebGP.bk2`), and the start screen only Crash's intro. A season's file
 update and in the ones after it up to the next season's (PS4 update numbers, from
 [IGN's update list](https://www.ign.com/wikis/crash-team-racing-nitro-fueled/Updates_and_Patch_Notes)):
 
-| Grand Prix | Started | PS4 update | Themed start screen |
+| Grand Prix | Started | PS4 update | Start-up intro |
 |---|---|---|---|
-| Nitro Tour | July 3, 2019 | 1.04 | no (the launch screen) |
-| Back N. Time | August 2, 2019 | 1.08 | not mentioned |
-| Spyro & Friends | August 30, 2019 | 1.09 | yes |
-| Spooky | October 3, 2019 | 1.12 | yes |
-| Neon Circus | November 8, 2019 | 1.14 | yes |
-| Winter Festival | December 12, 2019 | 1.16 | yes |
-| Rustland | January 16, 2020 | 1.17 | not mentioned |
-| Gasmoxia | February 20, 2020 | 1.19 | not mentioned; its CTR TV (`CTRTV_FebGP.bk2`) is still in 1.20 and 1.21 |
+| Nitro Tour | July 3, 2019 | 1.04 | its own |
+| Back N. Time | August 2, 2019 | 1.08 | its own |
+| Spyro & Friends | August 30, 2019 | 1.09 | its own |
+| Spooky | October 3, 2019 | 1.12 | its own |
+| Neon Circus | November 8, 2019 | 1.14 | its own |
+| Winter Festival | December 12, 2019 | 1.16 | its own |
+| Rustland | January 16, 2020 | 1.17 | its own |
+| Gasmoxia | February 20, 2020 | 1.19 | its own; its CTR TV (`CTRTV_FebGP.bk2`) is still in 1.20 and 1.21 |
 
-In 1.18 Crash got his Game Awards 2019 statue on the start screen: that is the screen of 1.21,
-so the themed start screens are only in the updates 1.09 to 1.17. The updates between seasons
-(1.10, 1.13, 1.15) carry the season before them.
+Every season had its own start-up intro (see
+[Intro Comparison + All Grand Prix Intros](https://www.youtube.com/watch?v=SprMiaR1wDM)). In 1.18
+Crash got his Game Awards 2019 statue on the start screen: that is the screen of 1.21, the one this
+port shows. The updates between seasons (1.05 to 1.07, 1.10, 1.13, 1.15, 1.18) carry the season
+before them.
 
 If you dumped one of those updates from your own console, please open an issue with one of the
 forms (the update's version, the Grand Prix, and the names, sizes and checksums of its files):
