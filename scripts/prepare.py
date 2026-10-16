@@ -272,7 +272,7 @@ def prepare(game, out):
     print(f"{report['sfo'].get('TITLE')} | entry={header[4]:#x} | image={size:,} bytes")
     if game_profile and game_profile.get('variant') == 'experimental':
         print(f"Experimental edition: {game_profile['title']} {game_profile['version']} (untested; "
-              'community patches off, render patches by signature)')
+              'patches from patches/CrashTeamRacingEU.xml and render patches by signature)')
     elif game_profile and game_profile.get('variant'):
         sdk = next((f.split('=', 1)[1] for f in str(report['sfo'].get('PUBTOOLINFO', '')).split(',')
                     if f.startswith('sdk_ver=')), '?')

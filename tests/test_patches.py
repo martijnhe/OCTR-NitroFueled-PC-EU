@@ -191,7 +191,9 @@ class GamePatchTests(unittest.TestCase):
         found = external_patches(ROOT / 'patches', app_version='01.00', title_id='CUSA14876')
         self.assertEqual({key.split('/')[0] for key, _, _ in found}, {'CrashTeamRacingEU.xml'})
         self.assertEqual(len(found), len(GAME_PATCH_KEYS))
-        self.assertEqual(external_patches(ROOT / 'patches', title_id='CUSA14876'), [])
+        found_121 = external_patches(ROOT / 'patches', app_version='01.21', title_id='CUSA14876')
+        self.assertEqual(len(found_121), len(GAME_PATCH_KEYS))  # EU with the 1.21 update
+        self.assertEqual(external_patches(ROOT / 'patches', app_version='01.10', title_id='CUSA14876'), [])
         selected = external_selection(found, None, {'patch_60fps': '1'})
         self.assertEqual([key for key, _, _ in selected], ['CrashTeamRacingEU.xml/60 FPS Unlock'])
 
