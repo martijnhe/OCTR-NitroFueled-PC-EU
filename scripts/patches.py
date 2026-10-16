@@ -203,23 +203,14 @@ def class_vtable(elf, name):
     return None
 
 
-def cutscene_state(out):
-    """(instance slot, active field, designer field) of CCutsceneManager in the prepared image
-    (out/boot.bin: the loaded image and its relocations), or None. The class's field registration
-    gets its field names (lea rsi), per-field metadata slots (lea rdx) and u16 offsets (lea rcx);
-    the static _Instance follows the last metadata slot. Used for 16:9 cutscenes in ultrawide."""
-    data=Path(out,'boot.bin').read_bytes()
-    _magic,size,_entry,nl,nr,nn,_=struct.unpack_from('<8sQQQQQQ',data,0)
-    pos=56+nl*24+nn*128
-    rel={}
-    for i in range(nr):
-        target,kind,value,_=struct.unpack_from('<QQqq',data,pos+i*32)
-        if kind==0: rel[target]=value
-    image=data[pos+nr*32:pos+nr*32+size]
+def reflected_fields(image,rel,field):
+    """The fields of the Alchemy class that has `field` (bytes, a field name), as (name -> u16
+    offset, metadata slots), or None. The class's field registration gets its field names (lea
+    rsi), per-field metadata slots (lea rdx) and u16 offsets (lea rcx)."""
     def text(a):
         end=image.find(b'\0',a)
         return image[a:end] if 0<=a<len(image) and end>a else b''
-    name=image.find(b'\0_activeCutsceneData\0')
+    name=image.find(b'\0'+field+b'\0')
     if name<0: return None
     name+=1
     slots=[t for t,v in rel.items() if v==name]
@@ -238,13 +229,32 @@ def cutscene_state(out):
             storage,offsets=lea_target(i,b'\x48\x8d\x15'),lea_target(i,b'\x48\x8d\x0d')
             if storage is None or offsets is None: return None
             offs=struct.unpack_from(f'<{len(fields)}H',image,offsets)
-            meta=[rel.get(storage+8*k,0) for k in range(len(fields))]
-            instance=max(meta)+8
-            by_name=dict(zip(fields,offs))
-            if '_activeDesignerCutscene' not in by_name: return None
-            return instance,by_name['_activeCutsceneData'],by_name['_activeDesignerCutscene']
+            return dict(zip(fields,offs)),[rel.get(storage+8*k,0) for k in range(len(fields))]
         i=image.find(b'\x48\x8d\x35',i+1)
     return None
+
+
+def cutscene_state(out):
+    """(instance slot, active field, designer field, flyby field or None) of CCutsceneManager in
+    the prepared image (out/boot.bin: the loaded image and its relocations), or None. The static
+    _Instance follows the last metadata slot. flyby: CCutsceneData's _isFlybyIntro (a bool), set
+    for the camera fly-over before a race, which stays ultrawide. Used for 16:9 cutscenes in
+    ultrawide."""
+    data=Path(out,'boot.bin').read_bytes()
+    _magic,size,_entry,nl,nr,nn,_=struct.unpack_from('<8sQQQQQQ',data,0)
+    pos=56+nl*24+nn*128
+    rel={}
+    for i in range(nr):
+        target,kind,value,_=struct.unpack_from('<QQqq',data,pos+i*32)
+        if kind==0: rel[target]=value
+    image=data[pos+nr*32:pos+nr*32+size]
+    manager=reflected_fields(image,rel,b'_activeCutsceneData')
+    if not manager: return None
+    by_name,meta=manager
+    if '_activeDesignerCutscene' not in by_name: return None
+    cutscene=reflected_fields(image,rel,b'_isFlybyIntro')
+    flyby=cutscene[0].get('_isFlybyIntro') if cutscene else None
+    return max(meta)+8,by_name['_activeCutsceneData'],by_name['_activeDesignerCutscene'],flyby
 
 
 def signature_regex(text):
@@ -368,7 +378,7 @@ def main():
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
     p.add_argument('--print-cutscene',action='store_true',
-                   help='print "INSTANCE ACTIVE DESIGNER" of the cutscene manager (ultrawide 16:9 cutscenes), or nothing')
+                   help='print "INSTANCE ACTIVE DESIGNER [FLYBY]" of the cutscene manager (ultrawide 16:9 cutscenes), or nothing')
     p.add_argument('--print-unlock-vtable',action='store_true',
                    help='print the CBuildData vtable offset (unlock_all), or nothing, and exit')
     p.add_argument('--print-plan',action='store_true',
@@ -376,7 +386,7 @@ def main():
     a=p.parse_args()
     if a.print_cutscene:
         found=cutscene_state(a.out)
-        if found: print(f'{found[0]:#x} {found[1]:#x} {found[2]:#x}')
+        if found: print(f'{found[0]:#x} {found[1]:#x} {found[2]:#x}'+(f' {found[3]:#x}' if found[3] is not None else ''))
         return
     if a.print_unlock_vtable:
         vt=class_vtable((a.out/'eboot.elf').read_bytes(),'CBuildData')

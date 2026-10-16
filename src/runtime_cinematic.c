@@ -3,9 +3,12 @@
  * off-stage). With BB_CINEMATIC_16X9=1 (run.sh: ultrawide on, bbport.ini ultrawide_cinematics not
  * 0) the presenter shows them at 16:9 with black bars: runtime_cinematic_mode() is 1 while a video
  * file (.bk2) is open (the frame is squeezed back to 16:9) and 2 while the cutscene manager has an
- * active cutscene (the middle 16:9 of the frame is shown). BB_CUTSCENE="INSTANCE FIELD FIELD"
- * (image offset of CCutsceneManager::_Instance and the offsets of _activeCutsceneData and
- * _activeDesignerCutscene; scripts/patches.py --print-cutscene) names the cutscene state. */
+ * active cutscene (the middle 16:9 of the frame is shown). The camera fly-over before a race (the
+ * track's name over gameplay graphics) is a cutscene too, staged for any width: CCutsceneData's
+ * _isFlybyIntro marks it, and it stays ultrawide. BB_CUTSCENE="INSTANCE FIELD FIELD [FLYBY]"
+ * (image offset of CCutsceneManager::_Instance, the offsets of _activeCutsceneData and
+ * _activeDesignerCutscene, and of CCutsceneData::_isFlybyIntro; scripts/patches.py
+ * --print-cutscene) names the cutscene state. */
 #include "runtime.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -17,6 +20,7 @@
 static int enabled;
 static const unsigned char *instance_slot; /* &CCutsceneManager::_Instance in the image */
 static unsigned active_field, designer_field;
+static int flyby_field = -1; /* CCutsceneData::_isFlybyIntro, -1 when not found */
 static int videos; /* open .bk2 files */
 
 void runtime_cinematic_start(const unsigned char *image) {
@@ -25,9 +29,14 @@ void runtime_cinematic_start(const unsigned char *image) {
     enabled = 1;
     const char *cutscene = getenv("BB_CUTSCENE");
     unsigned long long slot = 0;
-    if (cutscene && sscanf(cutscene, "%llx %x %x", &slot, &active_field, &designer_field) == 3 && slot)
+    unsigned flyby = 0;
+    const int found = cutscene ? sscanf(cutscene, "%llx %x %x %x", &slot, &active_field, &designer_field, &flyby) : 0;
+    if (found >= 3 && slot) {
         instance_slot = image + slot;
-    printf("Ultrawide: videos%s at 16:9\n", instance_slot ? " and cutscenes" : "");
+        if (found == 4) flyby_field = (int)flyby;
+    }
+    printf("Ultrawide: videos%s at 16:9%s\n", instance_slot ? " and cutscenes" : "",
+           flyby_field >= 0 ? " (race fly-over intros stay ultrawide)" : "");
 }
 
 void runtime_cinematic_video(int delta) {
@@ -46,5 +55,9 @@ int runtime_cinematic_mode(void) {
     if (!instance_slot) return 0;
     const uint64_t manager = __atomic_load_n((const uint64_t *)(const void *)instance_slot, __ATOMIC_RELAXED);
     if (manager < GUEST_MIN || manager >= GUEST_LIMIT) return 0;
-    return guest_qword(manager + active_field) || guest_qword(manager + designer_field) ? 2 : 0;
+    const uint64_t active = guest_qword(manager + active_field);
+    if (active && flyby_field >= 0 &&
+        __atomic_load_n((const unsigned char *)(uintptr_t)(active + (unsigned)flyby_field), __ATOMIC_RELAXED))
+        return 0; /* the fly-over before a race: gameplay graphics, ultrawide */
+    return active || guest_qword(manager + designer_field) ? 2 : 0;
 }
