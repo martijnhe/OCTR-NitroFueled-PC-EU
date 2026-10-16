@@ -95,6 +95,14 @@ if [[ -n ${plan_pro:-} ]]; then
     if [[ $plan_heap == 1 && ${BB_DMEM_MB:-0} -lt 7168 ]]; then export BB_DMEM_MB=7168; fi
     echo "Internal resolution: $plan_label"
 fi
+# Ultrawide: videos and cutscenes at 16:9 with black bars (src/runtime_cinematic.c) unless
+# bbport.ini has ultrawide_cinematics=0.
+unset BB_CINEMATIC_16X9 BB_CUTSCENE
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$BB_CONFIG" 2>/dev/null; then
+    export BB_CINEMATIC_16X9=1
+    BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
+    export BB_CUTSCENE
+fi
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
 # picks its Pro rendering path. Off by default: the Steam Deck is closer to a base PS4.
 export BB_NEO=${BB_NEO:-0}

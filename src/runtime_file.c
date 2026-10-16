@@ -53,7 +53,7 @@ _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
 /* commit: a save file opened for writing is written to a temporary copy (temp), which replaces
  * the file (commit) in one rename when closed: a crash or a kill mid-save leaves the old file. */
-typedef struct { int used, host, dirty, save_logged; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
+typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -430,6 +430,9 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     }
     files[fd]=(File){.used=1,.host=host,.dir=dir,.commit=commit,.temp=temp};
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
+    /* A Bink video (ultrawide: shown at 16:9 while one is open, runtime_cinematic.c). */
+    size_t length=strlen(guest);
+    if (length>4 && !strcmp(guest+length-4,".bk2")) { files[fd].video=1; runtime_cinematic_video(1); }
     ++opens;
     pthread_mutex_unlock(&lock);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
@@ -455,6 +458,7 @@ static int64_t do_close(int fd) {
     File closed=*f;
     *f=(File){0};
     pthread_mutex_unlock(&lock);
+    if (closed.video) runtime_cinematic_video(-1);
     free_listing(closed.dir);
     int result=0;
     if (closed.temp) result=commit_file(&closed);

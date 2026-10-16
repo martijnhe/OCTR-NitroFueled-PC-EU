@@ -787,6 +787,7 @@ int main(int argc, char **argv) {
         }
     }
     runtime_unlock_all_start(image);
+    runtime_cinematic_start(image);
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};

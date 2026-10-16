@@ -104,6 +104,15 @@ def ini_value(path, key):
 # (scripts/patches.py render_plan, docs/sacredfire/13-resolution.md): above 1080 and below it the
 # PS4 Pro path; the larger GPU heap of native 4K also takes more than the Pro's 5568 MiB of direct
 # memory.
+def render_plan_of(config):
+    sys.path.insert(0, str(PORT / 'scripts'))
+    try:
+        from patches import read_settings, render_plan
+    finally:
+        sys.path.pop(0)
+    return render_plan(read_settings(Path(config)))
+
+
 def apply_render_res(env, config):
     sys.path.insert(0, str(PORT / 'scripts'))
     try:
@@ -246,6 +255,14 @@ def main():
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
                        '--settings', config)
+            # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
+            for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
+                env.pop(key, None)
+            plan = render_plan_of(config)
+            if plan and plan.get('output') and not ini_has(config, 'ultrawide_cinematics=0'):
+                env['BB_CINEMATIC_16X9'] = '1'
+                env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out,
+                                                capture=True).strip()
             # unlock_all (default on): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)
             if not ini_has(config, 'unlock_all=0'):
