@@ -246,6 +246,12 @@ def main():
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
                        '--settings', config)
+            # unlock_all (default on): the runtime sets the build setups' _unlockAll flag.
+            env.pop('BB_UNLOCK_ALL_VTABLE', None)
+            if not ini_has(config, 'unlock_all=0'):
+                vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).strip()
+                if vt:
+                    env['BB_UNLOCK_ALL_VTABLE'] = vt
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
             elif ini_has(config, 'patch_60fps=1'):

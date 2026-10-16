@@ -175,6 +175,34 @@ def load_segments(elf):
     return found
 
 
+def class_vtable(elf, name):
+    """Image offset of an Alchemy class's vtable, or None: its registration loads the class name
+    (lea r8,[rip+name]) and, just before, stores the vtable (lea rax,[rip+vtable]; mov [rbp-..],rax).
+    Used for CBuildData (unlock_all: the runtime sets _unlockAll, +0x81, on its objects)."""
+    loads=load_segments(elf)
+    def vaddr(pos):
+        for start,off,size in loads:
+            if off<=pos<off+size: return start+pos-off
+    def filepos(va):
+        for start,off,size in loads:
+            if start<=va<start+size: return off+va-start
+    text=elf.find(b'\0'+name.encode()+b'\0')
+    if text<0: return None
+    target=vaddr(text+1)
+    for start,off,size in loads:
+        code=elf[off:off+size]
+        i=code.find(b'\x4c\x8d\x05')
+        while i!=-1:
+            disp=struct.unpack_from('<i',code,i+3)[0]
+            if start+i+7+disp==target:
+                for back in range(i-7,max(i-0x90,0),-1):  # the nearest lea rax,[rip+X] before it
+                    if code[back:back+3]==b'\x48\x8d\x05' and code[back+7:back+10]==b'\x48\x89\x85':
+                        return start+back+7+struct.unpack_from('<i',code,back+3)[0]
+                return None
+            i=code.find(b'\x4c\x8d\x05',i+1)
+    return None
+
+
 def signature_regex(text):
     tokens=text.split()
     if not tokens: raise ValueError('empty signature')
@@ -295,9 +323,15 @@ def main():
     p.add_argument('--out',type=Path,default=root/'out')
     p.add_argument('--settings',type=Path,default=root/'bbport.ini')
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
+    p.add_argument('--print-unlock-vtable',action='store_true',
+                   help='print the CBuildData vtable offset (unlock_all), or nothing, and exit')
     p.add_argument('--print-plan',action='store_true',
                    help='print "PRO HEAP LABEL" of the render plan (run.sh), or nothing, and exit')
     a=p.parse_args()
+    if a.print_unlock_vtable:
+        vt=class_vtable((a.out/'eboot.elf').read_bytes(),'CBuildData')
+        if vt is not None: print(hex(vt))
+        return
     if a.print_plan:
         plan=render_plan(read_settings(a.settings))
         if plan: print(int(plan['pro']),int(plan['heap']),plan['label'])

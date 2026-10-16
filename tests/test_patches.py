@@ -159,6 +159,17 @@ class RenderResTests(unittest.TestCase):
         self.assertEqual(writes, [(0x1100, b'\xb8' + struct.pack('<I', 3440)),
                                   (0x1115, b'\xb8' + struct.pack('<I', 1440))])
 
+    def test_class_vtable_from_registration(self):
+        # lea rax,[rip+vt]; mov [rbp-0xb0],rax; ...; lea r8,[rip+name]
+        code = bytearray(0x40)
+        code[0:7] = b'\x48\x8d\x05' + struct.pack('<i', 0x200 - 7)          # rax = 0x1200 (vtable)
+        code[7:14] = b'\x48\x89\x85\x50\xff\xff\xff'
+        code[0x20:0x27] = b'\x4c\x8d\x05' + struct.pack('<i', 0x100 - 0x27)  # r8 = 0x1100 (name)
+        blob = bytes(code) + bytes(0x100 - len(code)) + b'CBuildData\0'
+        elf = tiny_elf(b'\0' + blob, vaddr=0xfff)
+        self.assertEqual(patches.class_vtable(elf, 'CBuildData'), 0x1200)
+        self.assertIsNone(patches.class_vtable(elf, 'CMissing'))
+
     def test_dlss_quality_picks_the_render_size(self):
         plan = patches.render_plan
         dlss = lambda q, out='1080': {'temporal': 'dlss', 'dlss_quality': q, 'dlss_output': out,

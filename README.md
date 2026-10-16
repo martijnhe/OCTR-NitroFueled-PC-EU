@@ -15,6 +15,10 @@
 >   the game. The game then draws at the monitor's size (`bbport.ini`: `ultrawide`,
 >   `ultrawide_size`, `ultrawide_ask`). Videos and the title screen are still stretched or show
 >   the edges of the set: see [TODO.md](TODO.md).
+> - **Unlock everything** (on by default; menu: *Unlock everything*, or `unlock_all=0` in
+>   `bbport.ini`): all characters, karts and Pit Stop items, through the game's own `_unlockAll`
+>   build flag (src/runtime_unlock.c). The Pit Stop shop itself needs the online service and stays
+>   closed; see [TODO.md](TODO.md).
 > - **Internal resolution** (1440p and the others) now also applies when started through
 >   `run.sh` (Linux, Steam Deck), not only `run.py`.
 > - Builds and runs on Linux as before (`bash build.sh`, `bash run.sh`; `BB_GAME_DIR` points at

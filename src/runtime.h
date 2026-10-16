@@ -87,6 +87,8 @@ uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* SacredFire: BB_ONLINE=local, online services answered in-process (runtime_online.c); 0 otherwise. */
 uintptr_t runtime_online_resolve(const char *name);
+/* SacredFire: unlock_all (runtime_unlock.c): sets CBuildData._unlockAll when BB_UNLOCK_ALL_VTABLE is set. */
+void runtime_unlock_all_start(const unsigned char *image);
 void runtime_file_report(void);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);
