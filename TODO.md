@@ -151,31 +151,39 @@ choice for it.
 
 ## Reverse engineering: the Grand Prix start-up intros in 1.21's update packages
 
-**Found (2026-10-16, a 10-minute look):** the 1.21 update's override packages (`archives/update.pak`,
-`update2.pak`, `update_hub.pak`, `update_hub2.pak` of the update folder) still hold more than the
-current start screen (Crash with his Game Awards statue, 1.18):
-- `update2.pak`: `actors/Octane/Cutscene/Cutscene_NitrosOxide_MainMenu.igz` with its animation
-  (`anims/.../Cutscene_NitrosOxide_MainMenu.hka`), `vfx/CTR/share/ctr_StartScreen_gp8_oxide_beam.igz`
-  (GP8 = Gasmoxia): very likely the Gasmoxia start-up intro (Nitros Oxide).
-- `update2.pak`: a second start-screen set, `archives/Octane_StartScreen_Shooting.pak` with
-  `maps/Octane_StartScreen_Shooting/*` (audio, lighting, VFX): not identified yet.
-- `update.pak`: its own `maps/Octane/Octane_StartScreen/Octane_StartScreen.igz` (full of Tesla
-  coil entities) and `vsc/Octane_StartScreen/Octane_StartScreen_Manager.igz` (a visual script that
-  probably picks the variant), overridden by `update2.pak`'s.
-- The executable names none of these: the choice is in the data (the start-screen map and its
-  scripts), not in the code. The Grand Prix system has `_currentGrandPrixVersion` (and the save
-  `_grandPrixVersion`), the likely switch.
+**Found (2026-10-16):** the start screen the game loads, `maps/Octane/Octane_StartScreen/Octane_StartScreen.igz`
+from the 1.21 update's `update2.pak` (it overrides the one in `update.pak`), still holds the last
+two seasons' guests next to Crash:
+- `GrandPrixGuest` and `GrandPrixGuest2`: entities with the `Octane_StartScreen_GrandPrixGuest`
+  visual script (`vsc/Octane/Octane_StartScreen/Octane_StartScreen_GrandPrixGuest.igz`, in
+  update2.pak), which plays `TitleScreen_Guest_In` then `TitleScreen_Guest_Loop` on the guest
+  (bolt `Bone_Hat`, spawned effects), plus looping and static effects.
+- GP8 (Gasmoxia): `Cutscene_NitrosOxide_MainMenu` (actor and animation),
+  `CutsceneCharacter/CutsceneDriverKCNGP8_P1` (a guest character, own animation),
+  `ctr_StartScreen_gp8_oxide_beam`, `ctr_StartScreen_gp8_oxide_teleport`.
+- GP7 (Rustland): `gp7_embers_vfx` (three emitters).
+- Also in the map: `Cutscene_CrashMainMenu` / `Crash_MainMenu` (Crash with the Game Awards statue,
+  1.18), `Cup_Race`, `Cup_Race_Intro`, `CCutsceneCamera_StartScreen`.
+- `update2.pak` also has a second set, `archives/Octane_StartScreen_Shooting.pak` (a package inside
+  the package) with `maps/Octane_StartScreen_Shooting/*`: not looked at yet.
+- The executable names none of these: the map and its scripts choose. Since 1.20 removed the Grand
+  Prix system the guests do not appear; what hides them (an entity flag in the map, a script
+  reading `_currentGrandPrixVersion`, the CTR TV component) is the open question. The earlier
+  seasons' guests (GP1 to GP6) are not in this map.
 
-**Tools:** `tools/iga_extract.py` lists and extracts IGA v13 archives (layout in its header).
-Works for small files of update.pak (the start-screen map extracts). To do: offsets above 4 GiB
-(update2.pak, 7 GB: the high bits are probably in the "ordinal" field), the LZMA error on some
-multi-block files (the manager script), then an igz reader (string table, objects) to read the
-manager script.
+**Tools:** `tools/iga_extract.py` lists and extracts IGA v13 archives (layout in its header; the
+file offset's high bits are the low byte of the second field, the pieces follow each other from
+the file's offset at sector boundaries, names map to entries by FNV-1a of the lower-case path).
+Tested: the start-screen maps of update.pak and update2.pak, the manager and guest scripts.
 
-**Then:** find how the start screen chooses Crash or Oxide (the manager script, the Grand Prix
-version), and add a menu choice (Crash with statue / Nitros Oxide / the "Shooting" set, plus the
-launch version if it still exists): by setting the Grand Prix version the script reads, by
-redirecting which map or cutscene loads, or by the port's file layer serving a chosen package.
+**Next:**
+1. Read the start-screen map's objects (an igz reader: string table, object list, fields) to see
+   the guests' enabled flags and what turns them on.
+2. Show a guest: set what the map or script checks (the Grand Prix version), or enable the guest
+   entities at runtime (the port finds the objects in memory, as with unlock_all and the render
+   pass), or serve a changed map through the port's file layer.
+3. Menu choice for the start screen: Crash (Game Awards) / Rustland guest / Gasmoxia (Nitros Oxide)
+   / the "Shooting" set, as far as they work.
 
 ## Ultrawide on USA 1.21 (CUSA13795)
 

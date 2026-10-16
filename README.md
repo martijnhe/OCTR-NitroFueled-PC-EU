@@ -95,15 +95,16 @@ What this port has (from the final update, 1.21) and what is missing:
 | Spooky | October 3, 2019 | 1.12 | ❌ missing | ❌ missing |
 | Neon Circus | November 8, 2019 | 1.14 | ❌ missing | ❌ missing |
 | Winter Festival | December 12, 2019 | 1.16 | ❌ missing | ❌ missing |
-| Rustland | January 16, 2020 | 1.17 | ❌ missing | ❌ missing |
-| Gasmoxia | February 20, 2020 | 1.19 | 🔍 probably in the files, not playable yet | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
+| Rustland | January 16, 2020 | 1.17 | 🔍 in the files (guest), not shown yet | ❌ missing |
+| Gasmoxia | February 20, 2020 | 1.19 | 🔍 in the files (Nitros Oxide guest), not shown yet | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
 
 - **We have:** Gasmoxia's CTR TV episode, and the start screen of 1.18 to 1.21 (Crash with his
   Game Awards 2019 statue, added in 1.18): that one is not a Grand Prix intro.
-- **Probably have, not usable yet:** Gasmoxia's start-up intro (Nitros Oxide): its cutscene and
-  start-screen effects are still in the 1.21 update's packages, with a second, unidentified start
-  screen set ("Shooting"). Making the start screen show them is in [TODO.md](TODO.md).
-- **We miss:** the other seven Grand Prix start-up intros and the other seven CTR TV episodes. Each
+- **Have, not shown yet:** the start screen of 1.21 still holds the last two seasons' guests,
+  Rustland's (GP7) and Gasmoxia's (GP8, Nitros Oxide), hidden since the Grand Prix system ended,
+  plus a second, unidentified start screen set ("Shooting"). Making them appear is in
+  [TODO.md](TODO.md).
+- **We miss:** the start-up intros of the first six seasons and the other seven CTR TV episodes. Each
   season's update replaced the season before it; the updates between seasons (1.05 to 1.07,
   1.10, 1.13, 1.15, 1.18) still carry the season before them.
 

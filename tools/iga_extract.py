@@ -30,6 +30,7 @@ def open_iga(path):
         o=offs[i]; a=nt.index(b'\0',o); b=nt.index(b'\0',a+1)
         name=nt[a+1:b].decode()
         off,ordinal,length,block=struct.unpack_from('<4I',infos,16*i)
+        off|=(ordinal&0xff)<<32  # the offset's high bits (archives over 4 GiB)
         files[name.lower()]=(off,length,block,name)
     return f,files,sector,large,medium,small,nl,nm
 def read(iga,name):
@@ -39,20 +40,23 @@ def read(iga,name):
     if block==0xffffffff or comp==0xf or (block>>24)==0xff:
         f.seek(off); return f.read(length)
     out=bytearray(); chunks=(length+0x7fff)//0x8000
+    pos=off  # the pieces follow each other from the file's offset, each padded to a sector
     for k in range(chunks):
         j=idx+k
-        if j<nl: e=struct.unpack_from('<I',large,4*j)[0]; flag=e>>31; sec=e&0x7fffffff
-        elif j<nl+nm: e=struct.unpack_from('<H',medium,2*(j-nl))[0]; flag=e>>15; sec=e&0x7fff
-        else: e=small[j-nl-nm]; flag=e>>7; sec=e&0x7f
+        if j<nl: flag=struct.unpack_from('<I',large,4*j)[0]>>31
+        elif j<nl+nm: flag=struct.unpack_from('<H',medium,2*(j-nl))[0]>>15
+        else: flag=small[j-nl-nm]>>7
         want=min(0x8000,length-k*0x8000)
-        f.seek(off+sec*sector)
+        f.seek(pos)
         if flag:
             csize=struct.unpack('<I',f.read(4))[0]; props=f.read(5)
             lc=props[0]%9; lp=(props[0]//9)%5; pb=props[0]//45; dsz=struct.unpack_from('<I',props,1)[0]
             dec=lzma.LZMADecompressor(lzma.FORMAT_RAW,filters=[{'id':lzma.FILTER_LZMA1,'dict_size':max(dsz,4096),'lc':lc,'lp':lp,'pb':pb}])
-            out+=dec.decompress(f.read(csize-5 if csize>5 else csize),max_length=want)[:want]
+            out+=dec.decompress(f.read(csize),max_length=want)[:want]
+            pos+=(4+csize+sector-1)//sector*sector
         else:
             out+=f.read(want)
+            pos+=(want+sector-1)//sector*sector
     return bytes(out)
 if __name__=='__main__':
     iga=open_iga(sys.argv[1])
