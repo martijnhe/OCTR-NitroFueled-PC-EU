@@ -32,6 +32,14 @@ APP_VERSION='01.21'
 GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_no_motion_blur':'CrashTeamRacing.xml/Disable Motion Blur',
                  'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)'}
+# The bundled files of other editions: their patches are selected under CrashTeamRacing.xml's keys.
+BUNDLED_FILES=('CrashTeamRacingEU.xml',)
+
+
+def selection_key(key):
+    """key as the menu and patches.json name it (an edition's bundled file as CrashTeamRacing.xml)."""
+    name,sep,patch=key.partition('/')
+    return 'CrashTeamRacing.xml/'+patch if sep and name in BUNDLED_FILES else key
 
 
 # bbport.ini render_res: the scene size the game renders in PS4 Pro mode (run.py turns the Pro
@@ -213,7 +221,8 @@ def external_selection(found, config, ini=None):
     # 1080p Pro patch is never needed (on the base path its flipped branch would take the Pro one).
     if render_plan(ini): enabled.discard(pro_1080p); disabled.add(pro_1080p)
     return [(key,path,meta) for key,path,meta in found
-            if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
+            if selection_key(key) in enabled
+            or (selection_key(key) not in disabled and meta.get('isEnabled','false').lower()=='true')]
 
 
 def compile_external(selected, segments, elf=None):

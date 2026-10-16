@@ -173,6 +173,14 @@ class GamePatchTests(unittest.TestCase):
         self.assertEqual(external_patches(ROOT / 'patches', title_id='CUSA99999'), [])
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.00'), [])
 
+    def test_eu_edition_patches_follow_menu_keys(self):
+        found = external_patches(ROOT / 'patches', app_version='01.00', title_id='CUSA14876')
+        self.assertEqual({key.split('/')[0] for key, _, _ in found}, {'CrashTeamRacingEU.xml'})
+        self.assertEqual(len(found), len(GAME_PATCH_KEYS))
+        self.assertEqual(external_patches(ROOT / 'patches', title_id='CUSA14876'), [])
+        selected = external_selection(found, None, {'patch_60fps': '1'})
+        self.assertEqual([key for key, _, _ in selected], ['CrashTeamRacingEU.xml/60 FPS Unlock'])
+
     def test_ini_keys_select_patches(self):
         found = external_patches(ROOT / 'patches')
         self.assertEqual(external_selection(found, None, {}), [])
