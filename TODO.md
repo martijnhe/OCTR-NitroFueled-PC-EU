@@ -149,6 +149,34 @@ check whether a start-screen intro is a `.pak` cutscene the game picks by Grand 
 (`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
 choice for it.
 
+## Reverse engineering: the Grand Prix start-up intros in 1.21's update packages
+
+**Found (2026-10-16, a 10-minute look):** the 1.21 update's override packages (`archives/update.pak`,
+`update2.pak`, `update_hub.pak`, `update_hub2.pak` of the update folder) still hold more than the
+current start screen (Crash with his Game Awards statue, 1.18):
+- `update2.pak`: `actors/Octane/Cutscene/Cutscene_NitrosOxide_MainMenu.igz` with its animation
+  (`anims/.../Cutscene_NitrosOxide_MainMenu.hka`), `vfx/CTR/share/ctr_StartScreen_gp8_oxide_beam.igz`
+  (GP8 = Gasmoxia): very likely the Gasmoxia start-up intro (Nitros Oxide).
+- `update2.pak`: a second start-screen set, `archives/Octane_StartScreen_Shooting.pak` with
+  `maps/Octane_StartScreen_Shooting/*` (audio, lighting, VFX): not identified yet.
+- `update.pak`: its own `maps/Octane/Octane_StartScreen/Octane_StartScreen.igz` (full of Tesla
+  coil entities) and `vsc/Octane_StartScreen/Octane_StartScreen_Manager.igz` (a visual script that
+  probably picks the variant), overridden by `update2.pak`'s.
+- The executable names none of these: the choice is in the data (the start-screen map and its
+  scripts), not in the code. The Grand Prix system has `_currentGrandPrixVersion` (and the save
+  `_grandPrixVersion`), the likely switch.
+
+**Tools:** `tools/iga_extract.py` lists and extracts IGA v13 archives (layout in its header).
+Works for small files of update.pak (the start-screen map extracts). To do: offsets above 4 GiB
+(update2.pak, 7 GB: the high bits are probably in the "ordinal" field), the LZMA error on some
+multi-block files (the manager script), then an igz reader (string table, objects) to read the
+manager script.
+
+**Then:** find how the start screen chooses Crash or Oxide (the manager script, the Grand Prix
+version), and add a menu choice (Crash with statue / Nitros Oxide / the "Shooting" set, plus the
+launch version if it still exists): by setting the Grand Prix version the script reads, by
+redirecting which map or cutscene loads, or by the port's file layer serving a chosen package.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only
