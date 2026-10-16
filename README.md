@@ -4,6 +4,22 @@
 
 # CTR-NitroFueled-PC
 
+> **This fork (OCTR-NitroFueled-PC-EU)** adds the **European edition (CUSA14876)** and an
+> **ultrawide** option. No game files are included.
+>
+> - **EU 1.21** (base game + 1.21 update merged, e.g. `tools/merge_update.py`): runs with the
+>   60 FPS, no-motion-blur and 1080p Pro patches (`patches/CrashTeamRacingEU.xml`, same menu
+>   switches). EU 1.00 without the update also runs, with its own patches.
+> - **Ultrawide:** on a monitor wider than 16:9 the first start asks *Ultrawide? Yes / No*, with
+>   *Ask me every time*. The settings menu (Insert or L3+R3) has the switch too; a change restarts
+>   the game. The game then draws at the monitor's size (`bbport.ini`: `ultrawide`,
+>   `ultrawide_size`, `ultrawide_ask`). Videos and the title screen are still stretched or show
+>   the edges of the set: see [TODO.md](TODO.md).
+> - **Internal resolution** (1440p and the others) now also applies when started through
+>   `run.sh` (Linux, Steam Deck), not only `run.py`.
+> - Builds and runs on Linux as before (`bash build.sh`, `bash run.sh`; `BB_GAME_DIR` points at
+>   the game folder); no CPU-specific flags, so the same build works on the Steam Deck.
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**
 
 This is a Windows fork of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native
