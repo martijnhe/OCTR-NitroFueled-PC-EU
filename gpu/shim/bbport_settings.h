@@ -140,6 +140,13 @@ struct Values {
     /// asked (the first start asks), 0 off, 1 on. ultrawide_ask: ask again at every start.
     std::atomic<int> ultrawide{-1};
     std::atomic<bool> ultrawide_ask{false};
+    /// SacredFire online (RyuNET; run.py setup_online at start): online, online_name (the player's
+    /// own nickname, guarded by OnlineMutex()), online_asked (the first start asked).
+    std::atomic<bool> online{false};
+    std::atomic<bool> online_asked{false};
+    std::array<char, 32> online_name{};
+    bool startup_online = false;
+    std::array<char, 32> startup_online_name{};
     std::atomic<int> ultrawide_w{0}, ultrawide_h{0};
     /// The desktop size of the game's monitor (window.cpp), for the ultrawide choice.
     std::atomic<int> display_w{0}, display_h{0};
@@ -186,6 +193,9 @@ void SetUltrawide(bool on);
 
 Values& Get();
 std::mutex& PortsMutex();
+std::mutex& OnlineMutex();
+/// A nickname the RyuNET server accepts (run.py nick_ok): 3-16 letters, digits, _ or -, no default name.
+bool NicknameOk(const char* name);
 /// Localized overlay text; the Language selector itself stays in English.
 const char* MenuText(const char* english, const char* russian);
 

@@ -60,7 +60,13 @@ std::atomic<bool> menu_open{false};
 // SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
 std::atomic<bool> ultrawide_prompt{false};
 bool unlock_confirm = false; // SacredFire: "Unlock everything" asks before it turns on
+// SacredFire online: the first start asks for a nickname (online_asked); the field's text.
+std::atomic<bool> online_prompt{false};
+bool online_prompt_checked = false;
+char online_name_edit[32] = "";
 void SetUnlockAll(bool on);
+void SetOnline(bool on, const char* name);
+void RestartForOnline();
 bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
 bool l3_down = false, r3_down = false;
@@ -671,15 +677,49 @@ void Menu() {
         restart |= s.game_patches[g] != s.startup_game_patches[g];
     }
     restart |= BbSettings::RenderSizeNeedsRestart();
+    {
+        std::lock_guard lk{BbSettings::OnlineMutex()};
+        restart |= s.online != s.startup_online || s.online_name != s.startup_online_name;
+    }
     if (restart) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
                            BbSettings::MenuText("Changes apply after restarting the game",
                                                 "Изменения применятся после перезапуска игры"));
         if (ImGui::Button(
                 BbSettings::MenuText("Apply and restart game", "Применить и перезапустить игру"))) {
-            BbSettings::Save();
-            runtime_restart();
+            RestartForOnline(); // saves; the new launch reads the online settings from bbport.ini
         }
+    }
+
+    // SacredFire online (RyuNET): the nickname and online play, applied by a restart.
+    ImGui::SeparatorText(BbSettings::MenuText("Online (RyuNET)", "Онлайн (RyuNET)"));
+    {
+        if (ImGui::IsWindowAppearing()) {
+            std::lock_guard lk{BbSettings::OnlineMutex()};
+            std::snprintf(online_name_edit, sizeof(online_name_edit), "%s", s.online_name.data());
+        }
+        bool on = s.online;
+        ImGui::Checkbox(BbSettings::MenuText("Play online", "Играть онлайн"), &on);
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::InputText(BbSettings::MenuText("Nickname", "Ник"), online_name_edit, sizeof(online_name_edit));
+        const bool ok = BbSettings::NicknameOk(online_name_edit);
+        if (on && !ok) {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s",
+                               BbSettings::MenuText("Nickname: 3 to 16 letters, digits, _ or -, not a default name.",
+                                                    "Ник: 3-16 букв, цифр, _ или -."));
+        }
+        std::string current;
+        {
+            std::lock_guard lk{BbSettings::OnlineMutex()};
+            current = s.online_name.data();
+        }
+        if ((on != s.online || current != online_name_edit) && (!on || ok)) {
+            SetOnline(on, online_name_edit);
+        }
+        Hint(BbSettings::MenuText(
+            "Applies after restarting the game. Your nickname belongs to this PC's ryunet_online.key: keep a "
+            "copy of that file to keep the nickname (link it to Discord in the Windows launcher).",
+            "Применяется после перезапуска. Ник привязан к файлу ryunet_online.key этого ПК."));
     }
 
     // SacredFire: controller ports for split screen. Each port takes one connected gamepad; the
@@ -1066,6 +1106,79 @@ void UnlockConfirm() {
     }
 }
 
+// SacredFire online: the nickname typed in the question or the menu, saved, and the game started
+// again (run.sh / run.py set the server up and select the key patch at start). The variables of
+// this launch are dropped, so the new launch reads bbport.ini.
+void RestartForOnline() {
+    BbSettings::Save();
+#ifdef _WIN32
+    _putenv("BB_ONLINE=");
+    _putenv("BB_ONLINE_NAME=");
+#else
+    unsetenv("BB_ONLINE");
+    unsetenv("BB_ONLINE_NAME");
+#endif
+    runtime_restart();
+}
+
+void SetOnline(bool on, const char* name) {
+    auto& s = BbSettings::Get();
+    {
+        std::lock_guard lk{BbSettings::OnlineMutex()};
+        std::snprintf(s.online_name.data(), s.online_name.size(), "%s", name);
+    }
+    s.online = on;
+    s.online_asked = true;
+}
+
+// The first start: online play on the RyuNET server, with the player's own nickname.
+void OnlinePrompt() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.95f);
+    ImGui::SetNextWindowFocus();
+    ImGui::Begin("##online", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextUnformatted("Play online?");
+    ImGui::Separator();
+    ImGui::TextUnformatted("Online races, rooms with friends and the Pit Stop run on the RyuNET server.");
+    ImGui::TextUnformatted("Choose your own nickname: 3 to 16 letters, digits, _ or -.");
+    ImGui::TextUnformatted("The first PC that plays with a nickname keeps it (ryunet_online.key).");
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::InputText("Nickname", online_name_edit, sizeof(online_name_edit));
+    const bool ok = BbSettings::NicknameOk(online_name_edit);
+    if (online_name_edit[0] && !ok) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s",
+                           "Not allowed: 3 to 16 letters, digits, _ or -, and not a default name like Player.");
+    }
+    ImGui::Spacing();
+    int choice = -1;
+    ImGui::BeginDisabled(!ok);
+    if (ImGui::Button("Play online (restarts the game)")) choice = 1;
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Not now")) choice = 0;
+    ImGui::TextDisabled("Steam Deck: Steam + X types. Later: Insert or L3+R3, Online.");
+    ImGui::End();
+    if (choice == 1) {
+        SetOnline(true, online_name_edit);
+        online_prompt = false;
+        std::printf("Online: on as %s, restarting\n", online_name_edit);
+        RestartForOnline();
+    } else if (choice == 0) {
+        auto& s = BbSettings::Get();
+        s.online_asked = true;
+        BbSettings::Save();
+        online_prompt = false;
+        std::printf("Online: not now\n");
+    }
+}
+
 void UltrawidePrompt() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1180,7 +1293,7 @@ void UpdateTextInput(SDL_Window* window) {
     bool want = false;
     {
         std::scoped_lock lock{imgui_mutex};
-        want = initialized && menu_open && ImGui::GetIO().WantTextInput;
+        want = initialized && (menu_open || online_prompt) && ImGui::GetIO().WantTextInput;
     }
     if (want != SDL_TextInputActive(window)) {
         if (want) {
@@ -1197,7 +1310,7 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
-    const bool is_open = menu_open || ultrawide_prompt;
+    const bool is_open = menu_open || ultrawide_prompt || online_prompt;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -1290,8 +1403,18 @@ bool Visible() {
             ultrawide_prompt = true;
         }
     }
-    return initialized && (menu_open || prompt_active || ultrawide_prompt || BbSettings::Get().show_fps ||
-                           AnnouncementActive());
+    if (initialized && !online_prompt_checked && !ultrawide_prompt) {
+        // Once, after the ultrawide question: the first start asks for online play and a nickname.
+        online_prompt_checked = true;
+        auto& s = BbSettings::Get();
+        if (!s.online && !s.online_asked) {
+            std::lock_guard lk{BbSettings::OnlineMutex()};
+            std::snprintf(online_name_edit, sizeof(online_name_edit), "%s", s.online_name.data());
+            online_prompt = true;
+        }
+    }
+    return initialized && (menu_open || prompt_active || ultrawide_prompt || online_prompt ||
+                           BbSettings::Get().show_fps || AnnouncementActive());
 }
 
 bool MenuOpen() {
@@ -1304,7 +1427,7 @@ bool TakePadRescan() {
 
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active || ultrawide_prompt;
+    return menu_open || prompt_active || ultrawide_prompt || online_prompt;
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -1349,6 +1472,8 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (ultrawide_prompt && !menu_open) {
         UltrawidePrompt();
+    } else if (online_prompt && !menu_open) {
+        OnlinePrompt();
     }
     AnnouncementBanner();
     ImGui::Render();

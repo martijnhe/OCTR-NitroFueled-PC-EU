@@ -2,6 +2,7 @@
 #include "bbport_settings.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,13 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.ultrawide = i != 0 ? 1 : 0;
     } else if (key == "ultrawide_ask") {
         v.ultrawide_ask = i != 0;
+    } else if (key == "online") {
+        v.online = i != 0;
+    } else if (key == "online_asked") {
+        v.online_asked = i != 0;
+    } else if (key == "online_name") {
+        std::lock_guard lk{OnlineMutex()};
+        std::snprintf(v.online_name.data(), v.online_name.size(), "%s", value.c_str());
     } else if (key == "ultrawide_size") {
         int w = 0, h = 0;
         if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 16384 &&
@@ -149,6 +157,24 @@ void Set(Values& v, const std::string& key, const std::string& value) {
 } // namespace
 
 std::mutex& PortsMutex() { static std::mutex m; return m; }
+std::mutex& OnlineMutex() {
+    static std::mutex m;
+    return m;
+}
+bool NicknameOk(const char* name) {
+    const size_t n = std::strlen(name);
+    if (n < 3 || n > 16) return false;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        if (!(std::isalnum(c) && c < 0x80) && c != '_' && c != '-') return false;
+    }
+    std::string lower(name);
+    for (auto& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* reserved : {"ryupc", "ryunet", "player", "jugador", "guest"}) {
+        if (lower == reserved) return false;
+    }
+    return true;
+}
 
 Values& Get() {
     static Values values;
@@ -241,6 +267,11 @@ void Load() {
     v.startup_object_motion = v.object_motion;
     for (int e = 0; e < EffectCount; ++e) {
         v.startup_effects[e] = v.effects[e];
+    }
+    v.startup_online = v.online;
+    {
+        std::lock_guard lk{OnlineMutex()};
+        v.startup_online_name = v.online_name;
     }
     for (int g = 0; g < GamePatchCount; ++g) {
         v.startup_game_patches[g] = v.game_patches[g];
@@ -375,6 +406,12 @@ void Save() {
     if (v.render_res >= 0) put("render_res", std::to_string(RenderResHeights[v.render_res]));
     if (v.ultrawide >= 0) put("ultrawide", flag(v.ultrawide == 1));
     put("ultrawide_ask", flag(v.ultrawide_ask));
+    put("online", flag(v.online));
+    put("online_asked", flag(v.online_asked));
+    {
+        std::lock_guard lk{OnlineMutex()};
+        if (v.online_name[0]) put("online_name", std::string(v.online_name.data()));
+    }
     if (v.ultrawide_w > 0) {
         put("ultrawide_size", std::to_string(v.ultrawide_w.load()) + "x" + std::to_string(v.ultrawide_h.load()));
     }
