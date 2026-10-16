@@ -564,6 +564,13 @@ static const RuntimeExport exports[]={
     {"sceNpWebApiCreatePushEventFilter",np_signed_out}, {"sceNpWebApiDeletePushEventFilter",ok_void},
     {"sceNpWebApiRegisterPushEventCallback",np_signed_out}, {"sceNpWebApiUnregisterPushEventCallback",ok_void},
     {"sceNpWebApiUtilityParseNpId",np_signed_out},
+    /* Newer variants, called by the 1.00 libSceNpToolkit2.prx (CUSA14876 base game). */
+    {"sceNpWebApiCreateContextA",np_signed_out}, {"sceNpWebApiCreateHandle",lib_init_id},
+    {"sceNpWebApiDeleteHandle",ok_void}, {"sceNpWebApiAddHttpRequestHeader",ok_void},
+    {"sceNpWebApiSendRequest2",np_signed_out}, {"sceNpWebApiGetMemoryPoolStats",np_signed_out},
+    {"sceNpWebApiCreateExtdPushEventFilter",np_signed_out}, {"sceNpWebApiDeleteExtdPushEventFilter",ok_void},
+    {"sceNpWebApiRegisterExtdPushEventCallbackA",np_signed_out}, {"sceNpWebApiUnregisterExtdPushEventCallback",ok_void},
+    {"sceNpCreateRequest",np_request}, {"sceNpAuthCreateRequest",np_request}, {"sceNpAuthAbortRequest",ok_void},
     {"sceNpMatching2ContextStart",np_signed_out}, {"sceNpMatching2ContextStop",ok_void},
     {"sceNpMatching2DestroyContext",ok_void},
     {"sceNpMatching2RegisterContextCallback",ok_void}, {"sceNpMatching2RegisterLobbyEventCallback",ok_void},

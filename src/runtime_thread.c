@@ -34,6 +34,7 @@ typedef struct ThreadAttr {
     uint32_t magic;
     int detached, policy, prio, inherit;
     uint64_t stack, guard, affinity;
+    void *stack_addr; /* lowest address of the stack's used part (scePthreadAttrGetstack) */
     struct ThreadAttr *next;
 } ThreadAttr;
 typedef struct GuestThread {
@@ -184,6 +185,18 @@ static ABI int32_t attr_get(void *thread,ThreadAttr **out) {
     ThreadAttr *next=a->next;
     *a=t->attr; a->magic=ATTR_MAGIC; a->next=next;
     a->detached=t->detached;
+#ifndef _WIN32
+    /* A running thread's stack: the top a->stack bytes of its host stack (the margin is below). */
+    pthread_attr_t host;
+    if (!pthread_getattr_np(t->host,&host)) {
+        void *base; size_t size;
+        if (!pthread_attr_getstack(&host,&base,&size)) {
+            if (a->stack==0 || a->stack>size) a->stack=size;
+            a->stack_addr=(char *)base+size-a->stack;
+        }
+        pthread_attr_destroy(&host);
+    }
+#endif
     return 0;
 }
 static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {
@@ -195,6 +208,11 @@ static ABI int32_t attr_get_stack(ThreadAttr **slot,uint64_t *size) {
     ThreadAttr *a=find_attr(slot);
     if (!a || !size) return ERR(22);
     *size=a->stack; return 0;
+}
+static ABI int32_t attr_get_stack_addr_size(ThreadAttr **slot,void **addr,uint64_t *size) {
+    ThreadAttr *a=find_attr(slot);
+    if (!a || !addr || !size) return ERR(22);
+    *addr=a->stack_addr; *size=a->stack; return 0;
 }
 static ABI int32_t attr_set_detach(ThreadAttr **slot,int state) {
     ThreadAttr *a=find_attr(slot);
@@ -409,7 +427,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"UTXzJbWhhTE#libkernel",attr_set_stack}, {"-Wreprtu0Qs#libkernel",attr_set_detach},
         {"4+h9EzwKF4I#libkernel",attr_set_policy}, {"DzES9hQF4f4#libkernel",attr_set_param},
         {"3qxgM4ezETA#libkernel",attr_set_affinity}, {"eXbUSpEaTsA#libkernel",attr_set_inherit},
-        {"JaRMy+QcpeU#libkernel",attr_get_detach}, {"-fA+7ZlGDQs#libkernel",attr_get_stack},
+        {"JaRMy+QcpeU#libkernel",attr_get_detach}, {"-fA+7ZlGDQs#libkernel",attr_get_stack}, {"-quPa4SEJUw#libkernel",attr_get_stack_addr_size},
         {"FXPWHNk8Of0#libkernel",attr_get_param}, {"El+cQ20DynU#libkernel",attr_set_guard},
         {"6UgtwV+0zb4#libkernel",thread_create}, {"onNY9Byn-W8#libkernel",thread_join},
         {"4qGrR6eoP9Y#libkernel",thread_detach}, {"3kg7rT0NQIs#libkernel",thread_exit},
