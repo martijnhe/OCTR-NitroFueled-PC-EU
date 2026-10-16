@@ -263,6 +263,11 @@ def main():
                 env['BB_CINEMATIC_16X9'] = '1'
                 env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out,
                                                 capture=True).strip()
+            # Ultrawide: the title and customization screens fill the width (src/runtime_frontend.c).
+            env.pop('BB_FRONTEND_FOV', None)
+            if plan and plan.get('output') and not ini_has(config, 'ultrawide_frontend=0'):
+                env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
+                                                    capture=True).strip()
             # unlock_all (default on): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)
             if not ini_has(config, 'unlock_all=0'):

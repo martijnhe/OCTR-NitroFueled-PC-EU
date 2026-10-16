@@ -22,6 +22,7 @@ draws with Vulkan. No emulator, no game files included.
 | **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
 | **Ultrawide** | On a monitor wider than 16:9 (2560x1080, 3440x1440, ...) the game draws at the monitor's own size; the HUD spreads to the edges. The first start asks *Ultrawide? Yes / No* (with *Ask me every time*). | menu *Ultrawide* / `ultrawide=1`, `ultrawide_ask` |
 | **16:9 videos and cutscenes in ultrawide** | The intro videos and the story cutscenes are shown at 16:9 with black bars instead of stretched or showing off-stage; gameplay stays ultrawide. The camera fly-over before a race (the track's name over the track) stays ultrawide. Turn it off to keep them wide. | on by default; menu *Ultrawide: videos and cutscenes at 16:9* / `ultrawide_cinematics=0` |
+| **Title and customization screens in ultrawide** | The title screen and the kart customization screen before a race are 3D sets with a backdrop made for 16:9: their camera gets the field of view of a 16:9 screen, so the backdrop fills the width and the menus keep their ultrawide layout. The videos inside menus (track previews, hints) stay ultrawide too. | on by default; menu *Ultrawide: title and customization screens fill the width* / `ultrawide_frontend=0` |
 | **Internal resolution** | 480p to native 4K (1440p is the PS4 Pro's own), now also on Linux and the Steam Deck. | menu *Internal resolution* / `render_res=1440` |
 | **DLC** | Your own add-on packages (Nitros Oxide Edition, pre-order pack, Firehawk kart) are reported installed. | put the `.pkg` files in `dlc/` |
 | **Shortcuts and Steam** | *Crash Team Racing Nitro-Fueled* in the application menu and in **Steam** (with the game's cover art), starting the game directly, so it works in Steam Deck game mode. The AppImage adds itself to Steam on its first start (while Steam runs: as soon as it closes, e.g. when switching to game mode). | at install; AppImage: first start (`STEAM_SHORTCUT=0` skips it) |
@@ -61,7 +62,7 @@ Nitro-Fueled*. By hand: `bash build.sh`, then `BB_GAME_DIR=<game> bash run.sh`, 
 - **Pit Stop shop, Online races, Grand Prix events:** they need Activision's online service
   (Demonware), which this port does not connect to. With *Unlock everything* you already have
   everything the Pit Stop sells. Work toward an offline Pit Stop is in [TODO.md](TODO.md).
-- **Title screen in ultrawide** still shows the edges of its 16:9 set.
+- **Title screen in ultrawide**: the backdrop fills the width now, but the bigger logo touches "Press X to begin".
 - Local split screen works (second controller).
 
 ## Original project

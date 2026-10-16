@@ -92,6 +92,8 @@ void runtime_unlock_all_start(const unsigned char *image);
 /* SacredFire: 16:9 videos and cutscenes in ultrawide (runtime_cinematic.c). */
 void runtime_cinematic_start(const unsigned char *image);
 void runtime_cinematic_video(int delta); /* +1 a video file opened, -1 closed */
+/* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */
+void runtime_frontend_start(const unsigned char *image);
 void runtime_file_report(void);
 void runtime_file_configure(const char *app0, const char *user);
 int runtime_file_mount(const char *guest, const char *host);

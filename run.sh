@@ -103,6 +103,13 @@ if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$
     BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
     export BB_CUTSCENE
 fi
+# Ultrawide: the title and customization screens with a 16:9 field of view, so their backdrop
+# fills the width (src/runtime_frontend.c), unless bbport.ini has ultrawide_frontend=0.
+unset BB_FRONTEND_FOV
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$BB_CONFIG" 2>/dev/null; then
+    BB_FRONTEND_FOV=$("$PYTHON" scripts/patches.py --print-frontend --out "$out" || true)
+    export BB_FRONTEND_FOV
+fi
 # BB_NEO=1: PS4 Pro mode (sceKernelIsNeoMode, 7-CPU mode, 5568 MiB direct memory); the game then
 # picks its Pro rendering path. Off by default: the Steam Deck is closer to a base PS4.
 export BB_NEO=${BB_NEO:-0}

@@ -234,6 +234,69 @@ def reflected_fields(image,rel,field):
     return None
 
 
+def boot_image(out):
+    """(image, relocations) of the prepared image out/boot.bin: the loaded image and its absolute
+    relocations (target -> value)."""
+    data=Path(out,'boot.bin').read_bytes()
+    _magic,size,_entry,nl,nr,nn,_=struct.unpack_from('<8sQQQQQQ',data,0)
+    pos=56+nl*24+nn*128
+    rel={}
+    for i in range(nr):
+        target,kind,value,_=struct.unpack_from('<QQqq',data,pos+i*32)
+        if kind==0: rel[target]=value
+    return data[pos+nr*32:pos+nr*32+size],rel
+
+
+def registered_vtable(image,rel,name):
+    """Image offset of an Alchemy class's vtable from its registration in the prepared image, or
+    None: the code that loads the class name (lea r8,[rip+name]) loads, a little before, tables of
+    code pointers (lea reg,[rip+table]); the last one before the name is the class's vtable (an
+    earlier one, when there are two, belongs to its meta object)."""
+    text=image.find(b'\0'+name.encode()+b'\0')
+    if text<0 or not rel: return None
+    text+=1
+    code_end=min(rel)  # the relocated pointers live in data, after the code
+    i=image.find(b'\x4c\x8d\x05')
+    while i!=-1 and i<len(image)-7:
+        if i+7+struct.unpack_from('<i',image,i+3)[0]==text:
+            found=None
+            for back in range(max(i-0x120,0),i):
+                if image[back]==0x48 and image[back+1]==0x8d and (image[back+2]&0xc7)==0x05:
+                    t=back+7+struct.unpack_from('<i',image,back+3)[0]
+                    if all(0<rel.get(t+8*k,-1)<code_end for k in range(3)): found=t
+            if found is not None: return found
+        i=image.find(b'\x4c\x8d\x05',i+1)
+    return None
+
+
+# The instruction that turns the render camera's field of view into degrees each frame: load the
+# camera setup's radians (+0xd0), vmulss xmm0,[rip+57.29578], keep the aspect, store to the render
+# camera's +0x3c. Found in the EU 1.21 executable (0xaf7278); src/runtime_frontend.c points it at a
+# factor of its own.
+FRONTEND_FOV_SIGNATURE=bytes.fromhex('c4c17a1085d0000000c5fa5905')
+FRONTEND_FOV_AFTER=bytes.fromhex('c5fa1195f0feffffc5fa11433c')
+
+
+def frontend_state(out):
+    """(instruction, CPreRenderUpdatePass vtable, slot) image offsets for the field of view of the
+    title and customization screens in ultrawide (src/runtime_frontend.c), or None. The slot is a
+    float in the unused tail of the image's last page."""
+    image,rel=boot_image(out)
+    sites=[]
+    i=image.find(FRONTEND_FOV_SIGNATURE)
+    while i!=-1:
+        if image[i+len(FRONTEND_FOV_SIGNATURE)+4:i+len(FRONTEND_FOV_SIGNATURE)+4+len(FRONTEND_FOV_AFTER)]==FRONTEND_FOV_AFTER:
+            sites.append(i+9)
+        i=image.find(FRONTEND_FOV_SIGNATURE,i+1)
+    if len(sites)!=1: return None
+    fields=reflected_fields(image,rel,b'_cameraAspectRatioMultiplier')
+    if not fields or fields[0].get('_cameraName')!=0x138 or fields[0].get('_renderCamera')!=0x168: return None
+    vtable=registered_vtable(image,rel,'CPreRenderUpdatePass')
+    slot=(len(image)+15)&~15
+    if vtable is None or slot+4>(len(image)+0xfff)&~0xfff: return None
+    return sites[0],vtable,slot
+
+
 def cutscene_state(out):
     """(instance slot, active field, designer field, flyby field or None) of CCutsceneManager in
     the prepared image (out/boot.bin: the loaded image and its relocations), or None. The static
@@ -379,6 +442,8 @@ def main():
     p.add_argument('--external-only',action='store_true',help='accepted for older callers (the only mode)')
     p.add_argument('--print-cutscene',action='store_true',
                    help='print "INSTANCE ACTIVE DESIGNER [FLYBY]" of the cutscene manager (ultrawide 16:9 cutscenes), or nothing')
+    p.add_argument('--print-frontend',action='store_true',
+                   help='print "INSTRUCTION VTABLE SLOT" for the ultrawide title/customization field of view, or nothing')
     p.add_argument('--print-unlock-vtable',action='store_true',
                    help='print the CBuildData vtable offset (unlock_all), or nothing, and exit')
     p.add_argument('--print-plan',action='store_true',
@@ -387,6 +452,10 @@ def main():
     if a.print_cutscene:
         found=cutscene_state(a.out)
         if found: print(f'{found[0]:#x} {found[1]:#x} {found[2]:#x}'+(f' {found[3]:#x}' if found[3] is not None else ''))
+        return
+    if a.print_frontend:
+        found=frontend_state(a.out)
+        if found: print(' '.join(f'{v:#x}' for v in found))
         return
     if a.print_unlock_vtable:
         vt=class_vtable((a.out/'eboot.elf').read_bytes(),'CBuildData')

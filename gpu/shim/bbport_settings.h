@@ -38,6 +38,7 @@ inline constexpr Effect Effects[] = {
     {"effect_dynamic_shadows", "Shadows from dynamic lights", "Тени от динамических источников", true},
     {"effect_ssr", "Screen-space reflections (not in original game)", "Отражения SSR (не было в игре)", false},
     {"ultrawide_cinematics", "Ultrawide: videos and cutscenes at 16:9", "Ультраширокий: видео и ролики в 16:9", true},
+    {"ultrawide_frontend", "Ultrawide: title and customization screens fill the width", "Ультраширокий: титульный экран и настройка карта на всю ширину", true},
     {"unlock_all", "Unlock everything (all Pit Stop items, characters, karts)", "Открыть всё (предметы Pit Stop, персонажи, карты)", true},
     {"skip_intro", "Skip startup intros", "Пропуск заставок при запуске", false},
     {"debug_camera", "Free camera (Cross + L3)", "Свободная камера (Cross + L3)", false},
