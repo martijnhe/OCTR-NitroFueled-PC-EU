@@ -2,6 +2,9 @@
 # Rough Steam Deck simulation on a desktop PC, to find what the Deck would struggle with.
 #
 #   tools/deck_sim.sh [--native] [--race] [--seconds N] [GAME_DIR]
+#   tools/deck_sim.sh --restore       # undo a DECK_CPU_MHZ clock cap left by an interrupted run
+#
+# Run it from a normal terminal: a whole test takes 3-4 minutes.
 #
 # Runs the game (run.sh) inside gamescope at the Deck's 1280x800, on 4 cores / 8 threads with a
 # CPU-time cap (DECK_CPU_QUOTA, default 340%: four desktop Zen 5 cores at ~42%, about a Deck's
@@ -23,6 +26,11 @@ here=$(cd -- "$(dirname -- "$0")/.." && pwd)
 native=0 race=0 seconds=120 game=
 while (( $# )); do
     case $1 in
+        --restore)
+            max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
+            sudo cpupower -c "${DECK_CPUS:-0-3,6-9}" frequency-set -u "$((max / 1000))MHz" >/dev/null
+            echo "CPU clock of ${DECK_CPUS:-0-3,6-9} restored to $((max / 1000)) MHz"
+            exit 0 ;;
         --native) native=1 ;;
         --race) race=1 ;;
         --seconds) seconds=$2; shift ;;
@@ -56,12 +64,16 @@ else
         taskset -c "${DECK_CPUS:-0-3,6-9}"
         gamescope -W 1280 -H 800 -w 1280 -h 800 -r 60 -- "${game_command[@]}")
 fi
+# Build first (run.sh would otherwise build inside the timed, capped run).
+(cd "$here" && bash build.sh > "$logs/deck_sim_build.log" 2>&1) || { echo "Build failed: $logs/deck_sim_build.log" >&2; exit 1; }
 if (( ! native )) && [[ -n ${DECK_CPU_MHZ:-} ]]; then
     cpus=${DECK_CPUS:-0-3,6-9}
-    previous=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq)
+    max=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq)
     sudo cpupower -c "$cpus" frequency-set -u "${DECK_CPU_MHZ}MHz" >/dev/null
-    trap 'sudo cpupower -c "$cpus" frequency-set -u "$((previous / 1000))MHz" >/dev/null' EXIT
-    echo "CPU clock of $cpus capped at ${DECK_CPU_MHZ} MHz (restored at the end)"
+    restore() { sudo cpupower -c "$cpus" frequency-set -u "$((max / 1000))MHz" >/dev/null || true; }
+    trap restore EXIT
+    trap 'restore; pkill -x sacredfire; exit 130' INT TERM HUP
+    echo "CPU clock of $cpus capped at ${DECK_CPU_MHZ} MHz (restored at the end; if a run is killed: $0 --restore)"
 fi
 echo "Steam Deck simulation ($mode): $log"
 cd "$here"
