@@ -71,9 +71,9 @@ watchpoint on +0xa0) and lower the camera a little while the title screen shows.
 
 ## Online (RyuNET) on the European edition
 
-**State:** branch `online` merges Ryu7w7/OCTR-NitroFueled-PC v0.5 (commit "Merge upstream v0.5").
-Offline the EU game runs as before. Online is off by default (`online=1` and `online_name=` in
-bbport.ini, or the launcher). Not yet tested online with the EU edition.
+**State:** Ryu7w7/OCTR-NitroFueled-PC v0.5 is merged (commit "Merge upstream v0.5"). Offline the
+EU game runs as before. Online is off by default (`online=1` and `online_name=` in bbport.ini, or
+the launcher). Tested on EU 1.21 (2026-10-16): sign-in and online play on the RyuNET server work.
 
 **How upstream built it:**
 - v0.3 (online): a replacement Demonware server (RyuNET, `octr.ryu7w7.xyz`, auth over HTTP on
@@ -97,9 +97,8 @@ image offset 0x1becf58 in EU 1.21, 0x40 before the USA 1.21 one, found by signat
 presence names the running title id.
 
 **Open:**
-- Test online on EU: sign-in, matchmaking, a race, private rooms with a USA player. The server
-  may tell the editions apart (Demonware title ids differ per region; the EU executable's own
-  title id is sent at sign-in).
+- Test with a USA player: private rooms and races across the two editions (Demonware title ids
+  differ per region; the EU executable's own title id is sent at sign-in).
 - The Windows launcher (`launcher/windows/launcher.cpp`) still names CUSA13795 for the game
   folder, saves and languages.
 - `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation

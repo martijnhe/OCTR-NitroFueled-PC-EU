@@ -17,7 +17,8 @@ draws with Vulkan. No emulator, no game files included.
 | Feature | What you get | Setting |
 |---|---|---|
 | **European edition** | CUSA14876 runs, with the **1.21 update** (all Grand Prix tracks, characters and karts that came after launch). EU 1.00 without the update runs too. The USA edition (CUSA13795) keeps working. | automatic |
-| **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch. | on by default; menu *Unlock everything* / `unlock_all=0` |
+| **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch, on and off at any time. Nothing is written to your save or your online items: turned off, you have exactly what you bought or won again. Turning it on asks first (the Pit Stop does not work while it is on) and backs up your saves to `user/savedata-backups`. | off by default; menu *Unlock everything* / `unlock_all=1` |
+| **Online (RyuNET)** | Online races, matchmaking, private rooms, the friends list and the Pit Stop on the RyuNET server, from [Ryu7w7's OCTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC) v0.5, also for the European edition (its own key patch, `patches/CrashTeamRacingOnlineEU.xml`). Needs your own nickname. | off by default; `online=1` and `online_name=<your nickname>` in `bbport.ini` |
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
 | **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
 | **Ultrawide** | On a monitor wider than 16:9 (2560x1080, 3440x1440, ...) the game draws at the monitor's own size; the HUD spreads to the edges. The first start asks *Ultrawide? Yes / No* (with *Ask me every time*). | menu *Ultrawide* / `ultrawide=1`, `ultrawide_ask` |
@@ -59,8 +60,8 @@ Nitro-Fueled*. By hand: `bash build.sh`, then `BB_GAME_DIR=<game> bash run.sh`, 
 
 ## Not working yet
 
-- **Pit Stop shop, Online races, Grand Prix events:** they need Activision's online service
-  (Demonware), which this port does not connect to. With *Unlock everything* you already have
+- **Grand Prix events** and Activision's own online service (Demonware): online play goes through
+  the RyuNET server instead (see *Online* above). Without online, *Unlock everything* gives you
   everything the Pit Stop sells. Work toward an offline Pit Stop is in [TODO.md](TODO.md).
 - **Title screen in ultrawide**: the backdrop fills the width now, but the bigger logo touches "Press X to begin".
 - Local split screen works (second controller).

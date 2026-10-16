@@ -455,12 +455,13 @@ def main():
             if plan and plan.get('output') and not ini_has(config, 'ultrawide_frontend=0'):
                 env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
                                                     capture=True).strip()
-            # unlock_all (default on): the runtime sets the build setups' _unlockAll flag.
+            # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
+            # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)
-            if not ini_has(config, 'unlock_all=0'):
-                vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).strip()
-                if vt:
-                    env['BB_UNLOCK_ALL_VTABLE'] = vt
+            vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).strip()
+            if vt:
+                env['BB_UNLOCK_ALL_VTABLE'] = vt
+            env['BB_UNLOCK_ALL'] = '1' if ini_has(config, 'unlock_all=1') else '0'
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
             elif ini_has(config, 'patch_60fps=1'):

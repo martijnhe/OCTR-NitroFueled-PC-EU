@@ -48,6 +48,7 @@ extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
+extern "C" void runtime_unlock_all_set(int on); // bb-probe (runtime_unlock.c)
 
 namespace BbOverlay {
 
@@ -58,6 +59,8 @@ bool initialized = false;
 std::atomic<bool> menu_open{false};
 // SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
 std::atomic<bool> ultrawide_prompt{false};
+bool unlock_confirm = false; // SacredFire: "Unlock everything" asks before it turns on
+void SetUnlockAll(bool on);
 bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
 bool l3_down = false, r3_down = false;
@@ -620,9 +623,35 @@ void Menu() {
         Slider(BbSettings::MenuText("FSR 3 sharpness", "Резкость FSR 3"), s.fsr3_sharpness, 0.0f, 1.0f);
     }
 
+    // SacredFire: unlock everything (the game's own _unlockAll switch, src/runtime_unlock.c),
+    // applied at once. Nothing is saved by it, so off brings back the player's own items.
+    int unlock = -1;
+    for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        if (std::strcmp(BbSettings::Effects[e].key, "unlock_all") == 0) unlock = e;
+    }
+    if (unlock >= 0) {
+        bool on = s.effects[unlock];
+        if (ImGui::Checkbox(BbSettings::MenuText("Unlock everything (characters, karts, Pit Stop items)",
+                                                 "Открыть всё (персонажи, карты, предметы Pit Stop)"),
+                            &on)) {
+            if (on) {
+                unlock_confirm = true; // turned on only after the warning is confirmed
+            } else {
+                SetUnlockAll(false);
+            }
+        }
+        Hint(BbSettings::MenuText(
+            "Turning it on asks first: the Pit Stop does not work while it is on. Your save and your "
+            "online items are not changed: turned off, you have exactly what you own again.",
+            "Сначала спрашивает: Pit Stop не работает, пока включено. Сохранение не меняется."));
+    }
+
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         const auto& patch = BbSettings::GamePatches[g];
         if (std::strcmp(patch.key, "patch_pro_1080p") == 0) continue; // see Internal resolution
+        // Camiloop's unlock patch writes the save and is for the USA executable only; the switch
+        // above does the same without touching the save (bbport.ini patch_unlock_all=1 still works).
+        if (std::strcmp(patch.key, "patch_unlock_all") == 0) continue;
         const bool before = s.game_patches[g];
         Checkbox(BbSettings::MenuText(patch.label, patch.label_ru), s.game_patches[g]);
         if (before != s.game_patches[g]) {
@@ -976,6 +1005,67 @@ void TextPrompt() {
 
 // SacredFire: "Ultrawide?" with Yes / No and "Ask me every time". A choice that differs from the
 // one the game started with restarts it (the size is patched into the executable at start).
+// SacredFire: unlock everything on or off, applied at once (src/runtime_unlock.c) and saved.
+void SetUnlockAll(bool on) {
+    auto& s = BbSettings::Get();
+    for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        if (std::strcmp(BbSettings::Effects[e].key, "unlock_all") != 0) continue;
+        s.effects[e] = on;
+        s.startup_effects[e] = on; // live: no restart
+    }
+    runtime_unlock_all_set(on ? 1 : 0);
+    BbSettings::Save();
+    std::printf("Menu: unlock_all = %d\n", int(on));
+}
+
+// The warning before "Unlock everything" turns on; Confirm turns it on, Cancel leaves it off.
+void UnlockConfirm() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.97f);
+    ImGui::SetNextWindowFocus();
+    ImGui::Begin("##unlock_confirm", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                       BbSettings::MenuText("Warning: unlock everything?", "Внимание: открыть всё?"));
+    ImGui::Separator();
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "Every character, kart, wheel, paint, decal and sticker becomes available.",
+        "Становятся доступны все персонажи, карты, колёса, краски, наклейки."));
+    ImGui::Spacing();
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "While it is on, the Pit Stop does not work: everything already counts as yours,",
+        "Пока включено, Pit Stop не работает: всё уже считается вашим,"));
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "so you cannot buy anything there.",
+        "поэтому купить там ничего нельзя."));
+    ImGui::Spacing();
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "Nothing is saved by it: your save and your online items stay as they are.",
+        "Ничего не сохраняется: ваше сохранение и онлайн-предметы не меняются."));
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "Turn it off again and you have exactly the items you bought or won.",
+        "Выключите снова, и у вас будут ровно ваши предметы."));
+    ImGui::TextUnformatted(BbSettings::MenuText(
+        "A backup of your saves is made first (user/savedata-backups).",
+        "Сначала делается копия сохранений (user/savedata-backups)."));
+    ImGui::Spacing();
+    int choice = -1;
+    if (ImGui::Button(BbSettings::MenuText("Confirm: unlock everything", "Подтвердить: открыть всё"))) choice = 1;
+    ImGui::SameLine();
+    if (ImGui::Button(BbSettings::MenuText("Cancel", "Отмена"))) choice = 0;
+    ImGui::SetItemDefaultFocus(); // Cancel is the default
+    ImGui::TextDisabled("%s", BbSettings::MenuText("Cross / Enter: choose", "Cross / Enter: выбрать"));
+    ImGui::End();
+    if (choice >= 0) {
+        unlock_confirm = false;
+        if (choice == 1) SetUnlockAll(true);
+    }
+}
+
 void UltrawidePrompt() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1245,6 +1335,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     ImGui::NewFrame();
     if (menu_open) {
         Menu();
+        if (unlock_confirm) {
+            UnlockConfirm();
+        }
+    } else {
+        unlock_confirm = false; // closing the menu cancels the question
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();

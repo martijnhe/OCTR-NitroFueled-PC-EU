@@ -92,13 +92,13 @@ fps=${BB_FPS:-30}
 "$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
     --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$BB_CONFIG"
 patch_args=(--patches "$out/patches.bin")
-# unlock_all (default on; bbport.ini unlock_all=0 turns it off): the runtime sets the build setups'
-# _unlockAll flag (src/runtime_unlock.c), found by the CBuildData vtable of this executable.
-unset BB_UNLOCK_ALL_VTABLE
-if ! { [[ -f $BB_CONFIG ]] && grep -qx 'unlock_all=0' "$BB_CONFIG"; }; then
-    vt=$("$PYTHON" scripts/patches.py --print-unlock-vtable --out "$out" || true)
-    if [[ -n $vt ]]; then export BB_UNLOCK_ALL_VTABLE=$vt; fi
-fi
+# unlock_all (default off; bbport.ini unlock_all=1 starts it on, the in-game menu switches it at
+# any time): the runtime sets the build setups' _unlockAll flag (src/runtime_unlock.c), found by
+# the CBuildData vtable of this executable.
+unset BB_UNLOCK_ALL_VTABLE BB_UNLOCK_ALL
+vt=$("$PYTHON" scripts/patches.py --print-unlock-vtable --out "$out" || true)
+if [[ -n $vt ]]; then export BB_UNLOCK_ALL_VTABLE=$vt; fi
+if [[ -f $BB_CONFIG ]] && grep -qx 'unlock_all=1' "$BB_CONFIG"; then export BB_UNLOCK_ALL=1; else export BB_UNLOCK_ALL=0; fi
 # bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
 # above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
 read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$BB_CONFIG") || true
