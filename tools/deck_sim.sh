@@ -60,7 +60,11 @@ game_command=(env BB_CONFIG="$config" BB_GAME_DIR="$game" BB_FULLSCREEN=1 BB_TIM
 if (( native )); then
     command=(gamescope -W 1280 -H 800 -w 1280 -h 800 -r 60 -- "${game_command[@]}")
 else
-    command=(systemd-run --user --scope --quiet -p MemoryMax=14G -p CPUQuota="${DECK_CPU_QUOTA:-340%}"
+    # With DECK_CPU_MHZ the slower clock stands for the Deck's CPU; a CPU-time quota on top froze
+    # the game whenever its share ran out (60-70 ms frames a Deck does not have).
+    quota=${DECK_CPU_QUOTA:-340%}
+    [[ -n ${DECK_CPU_MHZ:-} && -z ${DECK_CPU_QUOTA:-} ]] && quota=infinity
+    command=(systemd-run --user --scope --quiet -p MemoryMax=14G -p CPUQuota="$quota"
         taskset -c "${DECK_CPUS:-0-3,6-9}"
         gamescope -W 1280 -H 800 -w 1280 -h 800 -r 60 -- "${game_command[@]}")
 fi
