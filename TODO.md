@@ -134,7 +134,8 @@ start screen (`octane_startscreen.pak`) has only Crash's intro (`Crash_MainMenu`
 
 **Wanted:** the earlier seasons' intros (PS4 updates: Nitro Tour 1.04, Back N. Time 1.08,
 Spyro & Friends 1.09, Spooky 1.12, Neon Circus 1.14, Winter Festival 1.16, Rustland 1.17;
-Gasmoxia 1.19 is `CTRTV_FebGP.bk2`, still in 1.21: their CTR TV episodes and the
+Gasmoxia 1.19 is `CTRTV_FebGP.bk2`, still in 1.21 (PS4 numbers, IGN). Themed start screens: 1.09,
+1.12, 1.14, 1.16 (IGN's notes); 1.18 put Crash's Game Awards statue on the start screen, the 1.21 one: their CTR TV episodes and the
 start-screen intros where another character jumps into the logo, see "Intro Comparison + All
 Grand Prix Intros" on YouTube). Reports come in through the issue forms
 `.github/ISSUE_TEMPLATE/ctrtv_episode.yml` and `grand_prix_intro.yml` (names, sizes, checksums; no

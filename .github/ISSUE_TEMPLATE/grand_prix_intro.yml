@@ -8,7 +8,9 @@ body:
       value: |
         Each Grand Prix season of Crash Team Racing Nitro-Fueled had its own start-up intro: the
         scene where a character jumps into the CTR logo before "Press X to begin". The next update
-        replaced it: the final update (1.21) only has Crash's (`octane_startscreen.pak`). CTR TV
+        replaced it: the final update (1.21) only has Crash's (`octane_startscreen.pak`, with his
+        Game Awards statue since 1.18). Themed start screens came with 1.09 (Spyro & Friends), 1.12
+        (Spooky), 1.14 (Neon Circus) and 1.16 (Winter Festival). CTR TV
         episodes have their own form (*CTR TV episode*).
 
         If you dumped an older update from your own console, tell us what its start-up intro was
@@ -31,7 +33,7 @@ body:
     attributes:
       label: Update version
       description: |
-        The update's version (sce_sys/param.sfo APP_VER). The seasons' PS4 updates: Nitro Tour 1.04,
+        The update's version (sce_sys/param.sfo APP_VER; PS4 numbers). The seasons' updates: Nitro Tour 1.04,
         Back N. Time 1.08, Spyro & Friends 1.09, Spooky 1.12, Neon Circus 1.14, Winter Festival 1.16,
         Rustland 1.17, Gasmoxia 1.19.
       placeholder: "01.12"
