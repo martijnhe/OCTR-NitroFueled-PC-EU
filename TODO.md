@@ -69,6 +69,42 @@ take tan(fov/2): the sideways extent is tan, the vertical tan/aspect (so +0x3c i
 Next: find where the position (+0xa0) or the view direction is written in the same way (a
 watchpoint on +0xa0) and lower the camera a little while the title screen shows.
 
+## Online (RyuNET) on the European edition
+
+**State:** branch `online` merges Ryu7w7/OCTR-NitroFueled-PC v0.5 (commit "Merge upstream v0.5").
+Offline the EU game runs as before. Online is off by default (`online=1` and `online_name=` in
+bbport.ini, or the launcher). Not yet tested online with the EU edition.
+
+**How upstream built it:**
+- v0.3 (online): a replacement Demonware server (RyuNET, `octr.ryu7w7.xyz`, auth over HTTP on
+  port 8080). The game checks Demonware's signed answers with an RSA-2048 key in its executable;
+  `patches/CrashTeamRacingOnline.xml` (`tools/make_online_key_patch.py`) swaps it for the server's.
+  New runtime: sockets and DNS (`runtime_net.c`, `runtime_net_overrides.c`), HTTP
+  (`runtime_http.c`), a PSN stand-in (`runtime_np_online.c`: account id from the nickname, sign-in
+  state, tickets), `run.py setup_online` (server, nickname, key file `ryunet_online.key`).
+- v0.4: private matches and groups (session create/join/leave and invitations answered by
+  `runtime_services.c` as PSN WebApi responses, session ids `cusa13795-session-<name>`), the
+  friends list (`sceNpWebApiReadData` returning the transferred length; the user service's
+  initial login event for user 1).
+- v0.5: nicknames owned by an installation key and linked to Discord (Windows launcher
+  `discord_link.cpp`), Discord invites and presence, volume (`runtime_audio.c`), keyboard as a
+  split-screen player (`runtime_pad.c`), LAN address reported to the game (players behind one
+  router), error code 3 (memory committed on use, Windows) and 23 (shader float-to-int rules,
+  loop limits).
+
+**Done for EU:** `patches/CrashTeamRacingOnlineEU.xml` (the same key; the Demonware key is at
+image offset 0x1becf58 in EU 1.21, 0x40 before the USA 1.21 one, found by signature); friends'
+presence names the running title id.
+
+**Open:**
+- Test online on EU: sign-in, matchmaking, a race, private rooms with a USA player. The server
+  may tell the editions apart (Demonware title ids differ per region; the EU executable's own
+  title id is sent at sign-in).
+- The Windows launcher (`launcher/windows/launcher.cpp`) still names CUSA13795 for the game
+  folder, saves and languages.
+- `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation
+  (`runtime_services.c`, `runtime_net_overrides.c`); the game build itself passes.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only
