@@ -67,3 +67,27 @@ requests in the runtime. First steps: find where the game decides it is offline 
 (`checkIfMarketplaceIsReady_VSC`, `CContentDeploymentStateOffline`), and how a task reports its
 result; check whether the catalogue (`CMarketplaceExchangeSkuData`, featured-SKU calendar) is in
 the game data or only on the server.
+
+### Findings (EU 1.21, BB_ONLINE=local diagnostic mode, src/runtime_online.c)
+
+- With the network up and PSN signed in locally, the game asks for a PSN ID token
+  (sceNpAuthGetIdTokenA) and POSTs Demonware **auth3**:
+  `https://lavender-ps4-auth3.prod.demonware.net:443/auth/` ("lavender" = this title),
+  body `{"auth_task":"46","iv_seed":"...","title_id":"5760","identity":"356c4bc3",
+  "extra_data":"{\"version\":\"0\",\"token\":\"{...id_token...}\",\"extended_data\":true}"}`.
+  It retries 6 times on an error answer.
+- A success answer carries `client_ticket`/`server_ticket` (encrypted with a title key and the
+  iv_seed); strings `X-Signature`, `DW-RSAENC`, `public_key`, `ciphertext` suggest the answer is
+  signed/encrypted against a key in the executable: a local answer needs that key replaced or the
+  check patched (patches.bin can do either).
+- After auth the game uses the LSG (classic binary Demonware over TCP, session-key encrypted):
+  `LSGConnect`, `LsgAuthenticateTicket`, `GetContentPublisherFile` (the publisher config that
+  drives Grand Prix), `ReadAllKeyArchive`, leaderboards, storage files. UNO REST endpoints
+  (`%s/v1/users/%s-%llu/...`, abtesting, friends, loot-drop) also exist.
+- Conclusion: emulating Demonware means auth3 + the encrypted LSG protocol + the marketplace
+  services: large. The smaller route for an offline Pit Stop is a game-side patch: make the
+  marketplace's tasks (CMarketplaceGetBalancesTask, ...GetInventoryTask, ...DepositCurrencyTask,
+  ...Exchange...) complete locally with a coin/inventory file next to the save, and its
+  "ready/online" checks pass.
+- Online racing on community servers would need the above plus matchmaking and peer connections
+  (NpMatching2 / Demonware lobbies): a separate project.
