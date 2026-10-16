@@ -69,7 +69,9 @@ fi
 "$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules libc.prx libSceFios2.prx libSceNpToolkit2.prx
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 "$PYTHON" tools/gen_import_names.py --out "$out"
-"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+# DLC (optional): the player's add-on packages in dlc/ (BB_DLC_DIR), reported installed (as run.py).
+"$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
+    --dlc-dir "${BB_DLC_DIR:-$data/dlc}"
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*

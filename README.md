@@ -21,6 +21,9 @@
 >   closed; see [TODO.md](TODO.md).
 > - **Internal resolution** (1440p and the others) now also applies when started through
 >   `run.sh` (Linux, Steam Deck), not only `run.py`.
+> - **DLC:** put your add-on packages (`.pkg`, e.g. the Nitros Oxide Edition, pre-order and
+>   Firehawk kart packs) in `dlc/`: they are reported installed, now also when started through
+>   `run.sh` (Linux, Steam Deck). Packages of the other edition are skipped.
 > - **Shortcuts:** `launcher/install-desktop.sh GAME_DIR` adds *Crash Team Racing Nitro-Fueled* to
 >   the application menu and to **Steam** (non-Steam game with the game's cover art, starts the
 >   game directly, so it works in Steam Deck game mode). If Steam is open, the shortcut is added
