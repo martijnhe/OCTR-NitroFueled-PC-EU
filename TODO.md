@@ -171,6 +171,30 @@ two seasons' guests next to Crash:
   reading `_currentGrandPrixVersion`, the CTR TV component) is the open question. The earlier
   seasons' guests (GP1 to GP6) are not in this map.
 
+**Where it was left (2026-10-17):**
+- Grand Prix system: two `CGrandPrixSystemData` objects (vtable image offset 0x2621020, EU 1.21):
+  version (+0x0c, a date: 202003 = after the last season) and index (+0x98, the season: 9). One
+  with `16 / 0-1` exists before the start screen loads (a default); the real one (`202003 / 9`)
+  only appears after it. Forcing Gasmoxia (`202002 / 8`) changed nothing on the start screen,
+  also when written before the level load: the season numbers do not choose the guest (at least
+  not these objects at that time).
+- Entities: `CGameEntity` (vtable 0x255fc30) objects have their data right after them (+0xe0,
+  `CGameEntityData`, vtable 0x25af018) with the model path at data +0x50, flags at entity +0x38
+  (`_enabled`, `_isVisible`, `_isHidden`, `_spawned` ...) and data +0x20 (`_entityFlags`). About
+  200 exist at the start screen, mostly hub and adventure items kept loaded; none showed a guest
+  model (the start-screen characters are probably cutscene actors, not model entities, or the
+  guests are never spawned).
+- `CWorldCustomizationComponentData` is the kart customization screen (driver, skin, wheels,
+  backgrounds), not a per-season switch. `CEntityTagSet` / `_tags` (entity data) are entity tags.
+- The start-screen map also has a `CCtrTvComponentData` naming `CTRTV_FebGP`.
+- Research probe: `tools/research/gp_probe.c` (copy to `src/runtime_zprobe.c` to build it in).
+
+**Next ideas:** read the map's objects with an igz reader (what the GrandPrixGuest entities'
+data says: spawn flags, `_canSpawn`, tags, which component or script spawns them); look for the
+guest actors at runtime as cutscene actors (`CCutsceneActor`, `_cutsceneOwnerName`); search the
+executable for the code that reads `_currentGrandPrixIndex` and what it decides; check whether the
+Grand Prix data from the server (RyuNET online) changes the start screen.
+
 **Tools:** `tools/iga_extract.py` lists and extracts IGA v13 archives (layout in its header; the
 file offset's high bits are the low byte of the second field, the pieces follow each other from
 the file's offset at sector boundaries, names map to entries by FNV-1a of the lower-case path).
