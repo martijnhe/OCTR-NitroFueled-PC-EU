@@ -271,14 +271,18 @@ startscreen_args=()
 for part in tga gp8 gp7 gp4; do
     if [[ -f $BB_CONFIG ]] && grep -qx "startscreen_$part=1" "$BB_CONFIG"; then startscreen_args+=("--$part"); fi
 done
-[[ " ${startscreen_args[*]} " == *' --gp4 '* ]] && startscreen_args+=(--archive-out "$out/startscreen_gp4.pak")
+# startscreen_season: a Grand Prix season's start screen (its guest, colour and extras together).
+season=$(sed -n 's/^startscreen_season=\([a-z]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
+[[ -n $season ]] && startscreen_args+=(--season "$season")
+# Nina's archive (written only when she is chosen, directly or by the season).
+(( ${#startscreen_args[@]} )) && startscreen_args+=(--archive-out "$out/startscreen_gp4.pak")
 # startscreen_color: a Grand Prix season's background colour (scripts/startscreen.py SEASON_TINTS).
 color=$(sed -n 's/^startscreen_color=\([a-z]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
 [[ -n $color ]] && startscreen_args+=(--color "$color")
 if (( ${#startscreen_args[@]} )); then
     if "$PYTHON" scripts/startscreen.py --game "$game" --out "$out/startscreen.ovl" "${startscreen_args[@]}"; then
         export BB_FILE_OVERLAY=$out/startscreen.ovl
-        if [[ -f $out/startscreen_gp4.pak && " ${startscreen_args[*]} " == *' --gp4 '* ]]; then
+        if [[ -f $out/startscreen_gp4.pak ]]; then
             export BB_FILE_REPLACE=/app0/archives/update3.pak=$out/startscreen_gp4.pak
         fi
     fi

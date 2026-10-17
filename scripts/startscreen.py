@@ -102,6 +102,20 @@ SEASON_TINTS = {
 }
 
 
+# A Grand Prix season's start screen as in the reference recording (intros.mp4), with what 1.21
+# still has: (parts, colour). Spyro & Friends', Neon Circus' and Winter Festival's guests and every
+# season's corner props are not in 1.21 (their own updates, 1.09 to 1.16). The Game Awards statue
+# shows in the Rustland segment (after the Game Awards of December 2019).
+SEASONS = {
+    'spyro': ([], 'spyro'),
+    'spooky': (['gp4'], 'spooky'),
+    'neon': ([], 'neon'),
+    'winter': ([], 'winter'),
+    'rustland': (['gp7', 'tga'], 'rustland'),
+    'gasmoxia': (['gp8'], 'gasmoxia'),
+}
+
+
 def background(archive, tint):
     """[(file offset, bytes)]: the background materials' colour multiplier set to tint (RGBA)."""
     white = struct.pack('<4f', 1.0, 1.0, 1.0, 1.0)
@@ -186,9 +200,17 @@ def main():
     p.add_argument('--shooting', action='store_true', help='start in the second start screen set (research)')
     p.add_argument('--archive-out', type=Path, help='with --gp4: the start screen archive to write')
     p.add_argument('--color', choices=sorted(SEASON_TINTS), help="a Grand Prix season's background colour")
+    p.add_argument('--season', choices=sorted(SEASONS), help="a Grand Prix season's start screen (parts and colour)")
     a = p.parse_args()
+    if a.season:
+        parts, colour = SEASONS[a.season]
+        for part in parts:
+            setattr(a, part, True)
+        a.color = a.color or colour
     if a.gp4 and not a.archive_out:
         p.error('--gp4 needs --archive-out')
+    if a.archive_out and not a.gp4:
+        a.archive_out.unlink(missing_ok=True)  # an earlier start's Nina archive: not served now
     chosen = [c for c in CHOICES if getattr(a, c)]
     if not chosen and not a.shooting and not a.color:
         a.out.unlink(missing_ok=True)

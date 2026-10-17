@@ -688,6 +688,7 @@ void Menu() {
         restart |= s.effects[e] != s.startup_effects[e];
     }
     restart |= s.startscreen_color != s.startup_startscreen_color;
+    restart |= s.startscreen_season != s.startup_startscreen_season;
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         restart |= s.game_patches[g] != s.startup_game_patches[g];
     }
@@ -756,6 +757,23 @@ void Menu() {
 
     // SacredFire: the start screen's hidden parts (scripts/startscreen.py; restart).
     ImGui::SeparatorText(BbSettings::MenuText("Start screen", "Титульный экран"));
+    {
+        const int current = std::clamp(s.startscreen_season.load(), 0, BbSettings::StartScreenColorCount - 1);
+        if (ImGui::BeginCombo(BbSettings::MenuText("Grand Prix intro", "Заставка Гран-при"),
+                              BbSettings::StartScreenSeasonLabels[current])) {
+            for (int c = 0; c < BbSettings::StartScreenColorCount; ++c) {
+                if (ImGui::Selectable(BbSettings::StartScreenSeasonLabels[c], c == current)) {
+                    Store(s.startscreen_season, c, c != current);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        Hint(BbSettings::MenuText(
+            "A Grand Prix season's start screen as it looked: its guest, background colour and extras together, "
+            "with what 1.21 still has (Spyro & Friends', Neon Circus' and Winter Festival's guests and the corner "
+            "props are not in it). The switches below add or choose parts by hand.",
+            "Титульный экран сезона Гран-при: гость, цвет и детали вместе."));
+    }
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         const auto& effect = BbSettings::Effects[e];
         if (std::strncmp(effect.key, "startscreen_", 12) != 0) continue;

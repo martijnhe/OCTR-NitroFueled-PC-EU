@@ -481,17 +481,19 @@ def main():
             for season in ('spyro', 'spooky', 'neon', 'winter', 'rustland', 'gasmoxia'):
                 if ini_has(config, f'startscreen_color={season}'):  # a Grand Prix season's background
                     parts += ['--color', season]
+                if ini_has(config, f'startscreen_season={season}'):  # the season's whole start screen
+                    parts += ['--season', season]
             if parts:
                 overlay = Path(out) / 'startscreen.ovl'
                 archive = Path(out) / 'startscreen_gp4.pak'  # Nina's files (--gp4), served as update3.pak
-                if '--gp4' in parts:
+                if parts:  # Nina's archive, written only when she is chosen (directly or by the season)
                     parts += ['--archive-out', str(archive)]
                 done = subprocess.run([sys.executable, '-X', 'utf8', str(PORT / 'scripts/startscreen.py'), '--game',
                                        str(game), '--out', str(overlay), *parts], stdin=subprocess.DEVNULL,
                                       creationflags=no_console())
                 if done.returncode == 0:  # a failure leaves the start screen as it is
                     env['BB_FILE_OVERLAY'] = str(overlay)
-                    if '--gp4' in parts and archive.is_file():
+                    if archive.is_file():
                         env['BB_FILE_REPLACE'] = f'/app0/archives/update3.pak={archive}'
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.

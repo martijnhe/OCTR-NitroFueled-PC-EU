@@ -56,6 +56,11 @@ inline constexpr const char* StartScreenColorLabels[] = {
     "The game's (blue)", "Spyro & Friends (purple)", "Spooky (teal)", "Neon Circus (red)",
     "Winter Festival (pink)", "Rustland (orange)", "Gasmoxia (green)"};
 inline constexpr int StartScreenColorCount = 7;
+/// SacredFire: a Grand Prix season's whole start screen (guest, colour, extras; startscreen.py
+/// SEASONS); same names as the colours, 0 = none.
+inline constexpr const char* StartScreenSeasonLabels[] = {
+    "None (choose parts below)", "Spyro & Friends (purple)", "Spooky (Nina, teal)", "Neon Circus (red)",
+    "Winter Festival (pink)", "Rustland (embers, Game Awards statue, orange)", "Gasmoxia (Cortex, Nitros Oxide, green)"};
 /// SacredFire: game patches (patches/CrashTeamRacing.xml), selected by these bbport.ini keys and
 /// compiled into the executable at start by scripts/patches.py; a restart applies a change.
 /// The patches are community work from illusionyy/PS-Game-Patch
@@ -161,6 +166,8 @@ struct Values {
     /// startscreen_color, scripts/startscreen.py --color; restart): index into StartScreenColors.
     std::atomic<int> startscreen_color{0};
     int startup_startscreen_color = 0;
+    std::atomic<int> startscreen_season{0}; ///< startscreen_season, index into StartScreenColors
+    int startup_startscreen_season = 0;
     std::atomic<bool> online{false};
     std::atomic<bool> online_asked{false};
     std::array<char, 32> online_name{};

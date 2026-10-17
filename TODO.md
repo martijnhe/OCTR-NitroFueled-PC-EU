@@ -156,6 +156,17 @@ check whether a start-screen intro is a `.pak` cutscene the game picks by Grand 
 (`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
 choice for it.
 
+## Grand Prix menus (parked 2026-10-17; the user wants the season start screens first)
+
+The Grand Prix UI is all in 1.21 (`ui/Octane_GrandPrix.igz`, `vsc/UI/Octane_GrandPrix/*`, the
+challenge list, the after-race report, `loosedata/AchievementGrandPrixConfig.igz`). The season
+state is data: `loosedata/GrandPrixSystemData.igz` (CGrandPrixSystemData; update2.pak) with
+`_currentGrandPrixVersion` +0x0c and `_currentGrandPrixIndex` +0x98 (EU 1.21 field table 0x26217b0):
+update2 has 202003 / 9 (after the last season), its `_cert` variant 201910 / 0, update.pak 0 / 5.
+Also `_challengeGroupInfoList`/`OrderList`, `_nitroBarTiers`, leaderboards and rewards. Next: an
+overlay of this file with a season's version/index (e.g. Gasmoxia 202002 / 8), then see whether the
+Grand Prix menu opens offline or needs RyuNET's publisher data.
+
 ## Grand Prix start-up intros: the earlier seasons
 
 **Done (2026-10-17):** the 1.21 start screen (`maps/Octane/Octane_StartScreen/Octane_StartScreen.igz` in
@@ -235,6 +246,9 @@ him away, Nina takes his place with the trophy):
 - **The Game Awards statue belongs to Rustland**, not Spooky: in intros.mp4 the Spooky season (2:35-3:00,
   Nina included) has the normal gold race cup; the silver Game Awards statue shows at 4:15 (Rustland,
   after the Game Awards of December 2019).
+- **Season presets** (*Grand Prix intro*, `startscreen_season=`; startscreen.py SEASONS): Spooky = Nina +
+  teal, Rustland = embers + Game Awards statue + orange (checked in the game), Gasmoxia = Cortex and
+  Nitros Oxide + green, Spyro & Friends / Neon Circus / Winter Festival = their colour only.
 - **Tools**: `iga.strings()` and `iga.dependencies()` read an .igz file's string table (TSTR, strings
   2-aligned) and dependency list (TDEP: names and load paths, packed); `iga.replace_string(...,
   section=b'TDEP')` replaces a dependency. A texture swap needs the name in TSTR and the name and
