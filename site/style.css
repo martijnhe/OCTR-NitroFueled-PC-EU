@@ -1,44 +1,141 @@
-:root { --bg:#0b0f1a; --panel:#131a2b; --text:#e9edf7; --muted:#9aa6c2; --accent:#ffb020; --cyan:#3fd0ff; --edge:#243152; }
+/* CTR Nitro-Fueled PC: the game's own menu language. Bright menu blue with a faint checkered
+   flag, slanted banners like the in-race "SINGLE RACE / CRASH COVE" card, Wumpa orange for the
+   one action that matters (download), crate amber for focus and highlights. */
+:root {
+  --menu: #1b5fd1;        /* the menus' blue */
+  --menu-deep: #0b3b91;   /* panel shadows, footer */
+  --sky: #b9e3ff;         /* secondary text on blue */
+  --wumpa: #ff8a1d;       /* download: the one strong action */
+  --crate: #ffc93d;       /* focus ring, highlights */
+  --ink: #08214f;         /* text on white */
+  --paper: #ffffff;
+  --slant: -11deg;
+  --display: "Luckiest Guy", "Arial Black", system-ui, sans-serif;
+  --body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
 * { box-sizing: border-box; }
-body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, #1b2446 0%, var(--bg) 60%); color: var(--text); line-height:1.6; }
-a { color: var(--cyan); }
-.wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
-header { text-align:center; padding: 56px 0 24px; }
-header img { width: min(360px, 80vw); height: auto; }
-h1 { font-size: clamp(1.6rem, 3.5vw, 2.3rem); margin: 18px 0 8px; }
-.tag { color: var(--muted); font-size: 1.05rem; max-width: 700px; margin: 0 auto; }
-.cta { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin: 26px 0 8px; }
-.btn { display:inline-block; padding: 11px 20px; border-radius: 10px; text-decoration:none; font-weight:600; border:1px solid var(--edge); color: var(--text); background: var(--panel); }
-.btn.primary { background: linear-gradient(90deg, #ff7a18, #ffb020); color:#1a1205; border-color: transparent; }
-.btn:hover { filter: brightness(1.1); }
-section { padding: 28px 0; }
-h2 { font-size: 1.35rem; margin: 0 0 14px; color: var(--accent); }
-.grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
-.card { background: var(--panel); border:1px solid var(--edge); border-radius: 12px; padding: 16px 18px; }
-.card h3 { margin: 0 0 6px; font-size: 1.02rem; }
-.card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-ul.req { color: var(--muted); padding-left: 20px; }
-ul.req li { margin: 4px 0; }
-.note { color: var(--muted); font-size: 0.92rem; border-left: 3px solid var(--accent); padding: 4px 14px; background: rgba(255,176,32,0.06); border-radius: 0 8px 8px 0; }
-.shots { display:grid; grid-template-columns: 1fr; gap: 14px; }
-.shots figure { margin:0; background: var(--panel); border:1px solid var(--edge); border-radius: 12px; overflow:hidden; }
-.shots img { display:block; width:100%; height:auto; aspect-ratio: 43 / 18; }
-.shots figcaption { color: var(--muted); font-size: 0.9rem; padding: 8px 14px; }
-@media (min-width: 900px) { .shots { grid-template-columns: 1fr 1fr; } .shots figure.wide { grid-column: 1 / -1; } }
-footer { border-top:1px solid var(--edge); margin-top: 34px; padding: 22px 0 40px; color: var(--muted); font-size: 0.9rem; text-align:center; }
-footer a { color: var(--muted); }
-.nav { display:flex; gap:18px; justify-content:center; flex-wrap:wrap; padding: 14px 20px; border-bottom:1px solid var(--edge); font-size:0.95rem; }
-.nav a { color: var(--muted); text-decoration:none; }
-.nav a:hover, .nav a.here { color: var(--text); }
-.editions { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-.edition { display:block; text-decoration:none; color: var(--text); background: var(--panel); border:1px solid var(--edge); border-radius: 14px; padding: 22px 22px 18px; }
-.edition:hover { border-color: var(--accent); }
-.edition .flag { font-size: 2rem; line-height:1; }
-.edition h3 { margin: 10px 0 4px; font-size: 1.2rem; }
-.edition .id { color: var(--accent); font-weight:600; font-size:0.95rem; }
-.edition p { color: var(--muted); margin: 8px 0 0; font-size: 0.95rem; }
-.edition .go { display:inline-block; margin-top: 12px; color: var(--cyan); font-weight:600; }
-ol.steps { color: var(--muted); padding-left: 22px; }
-ol.steps li { margin: 6px 0; }
-ol.steps b, ul.req b { color: var(--text); }
-code { background: #0f1526; border:1px solid var(--edge); border-radius: 6px; padding: 1px 6px; font-size: 0.9em; }
+body {
+  margin: 0; color: var(--paper); font: 400 1.0625rem/1.6 var(--body); overflow-x: clip;
+  background-color: var(--menu);
+  /* a checkered flag, large and faint, the way the game's menus carry their pattern */
+  background-image:
+    linear-gradient(180deg, rgba(11, 59, 145, 0) 0, rgba(11, 59, 145, .6) 100%),
+    repeating-conic-gradient(rgba(255, 255, 255, .05) 0 25%, transparent 0 50%);
+  background-size: 100% 100%, 120px 120px;
+  background-attachment: fixed, fixed;
+}
+a { color: var(--paper); text-underline-offset: 3px; }
+a:hover { color: var(--crate); }
+:focus-visible { outline: 3px solid var(--crate); outline-offset: 3px; }
+img { display: block; max-width: 100%; height: auto; }
+code { font: 600 .88em ui-monospace, "Cascadia Code", Menlo, monospace; background: rgba(8, 33, 79, .5);
+       border-radius: 4px; padding: .05em .35em; }
+.wrap { width: min(1080px, 100% - 40px); margin-inline: auto; }
+h1, h2, h3 { font-family: var(--display); font-weight: 400; letter-spacing: .015em; line-height: 1.05; margin: 0; }
+
+/* Menu bar: the game's white button-legend strip, across the top */
+.nav { background: var(--paper); box-shadow: 0 4px 0 var(--menu-deep); position: relative; z-index: 2; }
+.nav ul { list-style: none; margin: 0 auto; padding: 0 20px; display: flex; flex-wrap: wrap; align-items: center;
+          gap: 0 26px; width: min(1120px, 100%); }
+.nav a { display: inline-block; padding: 13px 0 11px; color: var(--ink); font-weight: 800; text-decoration: none; }
+.nav a:hover { color: var(--menu); }
+.nav a[aria-current="page"] { color: var(--menu); box-shadow: inset 0 -4px 0 var(--wumpa); }
+.nav .home { margin-right: auto; }
+.nav .home a { font: 1.2rem/1 var(--display); letter-spacing: .02em; padding-top: 15px; }
+
+/* Slanted banners: the hero title and the section headings */
+.banner { display: inline-block; transform: skewX(var(--slant)); background: var(--paper); color: var(--ink);
+          box-shadow: 8px 8px 0 var(--menu-deep); }
+.banner > span { display: inline-block; transform: skewX(calc(-1 * var(--slant))); }
+
+/* Hero: the race itself, edge to edge, at its own 21:9 */
+.hero > img { width: 100%; aspect-ratio: 43 / 18; object-fit: cover; background: var(--menu-deep);
+              border-bottom: 5px solid var(--paper); }
+/* the title card hangs over the image's bottom edge, so the race and its HUD stay clear */
+.hero .card { position: relative; width: min(1080px, 100% - 40px); margin: calc(-1 * clamp(52px, 6vw, 84px)) auto 0; }
+.hero .kicker { display: inline-block; transform: skewX(var(--slant)); background: var(--menu); padding: 4px 18px;
+                font-weight: 800; margin: 0 0 -2px 10px; }
+.hero .kicker > span { display: inline-block; transform: skewX(calc(-1 * var(--slant))); }
+.hero h1.banner { padding: 12px 30px 14px; font-size: clamp(2rem, 5.4vw, 3.8rem); }
+.hero .card p { margin: 20px 0 0; max-width: 40em; font-size: 1.15rem; font-weight: 700; }
+.hero .actions { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 12px 18px; }
+
+/* Buttons: slanted like the game's menu bars */
+.btn { display: inline-block; transform: skewX(var(--slant)); padding: 12px 24px; font: 800 1rem/1.2 var(--body);
+       text-decoration: none; color: var(--ink); background: var(--paper); box-shadow: 5px 5px 0 var(--menu-deep); }
+.btn > span { display: inline-block; transform: skewX(calc(-1 * var(--slant))); }
+.btn:hover { color: var(--ink); background: var(--crate); }
+.btn.download { background: var(--wumpa); color: #2b1300; }
+.btn.download:hover { background: var(--crate); }
+
+/* Sections */
+main section { padding: clamp(40px, 6vw, 68px) 0 0; }
+main section:last-child { padding-bottom: clamp(44px, 7vw, 84px); }
+h2.banner { padding: 8px 24px 10px; font-size: clamp(1.55rem, 3.2vw, 2.15rem); margin-bottom: 24px; }
+.lead { max-width: 40em; font-size: 1.12rem; font-weight: 700; margin: 0 0 20px; }
+.note { max-width: 46em; margin: 20px 0 0; padding: 10px 16px; background: rgba(8, 33, 79, .4);
+        border-left: 5px solid var(--crate); }
+
+/* "Which copy?": the game's main menu list, one bar per edition; the hovered one turns white */
+.editions { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; max-width: 780px; }
+.editions li:nth-child(2) { margin-left: 24px; }
+.editions a { display: grid; grid-template-columns: auto 1fr; column-gap: 20px; align-items: center; text-decoration: none;
+              color: var(--paper); background: var(--menu-deep); transform: skewX(var(--slant));
+              padding: 16px 30px; box-shadow: 6px 6px 0 rgba(4, 22, 60, .6); }
+.editions a > * { transform: skewX(calc(-1 * var(--slant))); }
+.editions .flag { grid-row: span 2; font-size: 2.4rem; line-height: 1; }
+.editions strong { font: 400 clamp(1.45rem, 3vw, 2rem)/1.1 var(--display); letter-spacing: .015em; }
+.editions .id { color: var(--crate); font: 800 1rem var(--body); margin-left: 10px; }
+.editions small { font-size: 1rem; color: var(--sky); font-weight: 700; }
+.editions a:hover, .editions a:focus-visible { background: var(--paper); color: var(--ink); }
+.editions a:hover small, .editions a:focus-visible small { color: var(--menu); }
+.editions a:hover .id, .editions a:focus-visible .id { color: #c95f00; }
+
+/* Screenshots: kept at 21:9, white-framed like the game's photo cards */
+.shots { display: grid; grid-template-columns: 1fr; gap: 22px; }
+.shots figure { margin: 0; }
+.shots a { display: block; border: 4px solid var(--paper); box-shadow: 6px 6px 0 var(--menu-deep); }
+.shots a:hover { border-color: var(--crate); }
+.shots img { width: 100%; aspect-ratio: 43 / 18; object-fit: cover; }
+.shots figcaption { margin-top: 8px; font-weight: 700; font-size: .98rem; color: var(--sky); }
+@media (min-width: 820px) { .shots { grid-template-columns: 1fr 1fr; } .shots .wide { grid-column: 1 / -1; } }
+
+/* Features of an edition: a name and a line each, two columns on wide screens */
+.features { list-style: none; margin: 0; padding: 0; display: grid; column-gap: 44px; }
+.features li { padding: 13px 0; border-bottom: 2px solid rgba(255, 255, 255, .2); }
+.features b { display: block; font: 400 1.32rem/1.2 var(--display); letter-spacing: .015em; color: var(--crate); }
+@media (min-width: 820px) { .features { grid-template-columns: 1fr 1fr; } }
+
+/* Lists and the setup steps (a real sequence, so numbered) */
+.req { max-width: 46em; padding-left: 1.2em; margin: 0; }
+.req li { margin: 8px 0; }
+.steps { counter-reset: step; list-style: none; padding: 0; margin: 0; max-width: 46em; }
+.steps li { counter-increment: step; position: relative; padding: 10px 0 10px 60px; }
+.steps li::before { content: counter(step); position: absolute; left: 0; top: 7px; width: 42px; height: 36px;
+                    display: grid; place-items: center; font: 400 1.35rem/1 var(--display); color: var(--ink);
+                    background: var(--crate); transform: skewX(var(--slant)); }
+h3 { font-size: 1.5rem; margin: 30px 0 8px; color: var(--crate); }
+
+/* Two choices for a US copy */
+.choices { display: grid; gap: 22px; }
+@media (min-width: 820px) { .choices { grid-template-columns: 1fr 1fr; } }
+.choice { background: rgba(8, 33, 79, .45); padding: 22px 24px 24px; border-top: 6px solid var(--crate); }
+.choice h3 { margin: 0 0 2px; color: var(--paper); }
+.choice .id { color: var(--crate); font-weight: 800; }
+.choice p { margin: 10px 0 18px; }
+.choice .yes, .choice .no { font-weight: 800; }
+.choice .yes { color: var(--crate); }
+
+footer { background: var(--menu-deep); padding: 26px 0 34px; color: var(--sky); font-size: .95rem; }
+footer p { margin: 4px 0; }
+
+/* One moment: the title card slides in like the race card before a race */
+@media (prefers-reduced-motion: no-preference) {
+  .hero .banner, .hero .kicker { animation: race-card .7s cubic-bezier(.2, .9, .25, 1.05) backwards .15s; }
+  @keyframes race-card { from { opacity: 0; translate: -70px 0; } to { opacity: 1; translate: 0 0; } }
+}
+@media (max-width: 680px) {
+  .hero > img { aspect-ratio: 16 / 10; }
+  .editions li:nth-child(2) { margin-left: 0; }
+  .nav .home { width: 100%; }
+}

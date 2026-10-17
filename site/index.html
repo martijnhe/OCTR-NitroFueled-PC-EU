@@ -6,61 +6,76 @@
 <title>CTR Nitro-Fueled PC: EU edition</title>
 <link rel="icon" href="logo.png">
 <meta name="description" content="Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows, for the European and the US copy, with online play, Discord, ultrawide and everything unlocked.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Nunito:wght@400;700;800&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<nav class="nav"><a class="here" href="./">Home</a><a href="eu.html">European copy</a><a href="us.html">US copy</a><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download</a><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">GitHub</a></nav>
+<nav class="nav" aria-label="Site">
+  <ul>
+    <li class="home"><a href="./" aria-current="page">CTR Nitro-Fueled PC</a></li>
+    <li><a href="eu.html">European copy</a></li>
+    <li><a href="us.html">US copy</a></li>
+    <li><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download</a></li>
+    <li><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">GitHub</a></li>
+  </ul>
+</nav>
 
-<header class="wrap">
-  <img src="logo.png" alt="CTR Nitro-Fueled PC EU logo">
-  <h1>CTR Nitro-Fueled PC</h1>
-  <p class="tag">Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows, with online play, Discord, ultrawide monitors and everything unlocked. Bring your own copy of the game.</p>
+<header class="hero">
+  <img src="screenshots/race-cove.jpg" srcset="screenshots/race-cove-small.jpg 1720w, screenshots/race-cove.jpg 3440w" sizes="100vw"
+       alt="Racing on Crash Cove at 3440x1440: the HUD spreads to the edges of the ultrawide screen">
+  <div class="card">
+    <div class="kicker"><span>PS4 game, running on PC</span></div><br>
+    <h1 class="banner"><span>CTR Nitro-Fueled PC</span></h1>
+    <p>Crash Team Racing: Nitro-Fueled running natively on Linux, the Steam Deck and Windows, with online play, Discord, ultrawide monitors and everything unlocked. Bring your own copy of the game.</p>
+    <div class="actions">
+      <a class="btn download" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases"><span>Download</span></a>
+      <a class="btn" href="#which-copy"><span>Which copy do I have?</span></a>
+    </div>
+  </div>
 </header>
 
 <main class="wrap">
-  <section>
-    <h2>Which copy do you have?</h2>
-    <div class="editions">
-      <a class="edition" href="eu.html">
-        <div class="flag">🇪🇺</div>
-        <h3>European copy</h3>
-        <div class="id">CUSA14876</div>
-        <p>Bought in Europe (PAL). The edition this project is made for: everything here was developed and tested on it.</p>
-        <span class="go">European copy →</span>
-      </a>
-      <a class="edition" href="us.html">
-        <div class="flag">🇺🇸</div>
-        <h3>US copy</h3>
-        <div class="id">CUSA13795</div>
-        <p>Bought in the Americas. Runs with the same download; the original project was made for it.</p>
-        <span class="go">US copy →</span>
-      </a>
-    </div>
-    <p class="note" style="margin-top:16px">Not sure? Look in your dumped game folder: <code>sce_sys/param.sfo</code> names the title ID, and dumps are usually named after it (<code>CUSA14876</code> or <code>CUSA13795</code>). The launcher also tells you which one it found.</p>
+  <section id="which-copy">
+    <h2 class="banner"><span>Which copy do you have?</span></h2>
+    <ul class="editions">
+      <li><a href="eu.html">
+        <span class="flag" aria-hidden="true">🇪🇺</span>
+        <strong>European copy <span class="id">CUSA14876</span></strong>
+        <small>Bought in Europe (PAL). The edition this project is made for: everything here was developed and tested on it.</small>
+      </a></li>
+      <li><a href="us.html">
+        <span class="flag" aria-hidden="true">🇺🇸</span>
+        <strong>US copy <span class="id">CUSA13795</span></strong>
+        <small>Bought in the Americas. Runs with the same download; the original project was made for it.</small>
+      </a></li>
+    </ul>
+    <p class="note">Not sure? Look in your dumped game folder: <code>sce_sys/param.sfo</code> names the title ID, and dumps are usually named after it (<code>CUSA14876</code> or <code>CUSA13795</code>). The launcher also tells you which one it found.</p>
   </section>
 
-  <section>
-    <h2 id="screenshots">Screenshots: 3440x1440 ultrawide</h2>
+  <section id="screenshots">
+    <h2 class="banner"><span>Screenshots at 3440x1440</span></h2>
     <div class="shots">
-      <figure class="wide"><a href="screenshots/race-cove.jpg"><img src="screenshots/race-cove-small.jpg" alt="Racing on Crash Cove: the HUD spreads to the edges of a 21:9 screen" loading="lazy"></a><figcaption>Racing on Crash Cove: the HUD spreads to the edges of a 21:9 screen</figcaption></figure>
-      <figure><a href="screenshots/title.jpg"><img src="screenshots/title-small.jpg" alt="The title screen fills the width (button icons: Xbox)" loading="lazy"></a><figcaption>The title screen fills the width (button icons: Xbox)</figcaption></figure>
-      <figure><a href="screenshots/main-menu.jpg"><img src="screenshots/main-menu-small.jpg" alt="The main menu" loading="lazy"></a><figcaption>The main menu</figcaption></figure>
-      <figure><a href="screenshots/flyover.jpg"><img src="screenshots/flyover-small.jpg" alt="The fly-over before a race stays ultrawide" loading="lazy"></a><figcaption>The fly-over before a race stays ultrawide</figcaption></figure>
-      <figure><a href="screenshots/race-beach.jpg"><img src="screenshots/race-beach-small.jpg" alt="Crash Cove at sunset" loading="lazy"></a><figcaption>Crash Cove at sunset</figcaption></figure>
-      <figure class="wide"><a href="screenshots/track-select.jpg"><img src="screenshots/track-select-small.jpg" alt="Track select with its preview video" loading="lazy"></a><figcaption>Track select with its preview video</figcaption></figure>
+      <figure><a href="screenshots/title.jpg"><img src="screenshots/title-small.jpg" alt="The title screen filling the ultrawide width, with Xbox button icons" loading="lazy" width="1720" height="720"></a><figcaption>The title screen fills the width (button icons: Xbox)</figcaption></figure>
+      <figure><a href="screenshots/main-menu.jpg"><img src="screenshots/main-menu-small.jpg" alt="The main menu" loading="lazy" width="1720" height="720"></a><figcaption>The main menu</figcaption></figure>
+      <figure><a href="screenshots/flyover.jpg"><img src="screenshots/flyover-small.jpg" alt="The fly-over before a race on Crash Cove" loading="lazy" width="1720" height="720"></a><figcaption>The fly-over before a race stays ultrawide</figcaption></figure>
+      <figure><a href="screenshots/race-beach.jpg"><img src="screenshots/race-beach-small.jpg" alt="Racing along the beach of Crash Cove at sunset" loading="lazy" width="1720" height="720"></a><figcaption>Crash Cove at sunset</figcaption></figure>
+      <figure class="wide"><a href="screenshots/track-select.jpg"><img src="screenshots/track-select-small.jpg" alt="Track select with its preview video" loading="lazy" width="1720" height="720"></a><figcaption>Track select with its preview video</figcaption></figure>
     </div>
   </section>
 
-  <section>
-    <h2>Credits</h2>
-    <p class="tag" style="text-align:left;margin:0">A fork of <a href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">Ryu7w7's OCTR-NitroFueled-PC</a>, built on <a href="https://github.com/T3CHNOLOG1C/SacredFire">SacredFire</a>. The game's code runs directly on the CPU, a small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 draws with Vulkan. No emulator. Button icons: <a href="https://thoseawesomeguys.com/prompts/">Xelu's Free Controller Prompts</a> by Those Awesome Guys (CC0).</p>
+  <section id="credits">
+    <h2 class="banner"><span>Credits</span></h2>
+    <p class="lead">A fork of <a href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">Ryu7w7's OCTR-NitroFueled-PC</a>, built on <a href="https://github.com/T3CHNOLOG1C/SacredFire">SacredFire</a>. The game's code runs directly on the CPU, a small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 draws with Vulkan. No emulator.</p>
+    <p>Button icons: <a href="https://thoseawesomeguys.com/prompts/">Xelu's Free Controller Prompts</a> by Those Awesome Guys (CC0).</p>
   </section>
 </main>
 
 <footer>
   <div class="wrap">
-    Unofficial fan project. Not affiliated with Sony, Activision or Beenox. No game files are included or downloaded.<br>
-    <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Source on GitHub</a>
+    <p>Unofficial fan project. Not affiliated with Sony, Activision or Beenox. No game files are included or downloaded.</p>
+    <p><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

@@ -6,42 +6,57 @@
 <title>US copy: CTR Nitro-Fueled PC</title>
 <link rel="icon" href="logo.png">
 <meta name="description" content="Crash Team Racing: Nitro-Fueled, US PS4 copy (CUSA13795) with the 1.21 update, natively on Linux, the Steam Deck and Windows.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Nunito:wght@400;700;800&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<nav class="nav"><a href="./">Home</a><a href="eu.html">European copy</a><a class="here" href="us.html">US copy</a><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download</a><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">GitHub</a></nav>
+<nav class="nav" aria-label="Site">
+  <ul>
+    <li class="home"><a href="./">CTR Nitro-Fueled PC</a></li>
+    <li><a href="eu.html">European copy</a></li>
+    <li><a href="us.html" aria-current="page">US copy</a></li>
+    <li><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download</a></li>
+    <li><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">GitHub</a></li>
+  </ul>
+</nav>
 
-<header class="wrap">
-  <div class="flag" style="font-size:2.6rem">🇺🇸</div>
-  <h1>US copy (CUSA13795)</h1>
-  <p class="tag">The copy sold in the Americas. The same download runs it: the port started out on this edition, and the launchers set it up just like the European one.</p>
-  <div class="cta">
-    <a class="btn primary" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download (Steam Deck / Linux, Windows)</a>
-    <a class="btn" href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">The original US project</a>
+<header class="hero">
+  <img src="screenshots/race-beach.jpg" srcset="screenshots/race-beach-small.jpg 1720w, screenshots/race-beach.jpg 3440w" sizes="100vw"
+       alt="Racing along the beach of Crash Cove at sunset, at 3440x1440">
+  <div class="card">
+    <div class="kicker"><span>🇺🇸 CUSA13795</span></div><br>
+    <h1 class="banner"><span>US copy</span></h1>
+    <p>The copy sold in the Americas. The same download runs it: the port started out on this edition, and the launchers set it up just like the European one.</p>
+    <div class="actions">
+      <a class="btn download" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases"><span>Download</span></a>
+      <a class="btn" href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC"><span>The original US project</span></a>
+    </div>
   </div>
 </header>
 
 <main class="wrap">
   <section>
-    <h2>Two choices for a US copy</h2>
-    <div class="editions">
-      <div class="edition">
+    <h2 class="banner"><span>Two choices for a US copy</span></h2>
+    <div class="choices">
+      <div class="choice">
         <h3>This project</h3>
         <div class="id">Steam Deck, Linux and Windows</div>
-        <p><b style="color:var(--text)">With ultrawide</b>: the game draws at your monitor's own size (21:9, 32:9), the HUD spreads to the edges and the menus fill the width. The same download as for the European copy, with its launcher setup, the Steam Deck AppImage and the in-game menu. Ultrawide and the newer extras (Grand Prix intros, button icons) were made and tested on a European copy: they are meant to work on the US copy too, but nobody has tried them there yet. Reports are welcome!</p>
-        <a class="go" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download →</a>
+        <p><span class="yes">With ultrawide:</span> the game draws at your monitor's own size (21:9, 32:9), the HUD spreads to the edges and the menus fill the width. The same download as for the European copy, with its launcher setup, the Steam Deck AppImage and the in-game menu. Ultrawide and the newer extras (Grand Prix intros, button icons) were made and tested on a European copy: they are meant to work on the US copy too, but nobody has tried them there yet. Reports are welcome!</p>
+        <a class="btn download" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases"><span>Download</span></a>
       </div>
-      <div class="edition">
+      <div class="choice">
         <h3>Ryu7w7's OCTR-NitroFueled-PC</h3>
         <div class="id">The original, made for the US copy</div>
-        <p>The project this one is based on: the US edition with online play on its RyuNET server, on Windows. <b style="color:var(--text)">No ultrawide support.</b> Pick it if you want the original as its author ships it.</p>
-        <a class="go" href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">Go to the original →</a>
+        <p>The project this one is based on: the US edition with online play on its RyuNET server, on Windows. <span class="no">No ultrawide support.</span> Pick it if you want the original as its author ships it.</p>
+        <a class="btn" href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC"><span>Go to the original</span></a>
       </div>
     </div>
   </section>
 
   <section>
-    <h2>What you need</h2>
+    <h2 class="banner"><span>What you need</span></h2>
     <ul class="req">
       <li><b>Your own US copy</b> as decrypted folders: the base game (<code>CUSA13795</code>) and the <b>1.21 update</b> (often <code>CUSA13795-patch</code>). Or one folder with both already merged.</li>
       <li><b>Steam Deck or Linux</b> (x86-64, Vulkan 1.3), or <b>Windows 10/11</b> (this project's Windows download is not tested yet).</li>
@@ -51,7 +66,7 @@
   </section>
 
   <section>
-    <h2>Good to know about the US copy</h2>
+    <h2 class="banner"><span>Good to know</span></h2>
     <ul class="req">
       <li><b>Game languages</b>: the US build has English, Latin American Spanish, French and Brazilian Portuguese (the European build has its own set).</li>
       <li><b>Setup</b>: the launcher merges the base game and the update into <code>CUSA13795-1.21</code>; saves and the shader cache are kept under <code>CUSA13795</code>, apart from a European copy's.</li>
@@ -63,8 +78,8 @@
 
 <footer>
   <div class="wrap">
-    Unofficial fan project. Not affiliated with Sony, Activision or Beenox.<br>
-    <a href="./">Home</a> · <a href="eu.html">European copy</a> · <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Source on GitHub</a>
+    <p>Unofficial fan project. Not affiliated with Sony, Activision or Beenox.</p>
+    <p><a href="./">Home</a> &nbsp; <a href="eu.html">European copy</a> &nbsp; <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Source on GitHub</a></p>
   </div>
 </footer>
 </body>
