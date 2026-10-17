@@ -91,7 +91,9 @@ jobs:
 
   release:
     name: Publish the release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Published with the AppImage even when the (untested) Windows build fails; the ZIP is added
+    # when it built.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.appimage.result == 'success'
     needs: [appimage, windows]
     runs-on: ubuntu-latest
     permissions:
@@ -106,13 +108,18 @@ jobs:
         run: |
           cd packages
           mv SacredFire-x86_64.AppImage "CTR-NitroFueled-EU-${GITHUB_REF_NAME}-SteamDeck-Linux-x86_64.AppImage"
-          mv CTR-NitroFueled-PC-portable-windows.zip "CTR-NitroFueled-EU-${GITHUB_REF_NAME}-Windows-portable.zip"
-          sha256sum *.AppImage *.zip > SHA256SUMS.txt
+          if [ -f CTR-NitroFueled-PC-portable-windows.zip ]; then
+            mv CTR-NitroFueled-PC-portable-windows.zip "CTR-NitroFueled-EU-${GITHUB_REF_NAME}-Windows-portable.zip"
+          else
+            echo "::warning title=No Windows ZIP::the Windows build failed; the release has the AppImage only"
+          fi
+          sha256sum *.AppImage *.zip 2>/dev/null > SHA256SUMS.txt || true
           ls -l
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           body_path: docs/releases/${{ github.ref_name }}.md
+          fail_on_unmatched_files: false
           files: |
             packages/*.AppImage
             packages/*.zip
