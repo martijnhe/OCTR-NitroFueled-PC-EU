@@ -49,7 +49,13 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kTitleId = "CUSA13795";
+// The Americas build (CUSA13795) and the European one (CUSA14876, SacredFire EU): the port runs both.
+constexpr const char* kTitleIds[] = {"CUSA13795", "CUSA14876"};
+bool IsCtrTitle(const std::string& title) {
+    for (const char* id : kTitleIds)
+        if (title == id) return true;
+    return false;
+}
 constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
@@ -335,7 +341,7 @@ FolderInfo Analyze(const fs::path& dir) {
     info.title = get("TITLE_ID");
     info.version = get("APP_VER");
     info.category = get("CATEGORY");
-    if (info.title != kTitleId) {
+    if (!IsCtrTitle(info.title)) {
         info.kind = Kind::OtherTitle;
     } else if (info.category == "gd") {
         info.kind = Kind::Base;
@@ -635,6 +641,14 @@ struct App {
 };
 
 App g_app;
+
+/// The title ID of the chosen game (the merged folder, else the update or the base game): the
+/// saves, the shader cache and the merged folder's name follow it. CUSA13795 when none is known.
+std::wstring GameTitle() {
+    for (const FolderInfo* info : {&g_app.game_info, &g_app.update_info, &g_app.base_info})
+        if (IsCtrTitle(info->title)) return Widen(info->title);
+    return L"CUSA13795";
+}
 
 std::string EffectiveRenderRes();
 
@@ -1089,9 +1103,9 @@ void StartCheck() {
 fs::path MergeTarget(const fs::path& near_dir) {
     App& a = g_app;
     const fs::path parent = near_dir.parent_path();
-    fs::path target = parent / L"CUSA13795-1.21";
+    fs::path target = parent / (GameTitle() + L"-1.21");
     if (target == near_dir || target == a.base_dir || target == a.update_dir || target == a.game_dir) {
-        target = parent / L"CUSA13795-1.21-merged";
+        target = parent / (GameTitle() + L"-1.21-merged");
     }
     return target;
 }
@@ -1711,9 +1725,9 @@ fs::path SaveRoot() {
     std::error_code ec;
     for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
-        if (fs::is_directory(it->path() / L"CUSA13795", e2)) return it->path() / L"CUSA13795";
+        if (fs::is_directory(it->path() / GameTitle(), e2)) return it->path() / GameTitle();
     }
-    return base / L"1" / L"CUSA13795";
+    return base / L"1" / GameTitle();
 }
 
 fs::path BackupRoot() { return g_app.root / L"backups"; }
@@ -1927,7 +1941,7 @@ std::vector<PatchInfo> LoadPatches() {
             const size_t close = xml.find("</ID>", at);
             if (close == std::string::npos) break;
             any_id = true;
-            if (Trim(xml.substr(at + 4, close - at - 4)) == kTitleId) ours = true;
+            if (IsCtrTitle(Trim(xml.substr(at + 4, close - at - 4)))) ours = true;
         }
         if (any_id && !ours) continue;
         for (size_t at = 0; (at = xml.find("<Metadata", at)) != std::string::npos; ++at) {
@@ -2142,10 +2156,10 @@ void PlayTab() {
             ImGui::TextColored(kRed, "%s: %s", PathText(a.game_dir).c_str(), Describe(a.game_info).c_str());
         }
         ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(T("Necesitas tu propio dump de PS4: el juego base (CUSA13795) y la actualización 1.21 "
-                                 "(CUSA13795-patch). Si ya los tienes juntos en una carpeta, elige esa.",
-                                 "You need your own PS4 dump: the base game (CUSA13795) and the 1.21 update "
-                                 "(CUSA13795-patch). If they are already merged in one folder, choose that one."));
+        ImGui::TextUnformatted(T("Necesitas tu propio dump de PS4: el juego base (CUSA14876 en Europa, CUSA13795 en "
+                                 "América) y la actualización 1.21. Si ya los tienes juntos en una carpeta, elige esa.",
+                                 "You need your own PS4 dump: the base game (CUSA14876 in Europe, CUSA13795 in the "
+                                 "Americas) and the 1.21 update. If they are already merged in one folder, choose that one."));
         ImGui::PopTextWrapPos();
         ImGui::Spacing();
         if (ImGui::BeginTable("setup", 3, ImGuiTableFlags_SizingStretchProp)) {
@@ -3277,8 +3291,9 @@ DlcInfo DescribeDlc(const fs::path& path) {
     const size_t dash = content.rfind('-');
     d.label = dash == std::string::npos ? std::string() : content.substr(dash + 1);
     d.title = get("TITLE");
-    if (get("TITLE_ID") != kTitleId || get("CATEGORY") != "ac" || d.label.size() != 16) {
-        d.problem = T("no es un DLC de CTR Nitro-Fueled (CUSA13795)", "not a CTR Nitro-Fueled (CUSA13795) DLC");
+    if (!IsCtrTitle(get("TITLE_ID")) || get("CATEGORY") != "ac" || d.label.size() != 16) {
+        d.problem = T("no es un DLC de CTR Nitro-Fueled (CUSA13795 / CUSA14876)",
+                      "not a CTR Nitro-Fueled (CUSA13795 / CUSA14876) DLC");
         return d;
     }
     if (d.title.empty()) d.title = d.label;
@@ -4450,7 +4465,7 @@ void ToolsTab() {
 
 void ClearShaderCache() {
     std::error_code ec;
-    const fs::path cache = g_app.root / L"user" / L"cache" / L"CUSA13795";
+    const fs::path cache = g_app.root / L"user" / L"cache" / GameTitle();
     const auto removed = fs::remove_all(cache, ec);
     g_app.notice = ec ? std::string(T("No se pudo borrar la caché: ", "Could not clear the cache: ")) + ec.message()
                       : std::string(T("Caché borrada (", "Cache cleared (")) + std::to_string(removed) +
@@ -4599,15 +4614,17 @@ void LoadState() {
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
     // First start of a portable package: a merged folder next to the launcher is picked up.
     if (a.game_dir.empty()) {
-        for (const wchar_t* name : {L"CUSA13795-1.21", L"CUSA13795"}) {
+        for (const wchar_t* name : {L"CUSA14876-1.21", L"CUSA13795-1.21", L"CUSA14876", L"CUSA13795"}) {
             if (Analyze(a.root / name).kind == Kind::Complete) {
                 a.game_dir = a.root / name;
                 break;
             }
         }
-        if (a.base_dir.empty() && Analyze(a.root / L"CUSA13795").kind == Kind::Base) a.base_dir = a.root / L"CUSA13795";
-        if (a.update_dir.empty() && Analyze(a.root / L"CUSA13795-patch").kind == Kind::Update)
-            a.update_dir = a.root / L"CUSA13795-patch";
+        for (const wchar_t* title : {L"CUSA14876", L"CUSA13795"}) {
+            const std::wstring base = title, update = base + L"-patch";
+            if (a.base_dir.empty() && Analyze(a.root / base).kind == Kind::Base) a.base_dir = a.root / base;
+            if (a.update_dir.empty() && Analyze(a.root / update).kind == Kind::Update) a.update_dir = a.root / update;
+        }
     }
     a.base_info = Analyze(a.base_dir);
     a.update_info = Analyze(a.update_dir);

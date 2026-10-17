@@ -1,0 +1,120 @@
+name: release
+
+# The release packages, built from the pushed commit (GPL: the binaries match this source):
+# the Steam Deck / Linux AppImage (packaging/appimage-docker.sh) and the Windows portable ZIP
+# (MSYS2 CLANG64, packaging/windows/make_portable.py). A v* tag publishes them as that tag's
+# release, with docs/releases/<tag>.md as its notes; a push to release-build only builds them
+# (artifacts), to try a build before tagging.
+on:
+  push:
+    tags: ['v*']
+    branches: [release-build]
+
+jobs:
+  appimage:
+    name: Steam Deck / Linux AppImage
+    runs-on: ubuntu-latest
+    steps:
+      # The Nix closure and the build need more room than the runner leaves free.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Build the AppImage
+        run: |
+          if ! bash packaging/appimage-docker.sh > appimage.log 2>&1; then
+            # Annotations are readable without signing in: the end of the log goes there.
+            echo "::error title=AppImage build failed::$(tail -60 appimage.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit 1
+          fi
+          tail -3 appimage.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: |
+            dist/SacredFire-x86_64.AppImage
+            dist/SacredFire-x86_64.AppImage.sha256
+            dist/SacredFire-x86_64.AppImage.build.txt
+
+  windows:
+    name: Windows portable ZIP (untested)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git patch
+            mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-vulkan-headers mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-vulkan-memory-allocator mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-sdl3 mingw-w64-clang-x86_64-fmt mingw-w64-clang-x86_64-boost
+            mingw-w64-clang-x86_64-robin-map mingw-w64-clang-x86_64-xxhash mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-zydis mingw-w64-clang-x86_64-spirv-tools
+            mingw-w64-clang-x86_64-spirv-headers mingw-w64-clang-x86_64-spirv-cross
+      - name: Build
+        run: |
+          git config --global --add safe.directory '*'
+          if ! bash build.sh > build.log 2>&1; then
+            log=$( (tail -40 build.log; [ -f out/gpu-build.log ] && grep -E 'error|Error' out/gpu-build.log | head -40) )
+            echo "::error title=Windows build failed::$(echo "$log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit 1
+          fi
+          tail -2 build.log
+      - name: Package
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          if ! python packaging/windows/make_portable.py --version "${GITHUB_REF_NAME}" > package.log 2>&1; then
+            echo "::error title=Windows package failed::$(tail -40 package.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit 1
+          fi
+          cat package.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/CTR-NitroFueled-PC-portable-windows.zip
+            dist/CTR-NitroFueled-PC-portable-windows.zip.sha256
+
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [appimage, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Name the files after the release
+        run: |
+          cd packages
+          mv SacredFire-x86_64.AppImage "CTR-NitroFueled-EU-${GITHUB_REF_NAME}-SteamDeck-Linux-x86_64.AppImage"
+          mv CTR-NitroFueled-PC-portable-windows.zip "CTR-NitroFueled-EU-${GITHUB_REF_NAME}-Windows-portable.zip"
+          sha256sum *.AppImage *.zip > SHA256SUMS.txt
+          ls -l
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: |
+            packages/*.AppImage
+            packages/*.zip
+            packages/SHA256SUMS.txt
+            packages/SacredFire-x86_64.AppImage.build.txt
