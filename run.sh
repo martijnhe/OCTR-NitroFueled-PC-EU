@@ -261,6 +261,19 @@ if [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_next=1' "$BB_CONFIG"; then
 elif [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_at_start=1' "$BB_CONFIG"; then
     export BB_CTRTV=${episode:-CTRTV_FebGP}
 fi
+# The start screen's hidden parts (scripts/startscreen.py, src/runtime_file.c byte overlay):
+# startscreen_tga (the Game Awards statue), startscreen_gp8 (the Gasmoxia guests), startscreen_gp7
+# (the Rustland embers), built from this game's own update2.pak.
+unset BB_FILE_OVERLAY
+startscreen_args=()
+for part in tga gp8 gp7; do
+    if [[ -f $BB_CONFIG ]] && grep -qx "startscreen_$part=1" "$BB_CONFIG"; then startscreen_args+=("--$part"); fi
+done
+if (( ${#startscreen_args[@]} )); then
+    if "$PYTHON" scripts/startscreen.py --game "$game" --out "$out/startscreen.ovl" "${startscreen_args[@]}"; then
+        export BB_FILE_OVERLAY=$out/startscreen.ovl
+    fi
+fi
 # Discord (online on, bbport.ini discord_rpc not 0): the presence, invites and "Ask to Join" while
 # the game runs (scripts/discord_presence.py, Linux); it follows this process, which becomes the game.
 if [[ ${BB_ONLINE:-0} == 1 ]] && ! grep -qx 'discord_rpc=0' "$BB_CONFIG" 2>/dev/null; then

@@ -55,6 +55,50 @@ typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Li
  * the file (commit) in one rename when closed: a crash or a kill mid-save leaves the old file. */
 /* The game's full-screen videos (Bink .bk2 files in archives): the logos and intro at start, the credits and
  * the endings. */
+/* SacredFire: byte overlays (BB_FILE_OVERLAY, written by scripts/startscreen.py): bytes served in
+ * place of a game file's own at given offsets, the file itself unchanged. The start screen's
+ * hidden parts (the Game Awards statue, the Grand Prix guests) are turned on this way: changed
+ * compressed pieces of archives/update2.pak. Format: "BBOVL1\n", then records of a u16 guest path
+ * length, the guest path, a u64 offset, a u32 size and the bytes. */
+typedef struct { char path[128]; uint64_t offset; uint32_t size; unsigned char *bytes; } Overlay;
+static Overlay *overlays; static size_t overlay_count;
+static void overlays_load(void) {
+    static int loaded;
+    if (loaded) return;
+    loaded=1;
+    const char *file=getenv("BB_FILE_OVERLAY");
+    if (!file || !*file) return;
+    FILE *f=fopen(file,"rb");
+    if (!f) return;
+    char magic[7];
+    if (fread(magic,1,7,f)!=7 || memcmp(magic,"BBOVL1\n",7)) { fclose(f); return; }
+    for (;;) {
+        uint16_t length; Overlay o={0};
+        if (fread(&length,2,1,f)!=1 || !length || length>=sizeof(o.path)) break;
+        if (fread(o.path,1,length,f)!=length || fread(&o.offset,8,1,f)!=1 || fread(&o.size,4,1,f)!=1 || !o.size) break;
+        o.bytes=malloc(o.size);
+        if (!o.bytes || fread(o.bytes,1,o.size,f)!=o.size) { free(o.bytes); break; }
+        Overlay *grown=realloc(overlays,(overlay_count+1)*sizeof(*overlays));
+        if (!grown) { free(o.bytes); break; }
+        overlays=grown; overlays[overlay_count++]=o;
+    }
+    fclose(f);
+    if (overlay_count) printf("Runtime: %zu byte overlay(s) from %s\n",overlay_count,file);
+}
+static int overlay_for(const char *guest) {
+    overlays_load();
+    for (size_t i=0;i<overlay_count;++i) if (!strcasecmp(overlays[i].path,guest)) return 1;
+    return 0;
+}
+static void overlay_apply(const char *guest,unsigned char *buffer,uint64_t at,uint64_t n) {
+    for (size_t i=0;i<overlay_count;++i) {
+        const Overlay *o=&overlays[i];
+        if (strcasecmp(o->path,guest)) continue;
+        const uint64_t from=at>o->offset ? at : o->offset, to=at+n<o->offset+o->size ? at+n : o->offset+o->size;
+        if (from<to) memcpy(buffer+(from-at),o->bytes+(from-o->offset),to-from);
+    }
+}
+
 static int fullscreen_video(const char *guest) {
     static const char *const names[] = {"openinglogo.bk2", "octane_intro_logo_atvi.bk2", "ctr_game_intro.bk2",
                                         "octanecredits.bk2", "oxide_outro_first.bk2", "oxide_outro_second.bk2"};
@@ -65,7 +109,7 @@ static int fullscreen_video(const char *guest) {
     return 0;
 }
 
-typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
+typedef struct { int used, host, dirty, save_logged, video, overlay; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -462,6 +506,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
      * The menus' videos (track previews, hints, CTR TV, the tutorial) play inside the ultrawide
      * menu and are left alone. */
     if (fullscreen_video(guest)) { files[fd].video=1; runtime_cinematic_video(1); }
+    files[fd].overlay=overlay_for(guest);
     ++opens;
     pthread_mutex_unlock(&lock);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
@@ -547,6 +592,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     touch_for_write(buffer,size);
     ssize_t n=read_retrying(h,buffer,size,0,0);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
+    if (n>0) { File *o=get(fd); if (o && o->overlay) { int64_t end=host_lseek(h,0,SEEK_CUR); if (end>=n) overlay_apply(o->path,buffer,(uint64_t)(end-n),(uint64_t)n); } }
     if (n>0) runtime_memory_note_write((uintptr_t)buffer,(uint64_t)n); /* and once the data is there */
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
@@ -558,6 +604,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     touch_for_write(buffer,size);
     ssize_t n=read_retrying(h,buffer,size,offset,1);
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
+    if (n>0) { File *o=get(fd); if (o && o->overlay) overlay_apply(o->path,buffer,(uint64_t)offset,(uint64_t)n); }
     if (n>0) runtime_memory_note_write((uintptr_t)buffer,(uint64_t)n); /* and once the data is there */
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;

@@ -753,6 +753,19 @@ void Menu() {
             "Выпуск CTR TV февральского Гран-при вместо вступительного видео (Cross пропускает)."));
     }
 
+    // SacredFire: the start screen's hidden parts (scripts/startscreen.py; restart).
+    ImGui::SeparatorText(BbSettings::MenuText("Start screen", "Титульный экран"));
+    for (int e = 0; e < BbSettings::EffectCount; ++e) {
+        const auto& effect = BbSettings::Effects[e];
+        if (std::strncmp(effect.key, "startscreen_", 12) != 0) continue;
+        Checkbox(BbSettings::MenuText(effect.label, effect.label_ru), s.effects[e]);
+    }
+    Hint(BbSettings::MenuText(
+        "Parts of the 1.21 start screen the game keeps hidden since the Grand Prix ended: the Game Awards "
+        "2019 statue (in place of the cup), the Gasmoxia guests and the Rustland embers. Applies after "
+        "restarting the game; the game files are not changed.",
+        "Скрытые части титульного экрана 1.21. Применяется после перезапуска."));
+
     // SacredFire online (RyuNET): the nickname and online play, applied by a restart.
     ImGui::SeparatorText(BbSettings::MenuText("Online (RyuNET)", "Онлайн (RyuNET)"));
     {
