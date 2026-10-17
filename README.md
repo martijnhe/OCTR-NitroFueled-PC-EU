@@ -92,12 +92,12 @@ What this port has (from the final update, 1.21) and what is missing:
 |---|---|---|---|---|
 | Nitro Tour | July 3, 2019 | 1.04 | ❌ missing | ❌ missing |
 | Back N. Time | August 2, 2019 | 1.08 | ❌ missing | ❌ missing |
-| Spyro & Friends | August 30, 2019 | 1.09 | ❌ missing | ❌ missing |
-| Spooky | October 3, 2019 | 1.12 | ❌ missing | ❌ missing |
-| Neon Circus | November 8, 2019 | 1.14 | ❌ missing | ❌ missing |
-| Winter Festival | December 12, 2019 | 1.16 | ❌ missing | ❌ missing |
-| Rustland | January 16, 2020 | 1.17 | ✅ its embers (menu *Start screen*) | ❌ missing |
-| Gasmoxia | February 20, 2020 | 1.19 | ✅ Cortex and Nitros Oxide (menu *Start screen*) | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
+| Spyro & Friends | August 30, 2019 | 1.09 | ◐ its purple only (menu *Grand Prix intro*; Spyro not in 1.21) | ❌ missing |
+| Spooky | October 3, 2019 | 1.12 | ✅ Nina Cortex and the teal (menu *Grand Prix intro*); no pumpkins or hook | ❌ missing |
+| Neon Circus | November 8, 2019 | 1.14 | ◐ its red only (menu *Grand Prix intro*) | ❌ missing |
+| Winter Festival | December 12, 2019 | 1.16 | ◐ its pink only (menu *Grand Prix intro*) | ❌ missing |
+| Rustland | January 16, 2020 | 1.17 | ✅ embers, the Game Awards statue, orange (menu *Grand Prix intro*) | ❌ missing |
+| Gasmoxia | February 20, 2020 | 1.19 | ✅ Cortex and Nitros Oxide, green (menu *Grand Prix intro*) | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
 
 - **We have:** Gasmoxia's CTR TV episode, Gasmoxia's start-screen guests (Cortex flying through,
   Nitros Oxide) and Rustland's embers, and the Game Awards 2019 statue Crash held from 1.18: the 1.21
