@@ -14,6 +14,8 @@ draws with Vulkan. No emulator, no game files included.
 
 ## What this version adds
 
+Which version brought what: *[Versions of this edition](#versions-of-this-edition-eu)*.
+
 | Feature | What you get | Setting |
 |---|---|---|
 | **European edition** | CUSA14876 runs, with the **1.21 update** (all Grand Prix tracks, characters and karts that came after launch). EU 1.00 without the update runs too. The USA edition (CUSA13795) keeps working. | automatic |
@@ -157,7 +159,6 @@ forms (the update's version, the Grand Prix, and the names, sizes and checksums 
 - **Grand Prix events** and Activision's own online service (Demonware): online play goes through
   the RyuNET server instead (see *Online* above). Without online, *Unlock everything* gives you
   everything the Pit Stop sells. Work toward an offline Pit Stop is in [TODO.md](TODO.md).
-- **Title screen in ultrawide**: the backdrop fills the width now, but the bigger logo touches "Press X to begin".
 - Local split screen works (second controller).
 
 ## Original project
@@ -468,12 +469,31 @@ can find the cause. **No game files** in issues or pull requests. See
 
 - Races with the 60 FPS patch reach 37–45 FPS on the Steam Deck: the port's GPU command thread
   is the limit at ~1400 draws per frame ([docs/sacredfire/08-patches.md](docs/sacredfire/08-patches.md)).
-- Online features are stubbed; the game runs offline.
+- Online goes through the RyuNET server, not Activision's: Grand Prix events and Activision's own
+  online services do not work.
 - Windows: native build, from source only for now, without the GTK launcher and without the
   PC memory model ([packaging/windows/README.md](packaging/windows/README.md)).
 - macOS is not supported ([docs/sacredfire/10-other-platforms.md](docs/sacredfire/10-other-platforms.md)).
 
 ## History
+
+### Versions of this edition (EU)
+
+This edition is built on the upstream project (v0.5, RyuNET online). Each version below is a
+milestone of this repository; the in-game menu and `out/VERSION` show the exact build
+(`v0.5-NN-gHASH`).
+
+| Version | Date | Up to | What it brought |
+|---|---|---|---|
+| **v0.5-eu.7** | 2026-10-17 | [`c88f7fb`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/c88f7fb) | **Button icons** in Xbox, Steam Deck or Switch style (icons by [Those Awesome Guys](https://thoseawesomeguys.com/prompts/), CC0); the in-game menu in **Dutch**; the menu fits the screen (scrolls on ultrawide, smaller above 1080p); README on what the Grand Prix intros and CTR TV still miss; old Steam shortcuts of the same name removed |
+| **v0.5-eu.6** | 2026-10-17 | [`1d0eb28`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/1d0eb28) | **Grand Prix intros**: the start screen's hidden parts (Game Awards statue, Gasmoxia guests, Rustland embers), **Nina Cortex** as the Spooky guest, the seasons' background colours, a whole season from one menu choice; a guest takes Crash's place; the ultrawide title logo clears "Press X to begin"; `build.sh --test` passes again |
+| **v0.5-eu.5** | 2026-10-17 | [`e80bc9a`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/e80bc9a) | **CTR TV** in place of the opening video; issue forms for CTR TV episodes and Grand Prix intros; research on which update had which season; the Steam Deck AppImage built in Docker (`packaging/appimage-docker.sh`) |
+| **v0.5-eu.4** | 2026-10-16 | [`fc58c6e`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/fc58c6e) | Upstream **v0.5 merged: online (RyuNET)**, also for the EU edition; the first start asks for a nickname; *Unlock everything* as a live menu switch (your own items come back when off); **Discord** nickname link, presence and invites on Linux and the Steam Deck |
+| **v0.5-eu.3** | 2026-10-16 | [`934e352`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/934e352) | **Steam Deck AppImage**: adds itself to Steam, finds the game folder next to it and starts the game directly; `tools/deck_sim.sh` (rough Deck simulation on a PC); ultrawide title and customization screens fill the width, the race fly-over stays ultrawide |
+| **v0.5-eu.2** | 2026-10-16 | [`afee7b8`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/afee7b8) | **Unlock everything**; **Steam and application-menu shortcuts** with the game's art; **DLC** packages; ultrawide videos and cutscenes at 16:9; this README |
+| **v0.5-eu.1** | 2026-10-16 | [`42a4623`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/42a4623) | **European edition** (CUSA14876) with the **1.21 update**; 60 FPS, no motion blur and 1080p Pro patches for it; **ultrawide** with a first-start question |
+
+### SacredFire
 
 SacredFire started from bbport on 2026-10-09. The Bloodborne profile, its patches, launcher and
 FSR 4 tooling were removed the same day
