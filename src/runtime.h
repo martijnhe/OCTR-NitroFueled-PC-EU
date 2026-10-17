@@ -93,6 +93,8 @@ void runtime_unlock_all_set(int on); /* the in-game menu: 1 on, 0 off, applied a
 /* SacredFire: 16:9 videos and cutscenes in ultrawide (runtime_cinematic.c). */
 void runtime_cinematic_start(const unsigned char *image);
 void runtime_cinematic_video(int delta); /* +1 a video file opened, -1 closed */
+int runtime_cinematic_cutscene(void); /* 1 while a cutscene plays (not a race's fly-over) */
+void runtime_cinematic_cutscene_fill(void); /* cutscenes get a 16:9 field of view, not a crop */
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
 /* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */

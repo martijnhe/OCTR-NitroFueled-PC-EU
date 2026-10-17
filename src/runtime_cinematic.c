@@ -8,7 +8,8 @@
  * _isFlybyIntro marks it, and it stays ultrawide. BB_CUTSCENE="INSTANCE FIELD FIELD [FLYBY]"
  * (image offset of CCutsceneManager::_Instance, the offsets of _activeCutsceneData and
  * _activeDesignerCutscene, and of CCutsceneData::_isFlybyIntro; scripts/patches.py
- * --print-cutscene) names the cutscene state. */
+ * --print-cutscene) names the cutscene state. With the frontend field of view on (runtime_frontend.c,
+ * Linux) cutscenes get a 16:9 field of view instead of the crop. */
 #include "runtime.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -48,16 +49,30 @@ static uint64_t guest_qword(uint64_t address) {
     return __atomic_load_n((const uint64_t *)(uintptr_t)address, __ATOMIC_RELAXED);
 }
 
-/* 0 normal, 1 video (squeeze to 16:9), 2 cutscene (crop to 16:9). Called by the presenter. */
-int runtime_cinematic_mode(void) {
-    if (!enabled) return 0;
-    if (__atomic_load_n(&videos, __ATOMIC_RELAXED) > 0) return 1;
-    if (!instance_slot) return 0;
+/* A cutscene plays (not the fly-over before a race). */
+int runtime_cinematic_cutscene(void) {
+    if (!enabled || !instance_slot) return 0;
     const uint64_t manager = __atomic_load_n((const uint64_t *)(const void *)instance_slot, __ATOMIC_RELAXED);
     if (manager < GUEST_MIN || manager >= GUEST_LIMIT) return 0;
     const uint64_t active = guest_qword(manager + active_field);
     if (active && flyby_field >= 0 &&
         __atomic_load_n((const unsigned char *)(uintptr_t)(active + (unsigned)flyby_field), __ATOMIC_RELAXED))
         return 0; /* the fly-over before a race: gameplay graphics, ultrawide */
-    return active || guest_qword(manager + designer_field) ? 2 : 0;
+    return active || guest_qword(manager + designer_field) ? 1 : 0;
+}
+
+/* Set by runtime_frontend.c once it gives cutscenes a 16:9 field of view: the 3D then fills the
+ * width as a 16:9 view would, and the frame is not cropped (the cutscene's subtitles and prompts
+ * are drawn across the whole width; a crop cut them off). */
+static int cutscene_fill;
+void runtime_cinematic_cutscene_fill(void) {
+    __atomic_store_n(&cutscene_fill, 1, __ATOMIC_RELAXED);
+}
+
+/* 0 normal, 1 video (squeeze to 16:9), 2 cutscene (crop to 16:9). Called by the presenter. */
+int runtime_cinematic_mode(void) {
+    if (!enabled) return 0;
+    if (__atomic_load_n(&videos, __ATOMIC_RELAXED) > 0) return 1;
+    if (__atomic_load_n(&cutscene_fill, __ATOMIC_RELAXED)) return 0;
+    return runtime_cinematic_cutscene() ? 2 : 0;
 }

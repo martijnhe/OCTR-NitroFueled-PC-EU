@@ -3,7 +3,11 @@
  * view with the aspect (Hor+), so at 21:9 the camera sees past the backdrop's edges (sky, black).
  * On these screens the camera gets the horizontal field of view a 16:9 screen would have (the
  * same width of the set, less of its top and bottom); the menus are drawn separately and keep
- * their ultrawide layout. (More screens can be added to screens[]: BB_FRONTEND_TRACE.) Races, cutscenes and other screens keep the game's own field of view.
+ * their ultrawide layout. (More screens can be added to screens[]: BB_FRONTEND_TRACE.) Cutscenes
+ * (runtime_cinematic_cutscene(), with ultrawide_cinematics on) get the same: the 16:9 shot fills
+ * the width, their subtitles keep the game's layout, and the presenter no longer crops them. Their
+ * camera's field of view changes from shot to shot, so the factor follows it. Races and other
+ * screens keep the game's own field of view.
  *
  * The camera's field of view (degrees) is written each frame by one instruction,
  * vmulss xmm0, xmm0, [rip+57.29578] (radians to degrees) followed by the store to the render
@@ -47,6 +51,7 @@ static const struct screen screens[] = {
     {"kart customization", -104.853f, -57.029f, -914.018f},
 };
 #define SCREEN_COUNT (int)(sizeof(screens) / sizeof(screens[0]))
+#define CUTSCENE SCREEN_COUNT /* a cutscene plays: the screen after screens[] */
 
 static uint64_t pass_vtable;
 static volatile float *slot; /* the factor the field-of-view instruction multiplies by */
@@ -61,6 +66,15 @@ static volatile float *position_offset;
 static float title_lower = -12.0f;
 static int title_axis = 0x90;
 static int trace;
+
+/* The factor that turns the game's horizontal field of view (degrees) into a 16:9 screen's at
+ * this aspect; 0 when it does not apply. */
+static float factor_for(float fov, float aspect) {
+    if (aspect <= 16.0f / 9.0f + 0.01f || fov <= 1.0f || fov >= 170.0f) return 0.0f;
+    const float half = fov * 0.5f / DEGREES;
+    const float target = 2.0f * atanf(tanf(half) * (16.0f / 9.0f) / aspect) * DEGREES;
+    return DEGREES * target / fov;
+}
 
 /* Readable regions of the process, so a stray vtable match is never followed into unmapped
  * memory. */
@@ -117,7 +131,9 @@ static void *frontend_thread(void *unused) {
     }
     printf("Frontend field of view: main render pass found\n");
     fflush(stdout);
+    runtime_cinematic_cutscene_fill();
     int current = -1; /* the screen the factor is set for, -1 none */
+    int settle = 0;   /* loops left before the camera shows the factor last set */
     float rest[3] = {0}, last[3] = {0};
     int still = 0;
     for (;;) {
@@ -133,6 +149,16 @@ static void *frontend_thread(void *unused) {
         int screen = -1;
         for (int i = 0; i < SCREEN_COUNT && screen < 0; ++i)
             if (at(pos, &screens[i])) screen = i;
+        if (screen < 0 && runtime_cinematic_cutscene()) screen = CUTSCENE;
+        if (settle) --settle;
+        if (screen == CUTSCENE && current == CUTSCENE && !settle) {
+            /* A new shot: the camera's field of view was written with the factor now set. */
+            const float factor = factor_for(c[CAMERA_FOV / 4] * DEGREES / *slot, c[CAMERA_ASPECT / 4]);
+            if (factor > 0.0f && fabsf(factor - *slot) > 0.001f * DEGREES) {
+                *slot = factor;
+                settle = 8;
+            }
+        }
         if (screen != current) {
             if (position_offset) {
                 for (int k = 0; k < 4; ++k) position_offset[k] = 0.0f;
@@ -146,17 +172,17 @@ static void *frontend_thread(void *unused) {
             if (screen < 0) {
                 *slot = DEGREES;
             } else {
-                /* The game's own field of view: the factor is still the plain one here. */
-                const float fov = current < 0 ? c[CAMERA_FOV / 4] : c[CAMERA_FOV / 4] * DEGREES / *slot;
-                const float aspect = c[CAMERA_ASPECT / 4];
-                if (aspect > 16.0f / 9.0f + 0.01f && fov > 1.0f && fov < 170.0f) {
-                    const float half = fov * 0.5f / DEGREES;
-                    const float target = 2.0f * atanf(tanf(half) * (16.0f / 9.0f) / aspect) * DEGREES;
-                    *slot = DEGREES * target / fov;
-                    printf("Frontend field of view: %s, %.3f -> %.3f degrees\n", screens[screen].name, fov, target);
+                /* The game's own field of view: the factor last set divided out. */
+                const float fov = c[CAMERA_FOV / 4] * DEGREES / *slot;
+                const float factor = factor_for(fov, c[CAMERA_ASPECT / 4]);
+                if (factor > 0.0f) {
+                    *slot = factor;
+                    printf("Frontend field of view: %s, %.3f -> %.3f degrees\n",
+                           screen == CUTSCENE ? "cutscene" : screens[screen].name, fov, fov * factor / DEGREES);
                     fflush(stdout);
                 }
             }
+            settle = 8;
             current = screen;
         }
         if (trace) { /* where the camera comes to rest, once per rest */
@@ -271,7 +297,7 @@ void runtime_frontend_start(const unsigned char *image) {
     trace = t && t[0] == '1';
     pthread_t thread;
     if (pthread_create(&thread, NULL, frontend_thread, NULL) == 0) pthread_detach(thread);
-    printf("Frontend field of view: the title and customization screens fill the width\n");
+    printf("Frontend field of view: the title and customization screens and cutscenes fill the width\n");
 }
 #else
 void runtime_frontend_start(const unsigned char *image) { (void)image; }
