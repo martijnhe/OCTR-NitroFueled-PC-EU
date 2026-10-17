@@ -914,10 +914,12 @@ void Menu() {
         if (changed) {
             BbSettings::Save();
         }
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected "
                                                        "(the keyboard: always; port 1 then has the gamepad only)",
                                                  "Порты 2-4 входят как Player 2-4, пока подключён их геймпад "
                                                  "(клавиатура: всегда; у порта 1 тогда только геймпад)"));
+        ImGui::PopTextWrapPos();
     }
 
     // SacredFire: the game's volume (runtime_audio.c reads it for every buffer).
