@@ -218,6 +218,10 @@ void Menu() {
     }
     ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
+    // Never taller than the screen below its top: the rest scrolls (mouse wheel, d-pad).
+    const float room = viewport->WorkPos.y + viewport->WorkSize.y - pos.y - 20.0f * base_scale;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f * base_scale, 200.0f * base_scale),
+                                        ImVec2(viewport->WorkSize.x, std::max(room, 200.0f * base_scale)));
     bool keep_open = true;
     // SacredFire: the menu title.
     if (!ImGui::Begin(
@@ -1644,8 +1648,10 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(float(extent.width), float(extent.height));
     io.DeltaTime = ms > 0.0f && ms < 1000.0f ? ms / 1000.0f : 1.0f / 60.0f;
-    // UI scale follows the display height (1080p = 1).
-    const float scale = std::max(float(extent.height) / 1080.0f, 0.75f);
+    // UI scale follows the display height (1080p = 1), more slowly above it (1440p = 1.17, 4K = 1.5):
+    // at 1440p the full height scale left the menu taller than the screen.
+    const float height = float(extent.height);
+    const float scale = std::max(height <= 1080.0f ? height / 1080.0f : 1.0f + (height - 1080.0f) / 2160.0f, 0.75f);
     if (std::abs(scale - base_scale) > 0.01f) {
         ImGuiStyle& style = ImGui::GetStyle();
         style.ScaleAllSizes(scale / base_scale);
