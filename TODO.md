@@ -56,13 +56,7 @@ their ultrawide layout. On the title screen the 3D logo grows by about 1.34 and 
 ("Nitro-Fueled") now overlaps the 2D "Press X to begin". Narrowing less does not help: the backdrop
 covers only 75.5% of the ultrawide width (16:9 is 74.4%).
 
-**Done (2026-10-17):** the logo sits higher on the title screen in ultrawide, clear of "Press X to
-begin": src/runtime_frontend.c turns the store of the camera's position (`vmovups [rbx+0xa0],xmm3` in
-the camera update, 0xaf7326 in EU 1.21; patches.py --print-frontend's fourth value) into a jump to a
-page next to the image that adds an offset vector first: zero, except on the title screen in
-ultrawide, -12 along matrix row 0x90. Rows found by trying each on the title screen: 0x70 forward
-(zoom), 0x80 sideways, 0x90 vertical (pointing down on screen). Crash's ears touch the top a little
-more. (Wanted was: the logo a little higher on the title screen only.)
+**Wanted:** the logo a little higher on the title screen only (or the text lower).
 
 **How the field of view works (found 2026-10-16 with a hardware watchpoint on the render camera
 and Ghidra):** the main render pass (`CPreRenderUpdatePass`, `_cameraName` "main",
@@ -107,9 +101,8 @@ presence names the running title id.
   differ per region; the EU executable's own title id is sent at sign-in).
 - The Windows launcher (`launcher/windows/launcher.cpp`) still names CUSA13795 for the game
   folder, saves and languages.
-- ~~`build.sh --test` failed on format truncation~~: done (2026-10-17): the test programs get the game
-  build's `-Wno-format-truncation -Wno-stringop-truncation`; test_file_mods.c stubs
-  runtime_cinematic_video.
+- `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation
+  (`runtime_services.c`, `runtime_net_overrides.c`); the game build itself passes.
 
 ## Discord on Linux and the Steam Deck
 
@@ -156,17 +149,6 @@ check whether a start-screen intro is a `.pak` cutscene the game picks by Grand 
 (`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
 choice for it.
 
-## Grand Prix menus (parked 2026-10-17; the user wants the season start screens first)
-
-The Grand Prix UI is all in 1.21 (`ui/Octane_GrandPrix.igz`, `vsc/UI/Octane_GrandPrix/*`, the
-challenge list, the after-race report, `loosedata/AchievementGrandPrixConfig.igz`). The season
-state is data: `loosedata/GrandPrixSystemData.igz` (CGrandPrixSystemData; update2.pak) with
-`_currentGrandPrixVersion` +0x0c and `_currentGrandPrixIndex` +0x98 (EU 1.21 field table 0x26217b0):
-update2 has 202003 / 9 (after the last season), its `_cert` variant 201910 / 0, update.pak 0 / 5.
-Also `_challengeGroupInfoList`/`OrderList`, `_nitroBarTiers`, leaderboards and rewards. Next: an
-overlay of this file with a season's version/index (e.g. Gasmoxia 202002 / 8), then see whether the
-Grand Prix menu opens offline or needs RyuNET's publisher data.
-
 ## Grand Prix start-up intros: the earlier seasons
 
 **Done (2026-10-17):** the 1.21 start screen (`maps/Octane/Octane_StartScreen/Octane_StartScreen.igz` in
@@ -190,73 +172,7 @@ has no start-screen camera (`CCutsceneCamera_StartScreen` is only in the real ma
 lighting, a capture set for promotional shots. Nina could perhaps be shown by bringing its guest
 entity's data into the real map.
 
-**Nina in the real start screen: she shows (2026-10-17, commit 5c67232).** Her 15 files are served
-as `archives/update3.pak` (an update archive 1.21 asks for and lacks; BB_FILE_REPLACE), and the start
-screen's package (`Octane_StartScreen_pkg.igz`) has its 14 entries of Cortex's guest (KCNGP8: actor,
-animation, materials, textures) swapped for hers in the overlay. The earlier hang ("Required file \"\"
-for chunk octane_startscreen_pkg") was `iga.replace_string` keeping a padding zero (fixed).
-
-Compared with the Spooky season in the reference recording (intros.mp4, 2:35-3:00: teal background,
-pumpkins in both corners; Crash jumps in, sits on the logo ~8 s, a grappling hook comes down and pulls
-him away, Nina takes his place with the trophy):
-- **Nina overlaps Crash**: she plays the guest animation in his place while he is still there. The
-  guest script is Gasmoxia's (Cortex flies through, nobody leaves). The hook prop is not in 1.21 (not in
-  the start screen, its package or the Shooting set). Options: hide Crash (`Crash` entity, _canSpawn)
-  while she is on (she alone on the logo), or time her after him by editing the guest vsc.
-- **Background colour**: the start screen draws `octane_ui_custo_bg_color_1p` / `_pattern_*` models; the
-  colour should be in their material instances (`M101_Customization_background_materials,...`): a teal
-  value there (overlay) would give the season's colour. Not tried yet.
-- **Corner props (pumpkins etc.) and the hook**: not in 1.21 at all (the map's `MainMenu_Props` VFX and
-  the package hold only the current props). They need the season's own update (1.12) from a player's
-  dump (issue form *Grand Prix start-up intro*).
-
-**Findings, 2026-10-17 (afternoon):**
-- **Crash makes room for the guest** (user's choice, for now): with a guest on (`startscreen_gp8` or
-  `startscreen_gp4`) the `Crash` entity's _canSpawn bit is off, so the logo is free for Cortex /
-  Nina. Wanted later: Crash first, then the guest, as in the seasons (needs the guest vsc timed after
-  Crash's, or the hook, which 1.21 lacks). The 1.21 guest script (`Octane_StartScreen_GrandPrixGuest.igz`)
-  is self-contained: its own timers, `TitleScreen_Guest_In` then `_Loop`, VFX on `Bone_Hat`; it never
-  refers to Crash (the seasons' exchange with Crash was in their own animations/scripts). So "Crash
-  first" needs new script logic or a runtime watcher that hides Crash when the guest's In animation
-  starts. Tested with Nina: she still comes in without Crash, on the
-  guest script's own timer (about a minute after the start screen shows); until then the logo has
-  only the trophy.
-- **Background colour**: the visible full-screen background is the material
-  `M101_Customization_background_materials,octane_ui_custo_bg_color_event,008000` (update2.pak; the
-  model `octane_ui_custo_bg_color_event`), drawing the blue gradient texture
-  `octane_ui_custo_bg_color_event`. `..._color_1p,000800` is player 1's half; `_2p` .. `_4p` are the
-  other players' halves (pointing the material at `_2p` gave a half-red screen). 1.21 has no
-  full-screen texture in a season colour.
-- **Teal by tint**: each material has one white float4, its colour multiplier (`ig_color_value`).
-  `startscreen.py --gp4` sets it to `SPOOKY_TINT`. On screen the tint acts about as tint^2.4 (x1.37
-  doubled green, x0.71 cut blue to 0.42), so the tint is the wanted screen ratio to the power 1/2.4;
-  the ratio comes from the reference recording (intros.mp4 at 2:45) over our blue background at the
-  same spots. (1.5, 2.0, 0.47) was lime, (1.0, 1.37, 0.71) too green; **(1.09, 1.14, 0.87) matches** the recording's teal.
-  Other seasons' colours work the same way: measure the season's frame in intros.mp4, take the
-  ratio, power 1/2.4.
-- **Season colours in the menu** (*Start screen colour*, bbport.ini `startscreen_color=`): Spyro &
-  Friends, Spooky, Neon Circus, Winter Festival, Rustland, Gasmoxia (`SEASON_TINTS`, measured in
-  intros.mp4 at 2:10, 2:45, 3:10, 3:35, 4:05, 4:50). Checked in the game: Spooky, Neon Circus (after
-  one correction, close) and Gasmoxia (closer after one correction, but the blue texture's own
-  gradient leaves its bottom yellowish: a tint cannot flatten it; a flat season texture would). Spyro &
-  Friends, Winter Festival and Rustland: checked (right hue, a little dark) and corrected once the
-  same way (about 10% more red); Spyro's bottom leans magenta for the same gradient reason. Correction method: measure ours
-  and the recording at the same spots, multiply the tint by (ratio)^(1/2.4). Nina is in the menu too
-  (*Start screen: Spooky guest*) and brings Spooky's teal when no colour is chosen.
-- **The Game Awards statue belongs to Rustland**, not Spooky: in intros.mp4 the Spooky season (2:35-3:00,
-  Nina included) has the normal gold race cup; the silver Game Awards statue shows at 4:15 (Rustland,
-  after the Game Awards of December 2019).
-- **Season presets** (*Grand Prix intro*, `startscreen_season=`; startscreen.py SEASONS): Spooky = Nina +
-  teal, Rustland = embers + Game Awards statue + orange (checked in the game), Gasmoxia = Cortex and
-  Nitros Oxide + green, Spyro & Friends / Neon Circus / Winter Festival = their colour only.
-- **Tools**: `iga.strings()` and `iga.dependencies()` read an .igz file's string table (TSTR, strings
-  2-aligned) and dependency list (TDEP: names and load paths, packed); `iga.replace_string(...,
-  section=b'TDEP')` replaces a dependency. A texture swap needs the name in TSTR and the name and
-  path in TDEP.
-- **Still missing for the Spooky look**: the pumpkins in the corners and the hook (not in 1.21; the
-  season's update 1.12 from a player's dump).
-
-Earlier notes (before it showed):
+**Nina in the real start screen (work in progress, uncommitted, 2026-10-17; where I left off):**
 - The guest entities match: the Shooting set's `GrandPrixGuest` is the real map's except its skin
   name (`CutsceneCharacter\CutsceneDriverNCX` vs `...KCNGP8_P1`). Both play the same animation
   names (`TitleScreen_Guest_In`/`_Loop`). The real map's guest script also spawns a VFX on

@@ -50,16 +50,6 @@ static const struct screen screens[] = {
 
 static uint64_t pass_vtable;
 static volatile float *slot; /* the factor the field-of-view instruction multiplies by */
-/* The title screen's camera lowered a little (its logo then clears "Press X to begin"): the store
- * of the camera's position (vmovups [rbx+0xa0],xmm3) jumps to a few instructions in a page next to
- * the image that add this vector first. Zero elsewhere. */
-static volatile float *position_offset;
-/* The camera matrix's rows (render camera +0x70, +0x80, +0x90; found by trying each on the title
- * screen): 0x70 forward (zoom), 0x80 sideways, 0x90 vertical, pointing down on screen. The offset is
- * -title_lower times the row: -12 along 0x90 moves the logo about 30 pixels (of 330) up, clear of
- * "Press X to begin". BB_TITLE_LOWER and BB_TITLE_AXIS override them (tuning). */
-static float title_lower = -12.0f;
-static int title_axis = 0x90;
 static int trace;
 
 /* Readable regions of the process, so a stray vtable match is never followed into unmapped
@@ -128,21 +118,10 @@ static void *frontend_thread(void *unused) {
         const float *c = (const float *)(uintptr_t)camera;
         float pos[3];
         memcpy(pos, (const void *)(c + CAMERA_POSITION / 4), sizeof pos);
-        if (position_offset) /* where the game put it, before our offset */
-            for (int k = 0; k < 3; ++k) pos[k] -= position_offset[k];
         int screen = -1;
         for (int i = 0; i < SCREEN_COUNT && screen < 0; ++i)
             if (at(pos, &screens[i])) screen = i;
         if (screen != current) {
-            if (position_offset) {
-                for (int k = 0; k < 4; ++k) position_offset[k] = 0.0f;
-                if (screen == 0 && c[CAMERA_ASPECT / 4] > 16.0f / 9.0f + 0.01f) {
-                    const float *up = c + title_axis / 4;
-                    for (int k = 0; k < 3; ++k) position_offset[k] = -title_lower * up[k];
-                    printf("Frontend: title camera lowered by %.1f (row %#x)\n", title_lower, title_axis);
-                    fflush(stdout);
-                }
-            }
             if (screen < 0) {
                 *slot = DEGREES;
             } else {
@@ -174,68 +153,11 @@ static void *frontend_thread(void *unused) {
     return NULL;
 }
 
-/* The position hook: a page within jump range below the image with
- *   vaddps xmm3, xmm3, [rip+offset]; vmovups [rbx+0xa0], xmm3; jmp back
- * and the store replaced by a jump there. */
-static void position_hook(const unsigned char *image, unsigned long long store_offset) {
-    static const unsigned char store[8] = {0xc5, 0xf8, 0x11, 0x9b, 0xa0, 0x00, 0x00, 0x00};
-    unsigned char *site = (unsigned char *)image + store_offset;
-    if (memcmp(site, store, sizeof store)) {
-        printf("Frontend: unexpected camera position store at %#llx; title camera unchanged\n", store_offset);
-        return;
-    }
-    const long page = sysconf(_SC_PAGESIZE);
-    unsigned char *cave = MAP_FAILED;
-    for (int k = 1; k < 256 && cave == MAP_FAILED; ++k) {
-        unsigned char *want = (unsigned char *)image - (uintptr_t)k * 0x10000;
-        cave = mmap(want, (size_t)page, PROT_READ | PROT_WRITE | PROT_EXEC,
-                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        if (cave != MAP_FAILED && cave != want) { munmap(cave, (size_t)page); cave = MAP_FAILED; }
-    }
-    if (cave == MAP_FAILED) {
-        printf("Frontend: no page near the image; title camera unchanged\n");
-        return;
-    }
-    unsigned char *vec = cave + 0x40;
-    unsigned char *p = cave;
-    const int32_t to_vec = (int32_t)(vec - (cave + 8));
-    *p++ = 0xc5; *p++ = 0xe0; *p++ = 0x58; *p++ = 0x1d; /* vaddps xmm3, xmm3, [rip+disp32] */
-    memcpy(p, &to_vec, 4); p += 4;
-    memcpy(p, store, sizeof store); p += sizeof store;
-    const int64_t back = (int64_t)(uintptr_t)(site + 8) - (int64_t)(uintptr_t)(p + 5);
-    const int64_t there = (int64_t)(uintptr_t)cave - (int64_t)(uintptr_t)(site + 5);
-    if (back != (int32_t)back || there != (int32_t)there) {
-        munmap(cave, (size_t)page);
-        return;
-    }
-    *p++ = 0xe9;
-    const int32_t b = (int32_t)back;
-    memcpy(p, &b, 4);
-    memset(vec, 0, 16);
-    position_offset = (volatile float *)vec;
-    unsigned char *first = (unsigned char *)((uintptr_t)site & ~(uintptr_t)(page - 1));
-    const size_t length = (size_t)(site + 8 - first);
-    if (mprotect(first, length, PROT_READ | PROT_WRITE | PROT_EXEC)) {
-        position_offset = NULL;
-        return;
-    }
-    unsigned char jump[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
-    const int32_t t = (int32_t)there;
-    memcpy(jump + 1, &t, 4);
-    memcpy(site, jump, sizeof jump);
-    mprotect(first, length, PROT_READ | PROT_EXEC);
-    __builtin___clear_cache((char *)site, (char *)site + 8);
-    __builtin___clear_cache((char *)cave, (char *)p + 4);
-    const char *lower = getenv("BB_TITLE_LOWER"), *axis = getenv("BB_TITLE_AXIS");
-    if (lower && *lower) title_lower = strtof(lower, NULL);
-    if (axis && *axis) title_axis = (int)strtol(axis, NULL, 0);
-}
-
 /* Called before the game starts: points the field-of-view instruction at the slot. */
 void runtime_frontend_start(const unsigned char *image) {
     const char *on = getenv("BB_FRONTEND_FOV");
-    unsigned long long instruction = 0, vtable = 0, slot_offset = 0, position = 0;
-    if (!on || sscanf(on, "%llx %llx %llx %llx", &instruction, &vtable, &slot_offset, &position) < 3) return;
+    unsigned long long instruction = 0, vtable = 0, slot_offset = 0;
+    if (!on || sscanf(on, "%llx %llx %llx", &instruction, &vtable, &slot_offset) != 3) return;
     unsigned char *insn = (unsigned char *)image + instruction;
     /* vmulss xmm0, xmm0, [rip+disp32] reading 57.29578 */
     if (insn[0] != 0xc5 || insn[1] != 0xfa || insn[2] != 0x59 || insn[3] != 0x05) {
@@ -266,7 +188,6 @@ void runtime_frontend_start(const unsigned char *image) {
     mprotect(first, length, PROT_READ | PROT_EXEC);
     __builtin___clear_cache((char *)insn, (char *)insn + 8);
     pass_vtable = (uint64_t)(uintptr_t)image + vtable;
-    if (position) position_hook(image, position);
     const char *t = getenv("BB_FRONTEND_TRACE");
     trace = t && t[0] == '1';
     pthread_t thread;

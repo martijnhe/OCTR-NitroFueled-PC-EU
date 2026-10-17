@@ -116,14 +116,6 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.ultrawide = i != 0 ? 1 : 0;
     } else if (key == "ultrawide_ask") {
         v.ultrawide_ask = i != 0;
-    } else if (key == "startscreen_season") {
-        for (int c = 0; c < StartScreenColorCount; ++c) {
-            if (value == StartScreenColors[c]) v.startscreen_season = c;
-        }
-    } else if (key == "startscreen_color") {
-        for (int c = 0; c < StartScreenColorCount; ++c) {
-            if (value == StartScreenColors[c]) v.startscreen_color = c;
-        }
     } else if (key == "ctrtv_episode") {
         std::snprintf(v.ctrtv_episode.data(), v.ctrtv_episode.size(), "%s", value.c_str());
     } else if (key == "online") {
@@ -278,8 +270,6 @@ void Load() {
     for (int e = 0; e < EffectCount; ++e) {
         v.startup_effects[e] = v.effects[e];
     }
-    v.startup_startscreen_color = v.startscreen_color;
-    v.startup_startscreen_season = v.startscreen_season;
     v.startup_online = v.online;
     {
         std::lock_guard lk{OnlineMutex()};
@@ -420,8 +410,6 @@ void Save() {
     put("ultrawide_ask", flag(v.ultrawide_ask));
     if (v.ctrtv_next) put("ctrtv_next", "1");
     if (v.ctrtv_episode[0]) put("ctrtv_episode", std::string(v.ctrtv_episode.data()));
-    put("startscreen_color", StartScreenColors[std::clamp(v.startscreen_color.load(), 0, StartScreenColorCount - 1)]);
-    put("startscreen_season", StartScreenColors[std::clamp(v.startscreen_season.load(), 0, StartScreenColorCount - 1)]);
     put("online", flag(v.online));
     put("online_asked", flag(v.online_asked));
     {
