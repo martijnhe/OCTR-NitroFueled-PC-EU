@@ -59,28 +59,39 @@ def add_tree(root, out, counts, replaced=None, prefix=Path()):
             link_or_copy(Path(directory) / name, target, counts)
 
 
+def merge(base, update, out):
+    """Merges update over base into out (a new folder): (linked, copied, replaced) counts.
+    ValueError when a folder holds no game or out is one of them."""
+    base, update, out = Path(base), Path(update), Path(out)
+    trees = {}
+    for folder in (base, update):
+        trees[folder] = layout(folder)
+        if trees[folder] is None:
+            raise ValueError(f'No eboot.bin and sce_sys/param.sfo (nor Image0 and Sc0) in {folder}')
+    if out.resolve() in (base.resolve(), update.resolve()):
+        raise ValueError('The merged folder must be a new folder')
+    out.mkdir(parents=True, exist_ok=True)
+    counts = {'linked': 0, 'copied': 0}
+    replaced = []
+    for root, prefix in trees[base]:
+        add_tree(root, out, counts, prefix=prefix)
+    for root, prefix in trees[update]:
+        add_tree(root, out, counts, replaced, prefix)
+    return counts['linked'], counts['copied'], len(replaced)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('base', type=Path)
     p.add_argument('update', type=Path)
     p.add_argument('out', type=Path)
     a = p.parse_args()
-    trees = {}
-    for folder in (a.base, a.update):
-        trees[folder] = layout(folder)
-        if trees[folder] is None:
-            sys.exit(f'No eboot.bin and sce_sys/param.sfo (nor Image0 and Sc0) in {folder}')
-    if a.out.resolve() in (a.base.resolve(), a.update.resolve()):
-        sys.exit('The merged folder must be a new folder')
-    a.out.mkdir(parents=True, exist_ok=True)
-    counts = {'linked': 0, 'copied': 0}
-    replaced = []
-    for root, prefix in trees[a.base]:
-        add_tree(root, a.out, counts, prefix=prefix)
-    for root, prefix in trees[a.update]:
-        add_tree(root, a.out, counts, replaced, prefix)
-    print(f'Merged {a.update} over {a.base} into {a.out}: {counts["linked"]} files linked, '
-          f'{counts["copied"]} copied, {len(replaced)} replaced by the update')
+    try:
+        linked, copied, replaced = merge(a.base, a.update, a.out)
+    except ValueError as e:
+        sys.exit(str(e))
+    print(f'Merged {a.update} over {a.base} into {a.out}: {linked} files linked, '
+          f'{copied} copied, {replaced} replaced by the update')
 
 
 if __name__ == '__main__':

@@ -13,7 +13,7 @@ let
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
-    "out/VERSION" "tools" "tools/gen_import_names.py"
+    "out/VERSION" "tools" "tools/gen_import_names.py" "tools/merge_update.py"
   ] ++ assetDirs;
   src = builtins.path {
     name = "bbport-src";
@@ -126,6 +126,7 @@ pkgs.stdenv.mkDerivation {
     cp -r scripts patches launcher assets $d/
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
     install -Dm755 tools/gen_import_names.py $d/tools/gen_import_names.py
+    install -Dm755 tools/merge_update.py $d/tools/merge_update.py   # the launcher's game setup
     install -m755 out/sacredfire $d/bin/sacredfire
     install -m755 out/bb-gpu-capabilities $d/bin/bb-gpu-capabilities
     install -Dm755 out/gpu/libbbgpu.so $d/bin/gpu/libbbgpu.so

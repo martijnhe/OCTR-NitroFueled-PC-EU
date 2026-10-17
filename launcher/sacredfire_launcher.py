@@ -14,8 +14,10 @@ knows only the CTR profile.
 
 import json
 import os
+import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 from pathlib import Path
@@ -31,6 +33,9 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 PORT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / "scripts"))
 import game_check  # noqa: E402
+from prepare import sfo as read_sfo  # noqa: E402
+sys.path.insert(0, str(PORT_DIR / "tools"))
+import merge_update  # noqa: E402
 import steam_shortcuts  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
@@ -310,11 +315,26 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         game = Adw.PreferencesGroup(title=tr("Game"),
                                     description=tr("The dumped game with its 1.21 update merged over the base (eboot.bin, sce_module, ...)"))
-        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA13795)"))
+        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA14876 or CUSA13795)"))
         self.game_status = Gtk.Image(valign=Gtk.Align.CENTER)
         self.game_row.add_suffix(self.game_status)
         self.game_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the folder with eboot.bin"), self.on_choose_game))
         game.add(self.game_row)
+        # The base game and its update dumped to two folders: merged with hard links (no copy).
+        setup_row = Adw.ActionRow(title=tr("Set up from the base game and its update"),
+                                  subtitle=tr("Pick the dumped base game, then the 1.21 update: they are merged "
+                                              "next to the base game (hard links: no extra space on one drive)"))
+        self.setup_button = flat_button("list-add-symbolic", tr("Choose the base game, then the update"),
+                                        self.on_setup_game)
+        setup_row.add_suffix(self.setup_button)
+        game.add(setup_row)
+        # DLC: the player's own add-on packages, copied into dlc/ (run.sh reports them installed).
+        self.dlc_row = Adw.ActionRow(title=tr("DLC packages (.pkg)"))
+        self.dlc_row.add_suffix(flat_button("list-add-symbolic", tr("Add DLC packages"), self.on_add_dlc))
+        self.dlc_row.add_suffix(flat_button("folder-symbolic", tr("Open in the file manager"),
+                                            lambda _b: open_folder(self, self.dlc_dir())))
+        game.add(self.dlc_row)
+        self.update_dlc_status()
         self.user_row = Adw.ActionRow(title=tr("Saves folder"))
         self.user_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the saves folder"), self.on_choose_user))
         self.user_row.add_suffix(flat_button("edit-undo-symbolic", tr("Back to the default folder"), self.on_reset_user))
@@ -436,7 +456,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             problem = ("other_title", profile["title"], profile["version"])
             self.game_row.set_subtitle(f"{path}\n{tooltip}")
         else:
-            tooltip = f"{GAME} CUSA13795, 1.21"
+            info = game_check.sfo_info(path)
+            tooltip = f"{GAME} {info.get('TITLE_ID', '')}, {info.get('APP_VER', '').lstrip('0')}"
         self.game_status.set_from_icon_name("object-select-symbolic" if ok and not problem else "dialog-warning-symbolic")
         self.game_status.set_tooltip_text(tooltip)
         self.launch_button.set_sensitive((ok and not problem) or self.process is not None)
@@ -461,6 +482,91 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.update_game_status()
             self.store()
         self.choose_folder(tr("Game folder (with eboot.bin)"), self.game_dir(), chosen)
+
+    def dlc_dir(self):
+        return Path(os.environ.get("BB_DLC_DIR", DATA_DIR / "dlc"))
+
+    def update_dlc_status(self):
+        try:
+            count = sum(1 for f in self.dlc_dir().iterdir() if f.suffix.lower() == ".pkg")
+        except OSError:
+            count = 0
+        self.dlc_row.set_subtitle(tr("{} in {}").format(count, self.dlc_dir()) if count
+                                  else tr("none (optional: your own add-on packages)"))
+
+    def on_add_dlc(self, _button):
+        dialog = Gtk.FileDialog(title=tr("DLC packages (.pkg)"), modal=True)
+        pkg = Gtk.FileFilter(name="PS4 packages (.pkg)")
+        pkg.add_suffix("pkg")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(pkg)
+        dialog.set_filters(filters)
+
+        def done(dialog, result):
+            try:
+                files = dialog.open_multiple_finish(result)
+            except GLib.Error:
+                return
+            paths = [files.get_item(i).get_path() for i in range(files.get_n_items())]
+            self.dlc_dir().mkdir(parents=True, exist_ok=True)
+            added = 0
+            for path in paths:
+                try:
+                    shutil.copy2(path, self.dlc_dir() / Path(path).name)
+                    added += 1
+                except OSError as error:
+                    self.toasts.add_toast(Adw.Toast(title=tr("Could not copy {}: {}").format(path, error), timeout=8))
+            self.update_dlc_status()
+            if added:
+                self.toasts.add_toast(Adw.Toast(title=tr("{} DLC package(s) added").format(added)))
+        dialog.open_multiple(self, None, done)
+
+    def on_setup_game(self, _button):
+        def base_chosen(base):
+            if merge_update.layout(base) is None:
+                self.toasts.add_toast(Adw.Toast(title=tr("No game in {}").format(base), timeout=8))
+                return
+            self.choose_folder(tr("The 1.21 update (dumped)"), Path(base).parent,
+                               lambda update: self.merge_game(base, update))
+        self.choose_folder(tr("The base game (dumped)"), self.game_dir().parent, base_chosen)
+
+    def merge_game(self, base, update):
+        if merge_update.layout(update) is None:
+            self.toasts.add_toast(Adw.Toast(title=tr("No game in {}").format(update), timeout=8))
+            return
+        # The merged folder is named after the update: CUSA14876-1.21 (as run.sh and the AppImage look for).
+        info = {}
+        for tree, prefix in merge_update.layout(update):
+            sfo = tree / ("param.sfo" if prefix == Path("sce_sys") else "sce_sys/param.sfo")
+            if sfo.is_file():
+                try:
+                    info = read_sfo(sfo.read_bytes())
+                except (OSError, ValueError, IndexError):
+                    pass
+        name = f"{info.get('TITLE_ID', 'game')}-{info.get('APP_VER', 'merged').lstrip('0')}"
+        out = Path(base).parent / name
+        if out.exists():
+            out = Path(base).parent / f"{name}-merged"
+        self.setup_button.set_sensitive(False)
+        self.toasts.add_toast(Adw.Toast(title=tr("Merging into {}...").format(out)))
+
+        def work():
+            try:
+                linked, copied, _replaced = merge_update.merge(base, update, out)
+                result = (True, tr("Game set up in {} ({} files linked, {} copied)").format(out, linked, copied))
+            except (OSError, ValueError) as error:
+                result = (False, tr("Could not set up the game: {}").format(error))
+            GLib.idle_add(finished, *result)
+
+        def finished(ok, message):
+            self.setup_button.set_sensitive(True)
+            if ok:
+                self.settings["game_dir"] = str(out)
+                self.update_game_status()
+                self.store()
+            self.toasts.add_toast(Adw.Toast(title=message, timeout=8))
+            return False
+        threading.Thread(target=work, daemon=True).start()
 
     def on_choose_user(self, _button):
         def chosen(path):
