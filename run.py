@@ -480,7 +480,7 @@ def main():
             parts = [f'--{p}' for p in ('tga', 'gp8', 'gp7', 'gp4') if ini_has(config, f'startscreen_{p}=1')]
             if parts:
                 overlay = Path(out) / 'startscreen.ovl'
-                archive = Path(out) / 'octane_startscreen.pak'  # with Nina's files (--gp4)
+                archive = Path(out) / 'startscreen_gp4.pak'  # Nina's files (--gp4), served as update3.pak
                 if '--gp4' in parts:
                     parts += ['--archive-out', str(archive)]
                 done = subprocess.run([sys.executable, '-X', 'utf8', str(PORT / 'scripts/startscreen.py'), '--game',
@@ -489,7 +489,7 @@ def main():
                 if done.returncode == 0:  # a failure leaves the start screen as it is
                     env['BB_FILE_OVERLAY'] = str(overlay)
                     if '--gp4' in parts and archive.is_file():
-                        env['BB_FILE_REPLACE'] = f'/app0/archives/octane_startscreen.pak={archive}'
+                        env['BB_FILE_REPLACE'] = f'/app0/archives/update3.pak={archive}'
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)

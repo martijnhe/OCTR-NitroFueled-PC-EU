@@ -270,12 +270,12 @@ startscreen_args=()
 for part in tga gp8 gp7 gp4; do
     if [[ -f $BB_CONFIG ]] && grep -qx "startscreen_$part=1" "$BB_CONFIG"; then startscreen_args+=("--$part"); fi
 done
-[[ " ${startscreen_args[*]} " == *' --gp4 '* ]] && startscreen_args+=(--archive-out "$out/octane_startscreen.pak")
+[[ " ${startscreen_args[*]} " == *' --gp4 '* ]] && startscreen_args+=(--archive-out "$out/startscreen_gp4.pak")
 if (( ${#startscreen_args[@]} )); then
     if "$PYTHON" scripts/startscreen.py --game "$game" --out "$out/startscreen.ovl" "${startscreen_args[@]}"; then
         export BB_FILE_OVERLAY=$out/startscreen.ovl
-        if [[ -f $out/octane_startscreen.pak && " ${startscreen_args[*]} " == *' --gp4 '* ]]; then
-            export BB_FILE_REPLACE=/app0/archives/octane_startscreen.pak=$out/octane_startscreen.pak
+        if [[ -f $out/startscreen_gp4.pak && " ${startscreen_args[*]} " == *' --gp4 '* ]]; then
+            export BB_FILE_REPLACE=/app0/archives/update3.pak=$out/startscreen_gp4.pak
         fi
     fi
 fi

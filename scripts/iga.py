@@ -249,9 +249,13 @@ def replace_string(data, old, new):
     i = table.find(needle)
     if i < 0 or (i and table[i - 1] != 0):
         raise ValueError(f'string {old!r} not found')
+    # Strings are 2-aligned: one ending on an odd byte is followed by a padding zero. The old
+    # string is replaced with its padding and the new one gets its own (a stray zero would read as
+    # an extra empty string and shift every later index).
+    old_span = len(needle) + len(needle) % 2
     grown = new.encode('latin1') + b'\0'
-    grown += b'\0' * ((len(needle) - len(grown)) % 2)  # strings stay 2-aligned
-    table = table[:i] + grown + table[i + len(needle):]
+    grown += b'\0' * (len(grown) % 2)
+    table = table[:i] + grown + table[i + old_span:]
     delta = len(table) - (size - start)
     delta += (-delta) % 16  # keep the data section's alignment
     table += b'\0' * (delta - (len(table) - (size - start)))

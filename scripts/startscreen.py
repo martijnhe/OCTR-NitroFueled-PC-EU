@@ -14,8 +14,9 @@ file itself is not changed.
 --gp7  The Rustland Grand Prix embers (gp7_embers_vfx, 001, 002).
 --gp4  The Spooky Grand Prix guest, Nina Cortex, as GrandPrixGuest (in place of Cortex with
        --gp8). Her files are only in the second start screen set (archives/Octane_StartScreen_Shooting.pak
-       in update2.pak): PAK gets archives/octane_startscreen.pak's files and hers, for the runtime
-       to serve in its place (BB_FILE_REPLACE).
+       in update2.pak): PAK gets only her files, for the runtime to serve as archives/update3.pak
+       (BB_FILE_REPLACE), an update archive 1.21 looks for at start and does not have (1.21 reads
+       its start screen from the update archives, never from archives/octane_startscreen.pak).
 
 Overlay format: "BBOVL1\\n", then records: u16 guest path length, the guest path
 (/app0/archives/update2.pak), u64 file offset, u32 size, the bytes. No option: no file.
@@ -50,6 +51,35 @@ NINA_FILES = ('actors/cutscenecharacter/cutscenedriverncx.igz', 'anims/cutscenec
               'materialinstances/models/props/item_cup_race_materials,cutscenedriverncx,7.igz')
 NINA_TEXTURES = ('gp4_driver_ncx', '{default_b`png,common!g_45`tga,default_m`png}')
 
+# The start screen's package lists the files its map loads: the Gasmoxia guest's (Cortex, KCNGP8).
+# With --gp4 its entries become Nina's, each for a file of the same kind (the package refers to
+# its strings by index); Cortex's remaining texture entries stay (harmless).
+PACKAGE = 'packages/generated/maps/Octane/Octane_StartScreen/Octane_StartScreen_pkg.igz'
+_KCN = 'actors!octane!characters!gp8_skin_kcn_p1!gp8_kcn_'
+_NCX = 'actors!octane!characters!gp4_driver_ncx!ncx_ncx_'
+NINA_PACKAGE = (
+    ('actors/cutscenecharacter/cutscenedriverkcngp8_p1.igz', 'actors/cutscenecharacter/cutscenedriverncx.igz'),
+    ('anims/cutscenecharacter/cutscenedriverkcngp8_p1.hka', 'anims/cutscenecharacter/cutscenedriverncx.hka'),
+    ('materialinstances/actors/octane/characters/gp8_skin_kcn_p1_materials,cutscenedriverkcngp8_p1,0a27.igz',
+     'materialinstances/actors/octane/characters/gp4_driver_ncx_materials,cutscenedriverncx,ff.igz'),
+    (f'textures/colormap,textures@!{_KCN}body_c`tga,111.igz', f'textures/colormap,textures@!{_NCX}body_c`tga,111.igz'),
+    (f'textures/colormap,textures@!{_KCN}eyes_c`tga,111.igz', f'textures/colormap,textures@!{_NCX}cloth_c`tga,111.igz'),
+    (f'textures/colormap,textures@!{_KCN}feathers_c`tga,111.igz', f'textures/colormap,textures@!{_NCX}hand_c`tga,111.igz'),
+    (f'textures/colormap,textures@!{_KCN}fur_c`tga,111.igz',
+     'textures/colormap,textures@!actors!octane!characters!gp4_driver_ncx!ncx_hairstrands_c`tif,111.igz'),
+    (f'textures/composite3halfres,textures@!{{default_b`png,{_KCN}body_{{g,m}}`tga}},111.igz',
+     f'textures/composite3halfres,textures@!{_NCX}body_{{b,g,m}}`tga,111.igz'),
+    (f'textures/composite3halfres,textures@!{{default_b`png,{_KCN}eyes_{{g,m}}`tga}},111.igz',
+     f'textures/composite3halfres,textures@!{_NCX}cloth_{{b,g,m}}`tga,111.igz'),
+    (f'textures/composite3halfres,textures@!{{default_b`png,{_KCN}feathers_{{g,m}}`tga}},111.igz',
+     f'textures/composite3halfres,textures@!{{default_b`png,{_NCX}hand_{{g,m}}`tga}},111.igz'),
+    (f'textures/composite3halfres,textures@!{{default_b`png,{_KCN}fur_g`tga,default_m`png}},111.igz',
+     'textures/composite3halfres,textures@!{default_b`png,common!g_45`tga,default_m`png},111.igz'),
+    (f'textures/normalmap,textures@!{_KCN}body_n`tga,111.igz', f'textures/normalmap,textures@!{_NCX}body_n`tga,111.igz'),
+    (f'textures/normalmap,textures@!{_KCN}eyes_n`tga,111.igz', f'textures/normalmap,textures@!{_NCX}cloth_n`tga,111.igz'),
+    (f'textures/normalmap,textures@!{_KCN}feathers_n`tga,111.igz', f'textures/normalmap,textures@!{_NCX}hand_n`tga,111.igz'),
+)
+
 GUI_DATA = 'loosedata/GuiSystemData.igz'
 START_MAP = 'Octane/Octane_StartScreen/Octane_StartScreen'
 SHOOTING_MAP = 'Octane_StartScreen_Shooting/Octane_StartScreen_Shooting'
@@ -64,10 +94,9 @@ def shooting(game):
 
 
 def nina_archive(game, out, work):
-    """Writes out: archives/octane_startscreen.pak's files and Nina's from the Shooting set
-    (extracted from update2.pak to work meanwhile)."""
+    """Writes out: an archive of Nina's files from the Shooting set (extracted from update2.pak
+    to work meanwhile)."""
     update = iga.Archive(Path(game) / ARCHIVE)
-    start = iga.Archive(Path(game) / START_ARCHIVE)
     with open(work, 'wb') as w:
         w.write(update.read(SHOOTING_ARCHIVE))
     try:
@@ -76,7 +105,7 @@ def nina_archive(game, out, work):
                  if k in NINA_FILES or (k.startswith('textures/') and any(t in k for t in NINA_TEXTURES))]
         if len(names) < len(NINA_FILES) + 10:
             raise ValueError(f'{SHOOTING_ARCHIVE}: Nina\'s files not found (another game version?)')
-        iga.build(out, [(start, n) for _o, _l, _b, n in start.files.values()] + [(shooting, n) for n in names])
+        iga.build(out, [(shooting, n) for n in names])
         check = iga.Archive(out)
         if any(check.read(n) != shooting.read(n) for n in names):
             raise ValueError(f'{out}: does not read back')
@@ -100,6 +129,11 @@ def overlay(game, chosen):
             at = objects.base + names[name] + CAN_SPAWN
             data[at] = (data[at] & ~1) | on
     out = iga.replacement(archive, MAP, bytes(data))
+    if 'gp4' in chosen:
+        package = archive.read(PACKAGE)
+        for old, new in NINA_PACKAGE:
+            package = iga.replace_string(package, old, new)
+        out += iga.replacement(archive, PACKAGE, package)
     return out
 
 
