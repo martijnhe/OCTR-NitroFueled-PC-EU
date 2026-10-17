@@ -229,21 +229,53 @@ def build(out_path, sources):
         w.write(struct.pack(f'<{len(large)}I', *large) + struct.pack(f'<{len(medium)}H', *medium) + bytes(small))
 
 
-def replace_string(data, old, new):
+def strings(data):
+    """The strings of an .igz file's string table (TSTR), in index order (2-aligned)."""
+    sections = [struct.unpack_from('<4I', data, 0x10 + 16 * k) for k in range(4)]
+    fix_at, fix_size = sections[0][2], sections[0][3]
+    at = fix_at
+    while at < fix_at + fix_size:
+        magic, count, size, start = struct.unpack_from('<4sIII', data, at)
+        if magic == b'TSTR':
+            table, out, i = data[at + start:at + size], [], 0
+            while len(out) < count:
+                end = table.index(b'\0', i)
+                out.append(table[i:end].decode('latin1'))
+                i = end + 1 + (end + 1) % 2
+            return out
+        at += size
+    raise ValueError('no string table')
+
+
+def dependencies(data):
+    """The strings of an .igz file's dependency list (TDEP): names and load paths, packed."""
+    sections = [struct.unpack_from('<4I', data, 0x10 + 16 * k) for k in range(4)]
+    at, end = sections[0][2], sections[0][2] + sections[0][3]
+    while at < end:
+        magic, count, size, start = struct.unpack_from('<4sIII', data, at)
+        if magic == b'TDEP':
+            return [t.decode('latin1') for t in data[at + start:at + size].split(b'\0')[:2 * count]]
+        at += size
+    return []
+
+
+def replace_string(data, old, new, section=b'TSTR'):
     """An .igz file with one string of its table (TSTR) replaced; the strings are referenced by
     index, so only the table's size, the fixup section's size and the data section's offset
-    change (the data moves by a multiple of 16)."""
+    change (the data moves by a multiple of 16). section=b'TDEP': one string of the dependency
+    list (names and load paths of the files it needs), packed without alignment."""
+    align = 2 if section == b'TSTR' else 1
     data = bytearray(data)
     sections = [list(struct.unpack_from('<4I', data, 0x10 + 16 * k)) for k in range(4)]
     fix_at, fix_size = sections[0][2], sections[0][3]
     at = fix_at
     while at < fix_at + fix_size:
         magic, count, size, start = struct.unpack_from('<4sIII', data, at)
-        if magic == b'TSTR':
+        if magic == section:
             break
         at += size
     else:
-        raise ValueError('no string table')
+        raise ValueError(f'no {section.decode()} section')
     table = bytes(data[at + start:at + size])
     needle = old.encode('latin1') + b'\0'
     i = table.find(needle)
@@ -252,14 +284,14 @@ def replace_string(data, old, new):
     # Strings are 2-aligned: one ending on an odd byte is followed by a padding zero. The old
     # string is replaced with its padding and the new one gets its own (a stray zero would read as
     # an extra empty string and shift every later index).
-    old_span = len(needle) + len(needle) % 2
+    old_span = len(needle) + len(needle) % align
     grown = new.encode('latin1') + b'\0'
-    grown += b'\0' * (len(grown) % 2)
+    grown += b'\0' * (len(grown) % align)
     table = table[:i] + grown + table[i + old_span:]
     delta = len(table) - (size - start)
     delta += (-delta) % 16  # keep the data section's alignment
     table += b'\0' * (delta - (len(table) - (size - start)))
-    out = data[:at] + struct.pack('<4sIII', b'TSTR', count, start + len(table), start) + table + data[at + size:]
+    out = data[:at] + struct.pack('<4sIII', section, count, start + len(table), start) + table + data[at + size:]
     for k in range(4):
         if k == 0:
             sections[k][3] += delta

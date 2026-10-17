@@ -192,6 +192,33 @@ him away, Nina takes his place with the trophy):
   the package hold only the current props). They need the season's own update (1.12) from a player's
   dump (issue form *Grand Prix start-up intro*).
 
+**Findings, 2026-10-17 (afternoon):**
+- **Crash makes room for the guest** (user's choice, for now): with a guest on (`startscreen_gp8` or
+  `startscreen_gp4`) the `Crash` entity's _canSpawn bit is off, so the logo is free for Cortex /
+  Nina. Wanted later: Crash first, then the guest, as in the seasons (needs the guest vsc timed after
+  Crash's, or the hook, which 1.21 lacks). Tested with Nina: she still comes in without Crash, on the
+  guest script's own timer (about a minute after the start screen shows); until then the logo has
+  only the trophy.
+- **Background colour**: the visible full-screen background is the material
+  `M101_Customization_background_materials,octane_ui_custo_bg_color_event,008000` (update2.pak; the
+  model `octane_ui_custo_bg_color_event`), drawing the blue gradient texture
+  `octane_ui_custo_bg_color_event`. `..._color_1p,000800` is player 1's half; `_2p` .. `_4p` are the
+  other players' halves (pointing the material at `_2p` gave a half-red screen). 1.21 has no
+  full-screen texture in a season colour.
+- **Teal by tint**: each material has one white float4, its colour multiplier (`ig_color_value`).
+  `startscreen.py --gp4` sets it to `SPOOKY_TINT`. On screen the tint acts about as tint^2.4 (x1.37
+  doubled green, x0.71 cut blue to 0.42), so the tint is the wanted screen ratio to the power 1/2.4;
+  the ratio comes from the reference recording (intros.mp4 at 2:45) over our blue background at the
+  same spots. (1.5, 2.0, 0.47) was lime, (1.0, 1.37, 0.71) too green; **(1.09, 1.14, 0.87) matches** the recording's teal.
+  Other seasons' colours work the same way: measure the season's frame in intros.mp4, take the
+  ratio, power 1/2.4.
+- **Tools**: `iga.strings()` and `iga.dependencies()` read an .igz file's string table (TSTR, strings
+  2-aligned) and dependency list (TDEP: names and load paths, packed); `iga.replace_string(...,
+  section=b'TDEP')` replaces a dependency. A texture swap needs the name in TSTR and the name and
+  path in TDEP.
+- **Still missing for the Spooky look**: the pumpkins in the corners and the hook (not in 1.21; the
+  season's update 1.12 from a player's dump).
+
 Earlier notes (before it showed):
 - The guest entities match: the Shooting set's `GrandPrixGuest` is the real map's except its skin
   name (`CutsceneCharacter\CutsceneDriverNCX` vs `...KCNGP8_P1`). Both play the same animation

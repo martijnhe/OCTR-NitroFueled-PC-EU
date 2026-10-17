@@ -34,9 +34,10 @@ ARCHIVE = 'archives/update2.pak'
 CAN_SPAWN = 0x38  # CGameEntity bitfield; bit 0: _canSpawn
 CHOICES = {
     'tga': {'Trophy_TGA': 1, 'Trophy': 0},
-    'gp8': {'GrandPrixGuest': 1, 'GrandPrixGuest2': 1},
+    # A guest takes Crash's place on the logo (the seasons' hook that pulled him away is not in 1.21).
+    'gp8': {'GrandPrixGuest': 1, 'GrandPrixGuest2': 1, 'Crash': 0},
     'gp7': {'gp7_embers_vfx': 1, 'gp7_embers_vfx001': 1, 'gp7_embers_vfx002': 1},
-    'gp4': {'GrandPrixGuest': 1},
+    'gp4': {'GrandPrixGuest': 1, 'Crash': 0},
 }
 
 
@@ -79,6 +80,29 @@ NINA_PACKAGE = (
     (f'textures/normalmap,textures@!{_KCN}eyes_n`tga,111.igz', f'textures/normalmap,textures@!{_NCX}cloth_n`tga,111.igz'),
     (f'textures/normalmap,textures@!{_KCN}feathers_n`tga,111.igz', f'textures/normalmap,textures@!{_NCX}hand_n`tga,111.igz'),
 )
+
+# The start screen's background: unlit materials drawing a blue gradient texture (the full-screen
+# "event" one and player 1's), each with a colour multiplier (ig_color_value, white). With --gp4 the
+# multiplier tints the blue to the Spooky season's teal: SPOOKY_TINT, from the reference recording's
+# background over ours at the same spots (median per channel), to the power 1/2.4: on screen the
+# tint acts about as tint^2.4 (measured: x1.37 doubled green, x0.71 cut blue to 0.42).
+_BACKGROUND = 'materialinstances/Octane/M101_Customization/M101_Customization_background_materials,'
+BACKGROUND_MATERIALS = (_BACKGROUND + 'octane_ui_custo_bg_color_event,008000.igz',
+                        _BACKGROUND + 'octane_ui_custo_bg_color_1p,000800.igz')
+SPOOKY_TINT = (1.09, 1.14, 0.87, 1.0)
+
+
+def background(archive, tint):
+    """[(file offset, bytes)]: the background materials' colour multiplier set to tint (RGBA)."""
+    white = struct.pack('<4f', 1.0, 1.0, 1.0, 1.0)
+    records = []
+    for material in BACKGROUND_MATERIALS:
+        data = archive.read(material)
+        if data.count(white) != 1:
+            raise ValueError(f'{material}: unexpected contents (another game version?)')
+        records += iga.replacement(archive, material, data.replace(white, struct.pack('<4f', *tint)))
+    return records
+
 
 GUI_DATA = 'loosedata/GuiSystemData.igz'
 START_MAP = 'Octane/Octane_StartScreen/Octane_StartScreen'
@@ -134,6 +158,7 @@ def overlay(game, chosen):
         for old, new in NINA_PACKAGE:
             package = iga.replace_string(package, old, new)
         out += iga.replacement(archive, PACKAGE, package)
+        out += background(archive, SPOOKY_TINT)
     return out
 
 
