@@ -66,7 +66,8 @@ export BB_GAME_DIR=$game  # the in-game menu lists the CTR TV episodes in its ar
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
-read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game")
+read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
+title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}  # game_check.py had no answer
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
