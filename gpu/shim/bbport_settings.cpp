@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -35,7 +36,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "menu_language") {
         if (value == "en") v.menu_language = MenuLanguage::English;
         else if (value == "ru") v.menu_language = MenuLanguage::Russian;
-        else std::printf("Settings: unknown menu_language '%s' (expected en or ru)\n", value.c_str());
+        else if (value == "nl") v.menu_language = MenuLanguage::Dutch;
+        else std::printf("Settings: unknown menu_language '%s' (expected en, ru or nl)\n", value.c_str());
     } else if (key == "upscaler") {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (value == UpscalerName(u)) {
@@ -191,8 +193,22 @@ Values& Get() {
     return values;
 }
 
+/// SacredFire: Dutch (menu_language=nl) is a table keyed by the English text
+/// (bbport_menu_nl.inc); a text it lacks is shown in English.
+static const char* DutchText(const char* english) {
+    static const std::unordered_map<std::string_view, const char*> table = {
+#include "bbport_menu_nl.inc"
+    };
+    const auto found = table.find(english);
+    return found == table.end() ? english : found->second;
+}
+
 const char* MenuText(const char* english, const char* russian) {
-    return Get().menu_language == MenuLanguage::Russian ? russian : english;
+    switch (Get().menu_language.load()) {
+    case MenuLanguage::Russian: return russian;
+    case MenuLanguage::Dutch: return DutchText(english);
+    default: return english;
+    }
 }
 
 void Load() {
@@ -212,9 +228,12 @@ void Load() {
                 }
             }
         }
-        v.menu_language = lang && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U')
-                              ? MenuLanguage::Russian
-                              : MenuLanguage::English;
+        const auto starts = [&](char a, char b) {
+            return lang && (lang[0] == a || lang[0] == a - 32) && (lang[1] == b || lang[1] == b - 32);
+        };
+        v.menu_language = starts('r', 'u')   ? MenuLanguage::Russian
+                          : starts('n', 'l') ? MenuLanguage::Dutch
+                                             : MenuLanguage::English;
     }
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
@@ -386,7 +405,9 @@ void Save() {
             put(("port." + std::to_string(p + 1)).c_str(), std::string(v.ports[size_t(p)].data()));
         }
     }
-    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru" : "en");
+    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru"
+                         : v.menu_language == MenuLanguage::Dutch ? "nl"
+                                                                  : "en");
     put("upscaler", UpscalerName(v.upscaler));
     put("preset", std::to_string(v.preset.load()));
     put("sharpen", flag(v.sharpen));

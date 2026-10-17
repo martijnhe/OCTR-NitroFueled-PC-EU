@@ -239,11 +239,14 @@ void Menu() {
         }
     }
     // Always readable, even when the rest of the menu is in Russian.
-    static const char* languages[] = {"English", "Русский"};
-    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
-    if (ImGui::Combo("Language", &language, languages, 2)) {
-        s.menu_language =
-            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
+    static const char* languages[] = {"English", "Русский", "Nederlands"};
+    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1
+                   : s.menu_language == BbSettings::MenuLanguage::Dutch ? 2
+                                                                         : 0;
+    if (ImGui::Combo("Language", &language, languages, 3)) {
+        s.menu_language = language == 1   ? BbSettings::MenuLanguage::Russian
+                          : language == 2 ? BbSettings::MenuLanguage::Dutch
+                                          : BbSettings::MenuLanguage::English;
         BbSettings::Save();
     }
     ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
@@ -760,9 +763,11 @@ void Menu() {
     {
         const int current = std::clamp(s.startscreen_season.load(), 0, BbSettings::StartScreenColorCount - 1);
         if (ImGui::BeginCombo(BbSettings::MenuText("Grand Prix intro", "Заставка Гран-при"),
-                              BbSettings::StartScreenSeasonLabels[current])) {
+                              BbSettings::MenuText(BbSettings::StartScreenSeasonLabels[current],
+                                                   BbSettings::StartScreenSeasonLabels[current]))) {
             for (int c = 0; c < BbSettings::StartScreenColorCount; ++c) {
-                if (ImGui::Selectable(BbSettings::StartScreenSeasonLabels[c], c == current)) {
+                if (ImGui::Selectable(BbSettings::MenuText(BbSettings::StartScreenSeasonLabels[c],
+                                                           BbSettings::StartScreenSeasonLabels[c]), c == current)) {
                     Store(s.startscreen_season, c, c != current);
                 }
             }
@@ -782,9 +787,11 @@ void Menu() {
     {
         const int current = std::clamp(s.startscreen_color.load(), 0, BbSettings::StartScreenColorCount - 1);
         if (ImGui::BeginCombo(BbSettings::MenuText("Start screen colour", "Цвет титульного экрана"),
-                              BbSettings::StartScreenColorLabels[current])) {
+                              BbSettings::MenuText(BbSettings::StartScreenColorLabels[current],
+                                                   BbSettings::StartScreenColorLabels[current]))) {
             for (int c = 0; c < BbSettings::StartScreenColorCount; ++c) {
-                if (ImGui::Selectable(BbSettings::StartScreenColorLabels[c], c == current)) {
+                if (ImGui::Selectable(BbSettings::MenuText(BbSettings::StartScreenColorLabels[c],
+                                                           BbSettings::StartScreenColorLabels[c]), c == current)) {
                     Store(s.startscreen_color, c, c != current);
                 }
             }

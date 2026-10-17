@@ -19,7 +19,7 @@ inline bool IsFsr4(int upscaler) {
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
-enum class MenuLanguage { English, Russian };
+enum class MenuLanguage { English, Russian, Dutch };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
