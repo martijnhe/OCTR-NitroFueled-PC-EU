@@ -149,65 +149,21 @@ check whether a start-screen intro is a `.pak` cutscene the game picks by Grand 
 (`CCtrTvComponentData` `_CtrTvIntroName` / `_CtrTvGPName`, CGrandPrixSystemData) and add a menu
 choice for it.
 
-## Reverse engineering: the Grand Prix start-up intros in 1.21's update packages
+## Grand Prix start-up intros: the earlier seasons
 
-**Found (2026-10-16):** the start screen the game loads, `maps/Octane/Octane_StartScreen/Octane_StartScreen.igz`
-from the 1.21 update's `update2.pak` (it overrides the one in `update.pak`), still holds the last
-two seasons' guests next to Crash:
-- `GrandPrixGuest` and `GrandPrixGuest2`: entities with the `Octane_StartScreen_GrandPrixGuest`
-  visual script (`vsc/Octane/Octane_StartScreen/Octane_StartScreen_GrandPrixGuest.igz`, in
-  update2.pak), which plays `TitleScreen_Guest_In` then `TitleScreen_Guest_Loop` on the guest
-  (bolt `Bone_Hat`, spawned effects), plus looping and static effects.
-- GP8 (Gasmoxia): `Cutscene_NitrosOxide_MainMenu` (actor and animation),
-  `CutsceneCharacter/CutsceneDriverKCNGP8_P1` (a guest character, own animation),
-  `ctr_StartScreen_gp8_oxide_beam`, `ctr_StartScreen_gp8_oxide_teleport`.
-- GP7 (Rustland): `gp7_embers_vfx` (three emitters).
-- Also in the map: `Cutscene_CrashMainMenu` / `Crash_MainMenu` (Crash with the Game Awards statue,
-  1.18), `Cup_Race`, `Cup_Race_Intro`, `CCutsceneCamera_StartScreen`.
-- `update2.pak` also has a second set, `archives/Octane_StartScreen_Shooting.pak` (a package inside
-  the package) with `maps/Octane_StartScreen_Shooting/*`: not looked at yet.
-- The executable names none of these: the map and its scripts choose. Since 1.20 removed the Grand
-  Prix system the guests do not appear; what hides them (an entity flag in the map, a script
-  reading `_currentGrandPrixVersion`, the CTR TV component) is the open question. The earlier
-  seasons' guests (GP1 to GP6) are not in this map.
+**Done (2026-10-17):** the 1.21 start screen (`maps/Octane/Octane_StartScreen/Octane_StartScreen.igz` in
+the update's `update2.pak`) names its entities (`igObjectList` + `igNameList`); four parts are kept
+out by their `_canSpawn` bit (CGameEntity +0x38, bit 0): `Trophy_TGA` (the Game Awards statue, with
+`Trophy`, the cup, on in its place), `GrandPrixGuest` (GP8: Cortex flying through,
+`CutsceneDriverKCNGP8_P1`), `GrandPrixGuest2` (GP8: Nitros Oxide), `gp7_embers_vfx` 000-002 (GP7
+Rustland). `scripts/startscreen.py` turns chosen ones on in the player's own update2.pak's map and
+writes the changed compressed pieces as a byte overlay the runtime serves (BB_FILE_OVERLAY,
+src/runtime_file.c); menu *Start screen*. `scripts/iga.py` reads the IGA archives and igz objects.
 
-**Where it was left (2026-10-17):**
-- Grand Prix system: two `CGrandPrixSystemData` objects (vtable image offset 0x2621020, EU 1.21):
-  version (+0x0c, a date: 202003 = after the last season) and index (+0x98, the season: 9). One
-  with `16 / 0-1` exists before the start screen loads (a default); the real one (`202003 / 9`)
-  only appears after it. Forcing Gasmoxia (`202002 / 8`) changed nothing on the start screen,
-  also when written before the level load: the season numbers do not choose the guest (at least
-  not these objects at that time).
-- Entities: `CGameEntity` (vtable 0x255fc30) objects have their data right after them (+0xe0,
-  `CGameEntityData`, vtable 0x25af018) with the model path at data +0x50, flags at entity +0x38
-  (`_enabled`, `_isVisible`, `_isHidden`, `_spawned` ...) and data +0x20 (`_entityFlags`). About
-  200 exist at the start screen, mostly hub and adventure items kept loaded; none showed a guest
-  model (the start-screen characters are probably cutscene actors, not model entities, or the
-  guests are never spawned).
-- `CWorldCustomizationComponentData` is the kart customization screen (driver, skin, wheels,
-  backgrounds), not a per-season switch. `CEntityTagSet` / `_tags` (entity data) are entity tags.
-- The start-screen map also has a `CCtrTvComponentData` naming `CTRTV_FebGP`.
-- Research probe: `tools/research/gp_probe.c` (copy to `src/runtime_zprobe.c` to build it in).
-
-**Next ideas:** read the map's objects with an igz reader (what the GrandPrixGuest entities'
-data says: spawn flags, `_canSpawn`, tags, which component or script spawns them); look for the
-guest actors at runtime as cutscene actors (`CCutsceneActor`, `_cutsceneOwnerName`); search the
-executable for the code that reads `_currentGrandPrixIndex` and what it decides; check whether the
-Grand Prix data from the server (RyuNET online) changes the start screen.
-
-**Tools:** `tools/iga_extract.py` lists and extracts IGA v13 archives (layout in its header; the
-file offset's high bits are the low byte of the second field, the pieces follow each other from
-the file's offset at sector boundaries, names map to entries by FNV-1a of the lower-case path).
-Tested: the start-screen maps of update.pak and update2.pak, the manager and guest scripts.
-
-**Next:**
-1. Read the start-screen map's objects (an igz reader: string table, object list, fields) to see
-   the guests' enabled flags and what turns them on.
-2. Show a guest: set what the map or script checks (the Grand Prix version), or enable the guest
-   entities at runtime (the port finds the objects in memory, as with unlock_all and the render
-   pass), or serve a changed map through the port's file layer.
-3. Menu choice for the start screen: Crash (Game Awards) / Rustland guest / Gasmoxia (Nitros Oxide)
-   / the "Shooting" set, as far as they work.
+**Open:** the first six seasons' start-screen guests are not in 1.21's map (only GP7 and GP8). They
+would need the older updates' start screens (1.04 to 1.16; the issue form *Grand Prix start-up
+intro*); the same switch may then work on those maps' guests. Also: what `Octane_StartScreen_Shooting`
+(update2.pak, a second start-screen set) is; whether other levels keep Grand Prix parts the same way.
 
 ## Ultrawide on USA 1.21 (CUSA13795)
 
