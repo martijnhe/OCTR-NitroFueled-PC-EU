@@ -214,8 +214,11 @@ him away, Nina takes his place with the trophy):
   ratio, power 1/2.4.
 - **Season colours in the menu** (*Start screen colour*, bbport.ini `startscreen_color=`): Spyro &
   Friends, Spooky, Neon Circus, Winter Festival, Rustland, Gasmoxia (`SEASON_TINTS`, measured in
-  intros.mp4 at 2:10, 2:45, 3:10, 3:35, 4:05, 4:50). Spooky is checked against the recording; the
-  red seasons need a big red boost from our blue (rougher; check them). Nina is in the menu too
+  intros.mp4 at 2:10, 2:45, 3:10, 3:35, 4:05, 4:50). Checked in the game: Spooky, Neon Circus (after
+  one correction, close) and Gasmoxia (closer after one correction, but the blue texture's own
+  gradient leaves its bottom yellowish: a tint cannot flatten it; a flat season texture would). Spyro &
+  Friends, Winter Festival and Rustland are computed, not yet checked. Correction method: measure ours
+  and the recording at the same spots, multiply the tint by (ratio)^(1/2.4). Nina is in the menu too
   (*Start screen: Spooky guest*) and brings Spooky's teal when no colour is chosen.
 - **The Game Awards statue belongs to Rustland**, not Spooky: in intros.mp4 the Spooky season (2:35-3:00,
   Nina included) has the normal gold race cup; the silver Game Awards statue shows at 4:15 (Rustland,
