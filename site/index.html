@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTR Nitro-Fueled PC: EU edition</title>
+<meta name="description" content="Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows, with the European edition, online play, Discord, ultrawide and everything unlocked.">
+<style>
+  :root { --bg:#0b0f1a; --panel:#131a2b; --text:#e9edf7; --muted:#9aa6c2; --accent:#ffb020; --cyan:#3fd0ff; --edge:#243152; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, #1b2446 0%, var(--bg) 60%); color: var(--text); line-height:1.6; }
+  a { color: var(--cyan); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+  header { text-align:center; padding: 56px 0 24px; }
+  header img { width: min(360px, 80vw); height: auto; }
+  h1 { font-size: clamp(1.6rem, 3.5vw, 2.3rem); margin: 18px 0 8px; }
+  .tag { color: var(--muted); font-size: 1.05rem; max-width: 700px; margin: 0 auto; }
+  .cta { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin: 26px 0 8px; }
+  .btn { display:inline-block; padding: 11px 20px; border-radius: 10px; text-decoration:none; font-weight:600; border:1px solid var(--edge); color: var(--text); background: var(--panel); }
+  .btn.primary { background: linear-gradient(90deg, #ff7a18, #ffb020); color:#1a1205; border-color: transparent; }
+  .btn:hover { filter: brightness(1.1); }
+  section { padding: 28px 0; }
+  h2 { font-size: 1.35rem; margin: 0 0 14px; color: var(--accent); }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border:1px solid var(--edge); border-radius: 12px; padding: 16px 18px; }
+  .card h3 { margin: 0 0 6px; font-size: 1.02rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  ul.req { color: var(--muted); padding-left: 20px; }
+  ul.req li { margin: 4px 0; }
+  .note { color: var(--muted); font-size: 0.92rem; border-left: 3px solid var(--accent); padding: 4px 14px; background: rgba(255,176,32,0.06); border-radius: 0 8px 8px 0; }
+  .shots { display:grid; grid-template-columns: 1fr; gap: 14px; }
+  .shots figure { margin:0; background: var(--panel); border:1px solid var(--edge); border-radius: 12px; overflow:hidden; }
+  .shots img { display:block; width:100%; height:auto; aspect-ratio: 43 / 18; }
+  .shots figcaption { color: var(--muted); font-size: 0.9rem; padding: 8px 14px; }
+  @media (min-width: 900px) { .shots { grid-template-columns: 1fr 1fr; } .shots figure.wide { grid-column: 1 / -1; } }
+  footer { border-top:1px solid var(--edge); margin-top: 34px; padding: 22px 0 40px; color: var(--muted); font-size: 0.9rem; text-align:center; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <img src="logo.png" alt="CTR Nitro-Fueled PC EU logo">
+  <h1>CTR Nitro-Fueled PC: EU edition</h1>
+  <p class="tag">Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows, with the European edition, online play, Discord, ultrawide monitors and everything unlocked.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases">Download (Steam Deck / Linux, Windows)</a>
+    <a class="btn" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU#quick-start-linux-steam-deck">Get started</a>
+    <a class="btn" href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">View on GitHub</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <section>
+    <h2 id="screenshots">Screenshots: 3440x1440 ultrawide</h2>
+    <div class="shots">
+      <figure class="wide"><a href="screenshots/race-cove.jpg"><img src="screenshots/race-cove-small.jpg" alt="Racing on Crash Cove: the HUD spreads to the edges of a 21:9 screen" loading="lazy"></a><figcaption>Racing on Crash Cove: the HUD spreads to the edges of a 21:9 screen</figcaption></figure>
+      <figure><a href="screenshots/title.jpg"><img src="screenshots/title-small.jpg" alt="The title screen fills the width (button icons: Xbox)" loading="lazy"></a><figcaption>The title screen fills the width (button icons: Xbox)</figcaption></figure>
+      <figure><a href="screenshots/main-menu.jpg"><img src="screenshots/main-menu-small.jpg" alt="The main menu" loading="lazy"></a><figcaption>The main menu</figcaption></figure>
+      <figure><a href="screenshots/flyover.jpg"><img src="screenshots/flyover-small.jpg" alt="The fly-over before a race stays ultrawide" loading="lazy"></a><figcaption>The fly-over before a race stays ultrawide</figcaption></figure>
+      <figure><a href="screenshots/race-beach.jpg"><img src="screenshots/race-beach-small.jpg" alt="Crash Cove at sunset" loading="lazy"></a><figcaption>Crash Cove at sunset</figcaption></figure>
+      <figure class="wide"><a href="screenshots/track-select.jpg"><img src="screenshots/track-select-small.jpg" alt="Track select with its preview video" loading="lazy"></a><figcaption>Track select with its preview video</figcaption></figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>What you get</h2>
+    <div class="grid">
+      <div class="card"><h3>European edition</h3><p>Runs the EU release (CUSA14876) with the 1.21 update. The US edition keeps working too.</p></div>
+      <div class="card"><h3>Online play</h3><p>Online races, matchmaking, private rooms, friends list and the Pit Stop on the RyuNET server.</p></div>
+      <div class="card"><h3>Discord</h3><p>Your status shows the game while you play online, with join and invite support.</p></div>
+      <div class="card"><h3>Unlock everything</h3><p>Every character, kart and cosmetic, switchable on and off. Your saves are backed up before it turns on.</p></div>
+      <div class="card"><h3>Ultrawide</h3><p>Draws at your monitor's own size on wide screens, with the HUD spread to the edges.</p></div>
+      <div class="card"><h3>Steam Deck</h3><p>One AppImage that starts the game directly and adds itself to Steam.</p></div>
+      <div class="card"><h3>Tweaks</h3><p>60 FPS, no motion blur, internal resolution from 480p to 4K, button icons for Xbox, Steam Deck or Switch.</p></div>
+      <div class="card"><h3>Grand Prix intros</h3><p>Season start screens as they looked, with the parts 1.21 still has.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Which version?</h2>
+    <div class="grid">
+      <div class="card"><h3>European edition (CUSA14876)</h3><p>This project. Runs the EU release with the 1.21 update, plus online, Discord, ultrawide and unlock-all.</p><p style="margin-top:10px"><a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Go to this project</a></p></div>
+      <div class="card"><h3>US edition (CUSA13795)</h3><p>The original project by Ryu7w7, for the US release with the 1.21 update. Use it if your copy is the US edition.</p><p style="margin-top:10px"><a href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">Go to the US version</a></p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>What you need</h2>
+    <ul class="req">
+      <li>Your own copy of the game as decrypted files: the base game and the 1.21 update of the European or US edition.</li>
+      <li>Linux (any recent distribution or SteamOS) with a Vulkan 1.3 GPU, or Windows 10/11.</li>
+      <li>Optional: your own DLC packages (.pkg).</li>
+    </ul>
+    <p class="note">No game files, updates or DLC are included or downloaded. You bring your own.</p>
+  </section>
+
+  <section>
+    <h2>Credits</h2>
+    <p class="tag" style="text-align:left;margin:0">A fork of <a href="https://github.com/Ryu7w7/OCTR-NitroFueled-PC">Ryu7w7's OCTR-NitroFueled-PC</a>, built on <a href="https://github.com/T3CHNOLOG1C/SacredFire">SacredFire</a>. The game's code runs directly on the CPU, a small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 draws with Vulkan. No emulator.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    Unofficial fan project. Not affiliated with Sony, Activision or Beenox.<br>
+    <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU">Source on GitHub</a>
+  </div>
+</footer>
+</body>
+</html>

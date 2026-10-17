@@ -453,6 +453,7 @@ than the Steam Deck has). bbport's temporal upscalers (`BB_UPSCALER`, `BB_OBJECT
 | `src/` | Loader (`probe.c`) and the runtime |
 | `scripts/` | Offline preparation of the game image, module linking, game check, patch compiler, mods |
 | `gpu/` | Renderer library: vendored shadPS4 video core (`gpu/VENDOR.txt`) with bbport's and SacredFire's changes, shims, ImGui menu |
+| `site/` | The [website](https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/) (GitHub Pages, published by `.github/workflows/pages.yml`) |
 | `assets/` | Button icon sheets for Xbox, Steam Deck and Switch (CC0, [credits](assets/button_icons/README.md)) |
 | `patches/` | Community patches for CTR (`CrashTeamRacing.xml`) |
 | `launcher/`, `packaging/` | GTK4 launcher and desktop entry; Nix package and AppImage |
