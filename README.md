@@ -7,6 +7,15 @@
 **Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows,
 with the European edition, online play, Discord, ultrawide monitors and everything unlocked.**
 
+<p align="center">
+  <a href="https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/"><b>Website</b></a> ·
+  <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases/latest"><b>Download</b> (Steam Deck / Linux AppImage, Windows ZIP)</a>
+</p>
+
+<p align="center">
+  <a href="https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/#screenshots"><img src="https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/screenshots/race-cove-small.jpg" alt="Racing on Crash Cove in 3440x1440 ultrawide" width="860"></a>
+</p>
+
 This is a fork of [CTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC), itself built
 on [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire): the game's own code runs directly on
 the CPU, a small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4
@@ -485,6 +494,7 @@ milestone of this repository; the in-game menu and `out/VERSION` show the exact 
 
 | Version | Date | Up to | What it brought |
 |---|---|---|---|
+| **v0.5-eu.8** | 2026-10-17 | [release](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases/tag/v0.5-eu.8) | **First release**: Steam Deck / Linux AppImage and Windows ZIP (untested) built by GitHub Actions; the Linux launcher sets up the game from the base game and its update and adds DLC packages; the Windows launcher accepts the EU edition; the Deck button icons named *Steam Deck / Steam Controller*; [website](https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/) with ultrawide screenshots |
 | **v0.5-eu.7** | 2026-10-17 | [`c88f7fb`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/c88f7fb) | **Button icons** in Xbox, Steam Deck or Switch style (icons by [Those Awesome Guys](https://thoseawesomeguys.com/prompts/), CC0); the in-game menu in **Dutch**; the menu fits the screen (scrolls on ultrawide, smaller above 1080p); README on what the Grand Prix intros and CTR TV still miss; old Steam shortcuts of the same name removed |
 | **v0.5-eu.6** | 2026-10-17 | [`1d0eb28`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/1d0eb28) | **Grand Prix intros**: the start screen's hidden parts (Game Awards statue, Gasmoxia guests, Rustland embers), **Nina Cortex** as the Spooky guest, the seasons' background colours, a whole season from one menu choice; a guest takes Crash's place; the ultrawide title logo clears "Press X to begin"; `build.sh --test` passes again |
 | **v0.5-eu.5** | 2026-10-17 | [`e80bc9a`](https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/commit/e80bc9a) | **CTR TV** in place of the opening video; issue forms for CTR TV episodes and Grand Prix intros; research on which update had which season; the Steam Deck AppImage built in Docker (`packaging/appimage-docker.sh`) |
