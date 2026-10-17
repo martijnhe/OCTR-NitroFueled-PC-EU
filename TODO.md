@@ -172,7 +172,27 @@ has no start-screen camera (`CCutsceneCamera_StartScreen` is only in the real ma
 lighting, a capture set for promotional shots. Nina could perhaps be shown by bringing its guest
 entity's data into the real map.
 
-**Nina in the real start screen (work in progress, uncommitted, 2026-10-17; where I left off):**
+**Nina in the real start screen: she shows (2026-10-17, commit 5c67232).** Her 15 files are served
+as `archives/update3.pak` (an update archive 1.21 asks for and lacks; BB_FILE_REPLACE), and the start
+screen's package (`Octane_StartScreen_pkg.igz`) has its 14 entries of Cortex's guest (KCNGP8: actor,
+animation, materials, textures) swapped for hers in the overlay. The earlier hang ("Required file \"\"
+for chunk octane_startscreen_pkg") was `iga.replace_string` keeping a padding zero (fixed).
+
+Compared with the Spooky season in the reference recording (intros.mp4, 2:35-3:00: teal background,
+pumpkins in both corners; Crash jumps in, sits on the logo ~8 s, a grappling hook comes down and pulls
+him away, Nina takes his place with the trophy):
+- **Nina overlaps Crash**: she plays the guest animation in his place while he is still there. The
+  guest script is Gasmoxia's (Cortex flies through, nobody leaves). The hook prop is not in 1.21 (not in
+  the start screen, its package or the Shooting set). Options: hide Crash (`Crash` entity, _canSpawn)
+  while she is on (she alone on the logo), or time her after him by editing the guest vsc.
+- **Background colour**: the start screen draws `octane_ui_custo_bg_color_1p` / `_pattern_*` models; the
+  colour should be in their material instances (`M101_Customization_background_materials,...`): a teal
+  value there (overlay) would give the season's colour. Not tried yet.
+- **Corner props (pumpkins etc.) and the hook**: not in 1.21 at all (the map's `MainMenu_Props` VFX and
+  the package hold only the current props). They need the season's own update (1.12) from a player's
+  dump (issue form *Grand Prix start-up intro*).
+
+Earlier notes (before it showed):
 - The guest entities match: the Shooting set's `GrandPrixGuest` is the real map's except its skin
   name (`CutsceneCharacter\CutsceneDriverNCX` vs `...KCNGP8_P1`). Both play the same animation
   names (`TitleScreen_Guest_In`/`_Loop`). The real map's guest script also spawns a VFX on
