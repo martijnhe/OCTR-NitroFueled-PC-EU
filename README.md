@@ -20,7 +20,7 @@ draws with Vulkan. No emulator, no game files included.
 | **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch, on and off at any time. Nothing is written to your save or your online items: turned off, you have exactly what you bought or won again. Turning it on asks first (the Pit Stop does not work while it is on) and backs up your saves to `user/savedata-backups`. | off by default; menu *Unlock everything* / `unlock_all=1` |
 | **Online (RyuNET)** | Online races, matchmaking, private rooms, the friends list and the Pit Stop on the RyuNET server, from [Ryu7w7's OCTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC) v0.5, also for the European edition (its own key patch, `patches/CrashTeamRacingOnlineEU.xml`). Needs your own nickname: the first start asks for it (*Play online?*), later the menu's *Online (RyuNET)* section; the game restarts to go online. The nickname belongs to this PC's `ryunet_online.key` (a second copy in `~/.config/CTR-NitroFueled-PC/` on Linux); *Link with Discord* in the menu keeps it across reinstalls and other PCs (*Recover with Discord*), with your online items and friends. | off by default; first-start question / menu / `online=1` and `online_name=` in `bbport.ini` |
 | **Discord** | Linux and Steam Deck too: your Discord status shows the game while you play online ("Playing online", your nickname, the time played), with *Join* and the chat's *+ > Invite to play*; accepting an invite makes the host your friend and the game joins their private room. *Link with Discord* / *Recover with Discord* in the menu keep your online nickname. Works with the Discord app (also Flatpak) on the same PC. On Windows: the launcher's Online tab. | with online; `discord_rpc=0` turns the status off, `discord_accept_requests=0` stops accepting "Ask to Join" |
-| **Grand Prix intros** | A Grand Prix season's start screen as it looked, with what 1.21 still has: *Spooky* (Nina Cortex on the logo, teal), *Rustland* (embers, the Game Awards statue, orange), *Gasmoxia* (Cortex and Nitros Oxide, green), and the background colours of *Spyro & Friends*, *Neon Circus* and *Winter Festival*. A guest takes Crash's place. Or pick parts by hand: the statue, each season's guests, the embers, any season's colour. The game files stay unchanged (a byte overlay built from your own `update2.pak`). | menu *Start screen > Grand Prix intro* / `startscreen_season=spooky` (or `rustland`, `gasmoxia`, ...) |
+| **Grand Prix intros** | A Grand Prix season's start screen as it looked, with what 1.21 still has: *Spooky* (Nina Cortex on the logo, teal), *Rustland* (embers, the Game Awards statue, orange), *Gasmoxia* (Cortex and Nitros Oxide, green), and the background colours of *Spyro & Friends*, *Neon Circus* and *Winter Festival*. A guest takes Crash's place. Or pick parts by hand: the statue, each season's guests, the embers, any season's colour. **Not complete**: each season's other parts and CTR TV episodes need that season's update files (see *[What is incomplete](#what-is-incomplete-and-which-update-files-would-complete-it)*). The game files stay unchanged (a byte overlay built from your own `update2.pak`). | menu *Start screen > Grand Prix intro* / `startscreen_season=spooky` (or `rustland`, `gasmoxia`, ...) |
 | **CTR TV** | The Grand Prix's CTR TV broadcast in place of the opening video: once (*Watch CTR TV*, the game restarts) or at every start. 1.21 has the February Grand Prix's episode; an older update's `CTRTV_*.bk2` in your own game folder's `archives` shows up as another episode. | menu *CTR TV* / `ctrtv_at_start=1`, `ctrtv_episode=` |
 | **From upstream v0.5** | Game volume (0-200%), the keyboard as a split-screen player, fixes for error codes 3 (memory) and 23 (GPU hang). | menu |
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
@@ -109,6 +109,36 @@ What this port has (from the final update, 1.21) and what is missing:
 
 Every season had its own start-up intro (see
 [Intro Comparison + All Grand Prix Intros](https://www.youtube.com/watch?v=SprMiaR1wDM)).
+
+### What is incomplete, and which update files would complete it
+
+The menu's *Grand Prix intro* rebuilds each season from what the final update (1.21) still holds,
+so **no season's intro is complete**, and only one season has its CTR TV episode. The rest is not
+in 1.21 at all: it was in that season's own update and was replaced by the next season's. A dump of
+**any one update in the range below** (from your own console) has that season's files; with them
+the port can add what is missing (the files stay on your PC: nothing is shared).
+
+| Grand Prix | Missing from its start-up intro in 1.21 | CTR TV episode | Update files that have it |
+|---|---|---|---|
+| Nitro Tour | everything: its guest, colour and props | ❌ | 1.04 to 1.07 |
+| Back N. Time | everything: its guest, colour and props | ❌ | 1.08 |
+| Spyro & Friends | Spyro on the logo, the gem piles in the corners (colour: ✅) | ❌ | 1.09 to 1.11 |
+| Spooky | the hook that pulls Crash away, the pumpkins in the corners (Nina and the teal: ✅) | ❌ | 1.12 or 1.13 |
+| Neon Circus | its guest, the balloons in the corners (colour: ✅) | ❌ | 1.14 or 1.15 |
+| Winter Festival | its guest, the cupcakes/presents in the corners (colour: ✅) | ❌ | 1.16 |
+| Rustland | its guest, the gears and tyres in the corners, the saw-ring logo (embers, statue, colour: ✅) | ❌ | 1.17 or 1.18 |
+| Gasmoxia | the crates in the corners, the teal CTR logo (guests and colour: ✅) | ✅ `CTRTV_FebGP.bk2` | 1.19 or 1.20 (1.21 for CTR TV) |
+
+Also missing for every season: **the order of the intro**. In the seasons, Crash jumps in first and
+the guest takes over later (Spooky: a hook pulls Crash away); 1.21's guest script never refers to
+Crash, so here the guest simply takes Crash's place from the start.
+
+- **CTR TV:** an episode needs nothing else: put the update's `CTRTV_*.bk2` in your own game folder's
+  `archives`, and it shows up in the menu (*CTR TV > Episode*).
+- **Start-up intros:** the season's start screen files (the start screen map, its package and the
+  guest's, props' and logo's files) need to be added by the port, as was done for Nina from the
+  hidden second start screen in 1.21. Report what your update has with the issue form below, and it
+  can be built in.
 
 If you dumped one of those updates from your own console, please open an issue with one of the
 forms (the update's version, the Grand Prix, and the names, sizes and checksums of its files):
