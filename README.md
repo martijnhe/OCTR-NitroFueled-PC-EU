@@ -2,6 +2,12 @@
   <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
 </p>
 
+<p align="center">
+  <a href="https://star-history.dera.page/martijnhe/OCTR-NitroFueled-PC-EU">
+    <img src="https://api.star-history.com/svg?repos=martijnhe/OCTR-NitroFueled-PC-EU&type=Date" alt="Star History Chart" width="600">
+  </a>
+</p>
+
 # CTR Nitro-Fueled PC: EU edition, online, ultrawide and unlock-all
 
 **Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows,
