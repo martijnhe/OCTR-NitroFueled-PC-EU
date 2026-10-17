@@ -495,6 +495,16 @@ def main():
                     env['BB_FILE_OVERLAY'] = str(overlay)
                     if archive.is_file():
                         env['BB_FILE_REPLACE'] = f'/app0/archives/update3.pak={archive}'
+            # button_icons: the button icons of another controller (scripts/buttons.py, another byte
+            # overlay over the update's fonts; the runtime takes overlay files split by ';').
+            for style in ('xbox', 'deck', 'switch'):
+                if ini_has(config, f'button_icons={style}'):
+                    overlay = Path(out) / 'buttons.ovl'
+                    done = subprocess.run([sys.executable, '-X', 'utf8', str(PORT / 'scripts/buttons.py'), '--game',
+                                           str(game), '--out', str(overlay), '--style', style],
+                                          stdin=subprocess.DEVNULL, creationflags=no_console())
+                    if done.returncode == 0:  # a failure leaves the PS4 icons
+                        env['BB_FILE_OVERLAY'] = ';'.join(filter(None, (env.get('BB_FILE_OVERLAY'), str(overlay))))
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)

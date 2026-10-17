@@ -696,6 +696,7 @@ void Menu() {
     }
     restart |= s.startscreen_color != s.startup_startscreen_color;
     restart |= s.startscreen_season != s.startup_startscreen_season;
+    restart |= s.button_icons != s.startup_button_icons;
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         restart |= s.game_patches[g] != s.startup_game_patches[g];
     }
@@ -920,6 +921,24 @@ void Menu() {
                                                  "Порты 2-4 входят как Player 2-4, пока подключён их геймпад "
                                                  "(клавиатура: всегда; у порта 1 тогда только геймпад)"));
         ImGui::PopTextWrapPos();
+        const int icons = std::clamp(s.button_icons.load(), 0, BbSettings::ButtonIconStyleCount - 1);
+        if (ImGui::BeginCombo(BbSettings::MenuText("Button icons", "Значки кнопок"),
+                              BbSettings::MenuText(BbSettings::ButtonIconLabels[icons],
+                                                   BbSettings::ButtonIconLabels[icons]))) {
+            for (int b = 0; b < BbSettings::ButtonIconStyleCount; ++b) {
+                if (ImGui::Selectable(BbSettings::MenuText(BbSettings::ButtonIconLabels[b],
+                                                           BbSettings::ButtonIconLabels[b]), b == icons)) {
+                    Store(s.button_icons, b, b != icons);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        Hint(BbSettings::MenuText(
+            "The buttons the game shows, in another controller's style: by position, so the bottom "
+            "button (confirm) is A on Xbox and the Steam Deck, B on Switch. Icons: Xelu's Free "
+            "Controller Prompts by Those Awesome Guys (thoseawesomeguys.com/prompts). Applies after "
+            "restarting the game; the game files are not changed.",
+            "Значки кнопок другого контроллера. Применяется после перезапуска."));
     }
 
     // SacredFire: the game's volume (runtime_audio.c reads it for every buffer).

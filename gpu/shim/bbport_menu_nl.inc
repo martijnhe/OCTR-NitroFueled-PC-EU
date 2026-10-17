@@ -148,3 +148,6 @@
 {"Spooky (Nina, teal)", "Spooky (Nina, turquoise)"},
 {"Rustland (embers, Game Awards statue, orange)", "Rustland (vonken, Game Awards-beeldje, oranje)"},
 {"Gasmoxia (Cortex, Nitros Oxide, green)", "Gasmoxia (Cortex, Nitros Oxide, groen)"},
+{"Button icons", "Knoppictogrammen"},
+{"PlayStation (the game's)", "PlayStation (die van het spel)"},
+{"The buttons the game shows, in another controller's style: by position, so the bottom button (confirm) is A on Xbox and the Steam Deck, B on Switch. Icons: Xelu's Free Controller Prompts by Those Awesome Guys (thoseawesomeguys.com/prompts). Applies after restarting the game; the game files are not changed.", "De knoppen die het spel toont, in de stijl van een andere controller: op positie, dus de onderste knop (bevestigen) is A op Xbox en de Steam Deck, B op Switch. Pictogrammen: Xelu's Free Controller Prompts van Those Awesome Guys (thoseawesomeguys.com/prompts). Werkt na het herstarten van het spel; de spelbestanden worden niet aangepast."},

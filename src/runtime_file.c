@@ -55,19 +55,16 @@ typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Li
  * the file (commit) in one rename when closed: a crash or a kill mid-save leaves the old file. */
 /* The game's full-screen videos (Bink .bk2 files in archives): the logos and intro at start, the credits and
  * the endings. */
-/* SacredFire: byte overlays (BB_FILE_OVERLAY, written by scripts/startscreen.py): bytes served in
- * place of a game file's own at given offsets, the file itself unchanged. The start screen's
- * hidden parts (the Game Awards statue, the Grand Prix guests) are turned on this way: changed
- * compressed pieces of archives/update2.pak. Format: "BBOVL1\n", then records of a u16 guest path
- * length, the guest path, a u64 offset, a u32 size and the bytes. */
+/* SacredFire: byte overlays (BB_FILE_OVERLAY, files split by ';', written by scripts/startscreen.py
+ * and scripts/buttons.py): bytes served in place of a game file's own at given offsets, the file
+ * itself unchanged. The start screen's hidden parts (the Game Awards statue, the Grand Prix guests)
+ * are turned on this way: changed compressed pieces of archives/update2.pak; and the button icons
+ * of another controller: archives/update.pak's fonts. Format: "BBOVL1\n", then records of a u16
+ * guest path length, the guest path, a u64 offset, a u32 size and the bytes. */
 typedef struct { char path[128]; uint64_t offset; uint32_t size; unsigned char *bytes; } Overlay;
 static Overlay *overlays; static size_t overlay_count;
-static void overlays_load(void) {
-    static int loaded;
-    if (loaded) return;
-    loaded=1;
-    const char *file=getenv("BB_FILE_OVERLAY");
-    if (!file || !*file) return;
+static void overlay_file_load(const char *file) {
+    const size_t before=overlay_count;
     FILE *f=fopen(file,"rb");
     if (!f) return;
     char magic[7];
@@ -83,7 +80,20 @@ static void overlays_load(void) {
         overlays=grown; overlays[overlay_count++]=o;
     }
     fclose(f);
-    if (overlay_count) printf("Runtime: %zu byte overlay(s) from %s\n",overlay_count,file);
+    if (overlay_count>before) printf("Runtime: %zu byte overlay(s) from %s\n",overlay_count-before,file);
+}
+static void overlays_load(void) {
+    static int loaded;
+    if (loaded) return;
+    loaded=1;
+    for (const char *p=getenv("BB_FILE_OVERLAY");p && *p;) {
+        const char *end=strchr(p,';');
+        if (!end) end=p+strlen(p);
+        char file[512];
+        snprintf(file,sizeof(file),"%.*s",(int)(end-p),p);
+        overlay_file_load(file);
+        p=*end ? end+1 : end;
+    }
 }
 static int overlay_for(const char *guest) {
     overlays_load();

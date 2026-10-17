@@ -204,6 +204,7 @@ def main():
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     for patch in (ROOT / 'patches').glob('*.xml'):
         shutil.copy2(patch, folder / 'patches')
+    shutil.copytree(ROOT / 'assets', folder / 'assets')  # button icons (scripts/buttons.py)
     steamgrid_dir = PORTABLE.parent / 'steamgrid'
     if steamgrid_dir.is_dir():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)

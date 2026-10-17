@@ -140,10 +140,11 @@ class Overlaid:
         return bytes(data)
 
 
-def replacement(archive, name, data):
+def replacement(archive, name, data, shrink=False):
     """[(archive offset, bytes)] that make `name` read as `data`: the changed pieces, recompressed
     with their own LZMA properties into their own room, and the entry's length when it changes.
-    The number of pieces must stay the same. Checked by reading it back through the overlay."""
+    The number of pieces must stay the same; shrink: pieces may take less than their room
+    (pack_piece). Checked by reading it back through the overlay."""
     original = archive.read(name)
     pieces = archive.pieces(name)
     if (len(data) + PIECE - 1) // PIECE != len(pieces):
@@ -157,7 +158,7 @@ def replacement(archive, name, data):
             if not packed:
                 raise ValueError(f'{name}: piece {k} is stored uncompressed')
             f.seek(position + 4)
-            stored = pack_piece(f.read(5), new, room, archive.sector)
+            stored = pack_piece(f.read(5), new, room, archive.sector, shrink)
             if stored is None:
                 raise ValueError(f'{name}: piece {k} does not compress to its own room ({room} bytes)')
             out.append((position, stored))
@@ -311,10 +312,11 @@ def unpack_piece(props, data, size):
     return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=lzma_filter(props)).decompress(data, max_length=size)[:size]
 
 
-def pack_piece(props, data, room=None, sector=0x800):
+def pack_piece(props, data, room=None, sector=0x800, shrink=False):
     """A compressed piece as stored (u32 size of the LZMA data, the properties, raw LZMA1), checked
     by a round trip. With room: one whose size padded to a sector is exactly room (the next piece
-    starts there), trying the compression levels in turn; None when none fits."""
+    starts there), trying the compression levels in turn; None when none fits. shrink: one that
+    fits in room, zero-filled to it (the block table, not the size, places the next piece)."""
     for preset in (9 | lzma.PRESET_EXTREME, 9, 7, 6, 5, 4, 3, 2, 1, 0):
         filters = lzma_filter(props)
         filters[0]['preset'] = preset
@@ -325,6 +327,8 @@ def pack_piece(props, data, room=None, sector=0x800):
         stored = struct.pack('<I', len(raw)) + props + raw
         if room is None or (len(stored) + sector - 1) // sector * sector == room:
             return stored
+        if shrink and len(stored) <= room:
+            return stored + bytes(room - len(stored))
     return None
 
 

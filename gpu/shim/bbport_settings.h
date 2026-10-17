@@ -56,6 +56,11 @@ inline constexpr const char* StartScreenColorLabels[] = {
     "The game's (blue)", "Spyro & Friends (purple)", "Spooky (teal)", "Neon Circus (red)",
     "Winter Festival (pink)", "Rustland (orange)", "Gasmoxia (green)"};
 inline constexpr int StartScreenColorCount = 7;
+/// SacredFire: the style of the game's button icons (bbport.ini button_icons, scripts/buttons.py;
+/// restart); 0 = the game's PS4 icons.
+inline constexpr const char* ButtonIconStyles[] = {"playstation", "xbox", "deck", "switch"};
+inline constexpr const char* ButtonIconLabels[] = {"PlayStation (the game's)", "Xbox", "Steam Deck", "Nintendo Switch"};
+inline constexpr int ButtonIconStyleCount = 4;
 /// SacredFire: a Grand Prix season's whole start screen (guest, colour, extras; startscreen.py
 /// SEASONS); same names as the colours, 0 = none.
 inline constexpr const char* StartScreenSeasonLabels[] = {
@@ -168,6 +173,8 @@ struct Values {
     int startup_startscreen_color = 0;
     std::atomic<int> startscreen_season{0}; ///< startscreen_season, index into StartScreenColors
     int startup_startscreen_season = 0;
+    std::atomic<int> button_icons{0}; ///< button_icons, index into ButtonIconStyles (restart)
+    int startup_button_icons = 0;
     std::atomic<bool> online{false};
     std::atomic<bool> online_asked{false};
     std::array<char, 32> online_name{};

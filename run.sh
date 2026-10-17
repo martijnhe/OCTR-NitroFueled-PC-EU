@@ -287,6 +287,13 @@ if (( ${#startscreen_args[@]} )); then
         fi
     fi
 fi
+# button_icons: the button icons of another controller (xbox, deck, switch; scripts/buttons.py,
+# another byte overlay over the update's fonts). playstation or none: the game's own.
+icons=$(sed -n 's/^button_icons=\([a-z]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
+if [[ -n $icons && $icons != playstation ]] &&
+    "$PYTHON" scripts/buttons.py --game "$game" --out "$out/buttons.ovl" --style "$icons"; then
+    export BB_FILE_OVERLAY=${BB_FILE_OVERLAY:+$BB_FILE_OVERLAY;}$out/buttons.ovl
+fi
 # Discord (online on, bbport.ini discord_rpc not 0): the presence, invites and "Ask to Join" while
 # the game runs (scripts/discord_presence.py, Linux); it follows this process, which becomes the game.
 if [[ ${BB_ONLINE:-0} == 1 ]] && ! grep -qx 'discord_rpc=0' "$BB_CONFIG" 2>/dev/null; then
