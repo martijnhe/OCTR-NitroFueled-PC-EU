@@ -195,11 +195,34 @@ def has_exe(exe):
     return False
 
 
+def drop_stale(path, name):
+    """Removes shortcuts named `name` whose executable no longer exists (a moved checkout)."""
+    path = Path(path)
+    if not path.exists():
+        return 0
+    top = parse(path.read_bytes())
+    shortcuts = top.get("shortcuts", {})
+    stale = [k for k, e in shortcuts.items() if isinstance(e, dict) and e.get("AppName") == name
+             and not Path(str(e.get("Exe", "")).strip('"')).exists()]
+    if not stale:
+        return 0
+    kept = [e for k, e in sorted(shortcuts.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0)
+            if k not in stale]
+    top["shortcuts"] = {str(i): e for i, e in enumerate(kept)}
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_bytes(serialize(top))
+    os.replace(temp, path)
+    return len(stale)
+
+
 def add_everywhere(exe, name, icon="", hero="", launch_options=""):
-    """The shortcut (and artwork) for every Steam user; returns (added, updated) counts."""
+    """The shortcut (and artwork) for every Steam user; returns (added, updated) counts. Older
+    shortcuts of the same name pointing at a program that no longer exists (a moved checkout) are
+    removed."""
     entry = make_entry(exe, str(Path(exe).parent), name=name, launch_options=launch_options, icon=icon)
     added = updated = 0
     for path in shortcut_files():
+        drop_stale(path, name)
         if add_shortcut(path, entry):
             added += 1
         else:
