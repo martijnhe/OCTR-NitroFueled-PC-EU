@@ -172,6 +172,37 @@ has no start-screen camera (`CCutsceneCamera_StartScreen` is only in the real ma
 lighting, a capture set for promotional shots. Nina could perhaps be shown by bringing its guest
 entity's data into the real map.
 
+**Nina in the real start screen (work in progress, uncommitted, 2026-10-17; where I left off):**
+- The guest entities match: the Shooting set's `GrandPrixGuest` is the real map's except its skin
+  name (`CutsceneCharacter\CutsceneDriverNCX` vs `...KCNGP8_P1`). Both play the same animation
+  names (`TitleScreen_Guest_In`/`_Loop`). The real map's guest script also spawns a VFX on
+  `Bone_Hat`, which may be missing on Nina.
+- Her files exist only in the Shooting pak: 18 of them (actor, `.hka`, 2 material instances,
+  14 textures; `NINA_FILES`/`NINA_TEXTURES` in `scripts/startscreen.py`).
+- Done:
+  - `iga.py`:
+    - The reader now takes piece positions from the block table (`Archive.blocks()`): the index
+      counts in the u8 table for files of up to 0x7f sectors, the u16 table up to 0x7fff, else
+      u32. Every file of update2, octane_startscreen and Shooting checks out.
+    - `iga.build()` writes a new archive. A rebuild of octane_startscreen.pak gives the same
+      header and the same contents.
+  - `startscreen.py --gp4 --archive-out PAK` changes the skin string, turns the guest on and
+    writes PAK.
+  - Runtime: `BB_FILE_REPLACE` (guest=host, `src/runtime_file.c` translate()).
+  - run.sh and run.py read `startscreen_gp4=1` from bbport.ini. It is left out of the in-game menu
+    (`gpu/shim/bbport_settings.h`) until Nina shows.
+- Test: the start screen loads (no hang) but Nina does not show. The file trace shows that 1.21
+  **never opens `archives/octane_startscreen.pak`** (the start screen comes from the update paks),
+  so the replaced archive is never read.
+- Next: the trace shows the game looks for **`/app0/archives/update3.pak` and
+  `update_hub3.pak` and finds neither**. Build an archive with only Nina's 18 files and serve it as
+  `update3.pak` (BB_FILE_REPLACE works for missing files: it is checked before the mounts). Then
+  test whether she shows.
+  - If not: the start-screen package (`packages/generated/maps/Octane/Octane_StartScreen/Octane_StartScreen_pkg.igz`)
+    may need her files listed, or the guest's vsc may need the Shooting set's version (no Bone_Hat VFX).
+- Then commit and push, rebuild the Deck image, and start #2 (season colours, corner props and
+  logos in other levels' packages).
+
 **Reference:** a recording of all start-up intros ("Intro Comparison + All Grand Prix Intros"):
 each season changed the background colour, corner props (gems, pumpkins, balloons, cupcakes,
 gears, crates), sometimes the logo (Rustland's saw ring, Gasmoxia's teal CTR) and the guest.

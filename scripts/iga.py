@@ -9,9 +9,9 @@ counts of large (u32), medium (u16) and small (u8) block entries, the name table
 and size; then the file name hashes (FNV-1a of the lower-case path, sorted), 16-byte file entries
 (offset low 32 bits; ordinal, whose low byte holds the offset's high bits; length; block: the
 compression in the top 4 bits, the first block entry below), the block tables (top bit: that
-32 KiB piece is compressed), the name table (per file an offset to the build path, then the game
-path). A file's pieces follow each other from its offset, each padded to a sector: compressed, a
-u32 size, the 5 LZMA properties and that many bytes of raw LZMA1; stored, the piece itself.
+32 KiB piece is compressed; Archive.blocks()), the name table (per file an offset to the build
+path, then the game path). A file's pieces lie at the sectors its block entries give: compressed,
+a u32 size, the 5 LZMA properties and that many bytes of raw LZMA1; stored, the piece itself.
 
 IGZ: "\\x01ZGI", version 10, then section entries (16 bytes from 0x10: two words, offset, size):
 the fixups (named blocks: TMET type names, TSTR strings, MTSZ type sizes, RVTB/RSTT/ROFS/RHND
@@ -64,34 +64,44 @@ class Archive:
             self.files[name.lower()] = (offset, length, block, name)
             self.entry_at[name.lower()] = 0x38 + 4 * count + 16 * i
 
-    def compressed(self, index):
-        if index < len(self.large):
-            return self.large[index] >> 31
-        index -= len(self.large)
-        if index < len(self.medium):
-            return self.medium[index] >> 15
-        return self.small[index - len(self.medium)] >> 7
+    def blocks(self, name):
+        """[(sector from the file's start, compressed)] per piece, then (the file's sector count,
+        False); None for a file stored whole. The block index counts in the table of the file's
+        size class: u8 entries for files of up to 0x7f sectors, u16 up to 0x7fff,
+        else u32 (the top bit: compressed)."""
+        _offset, length, block, _ = self.files[name.lower()]
+        if block == 0xffffffff or block >> 28 == 0xf:
+            return None
+        sectors = (length + self.sector - 1) // self.sector
+        table, top = ((self.small, 1 << 7) if sectors <= 0x7f else (self.medium, 1 << 15) if sectors <= 0x7fff
+                      else (self.large, 1 << 31))
+        first = block & 0xfffffff
+        out = [(e & ~top & 0xffffffff, bool(e & top))
+               for e in table[first:first + (length + PIECE - 1) // PIECE + 1]]
+        out[-1] = (out[-1][0], False)
+        return out
 
     def pieces(self, name, overlay=()):
-        """[(file position, stored size incl. header, room up to the next sector, compressed, size)]
-        Each piece starts where the one before it ends, padded to a sector: a changed piece must
-        keep its room (replacement())."""
-        offset, length, block, _ = self.files[name.lower()]
-        stored_whole = block == 0xffffffff or block >> 28 == 0xf
-        out, position = [], offset
+        """[(file position, stored size incl. header, room up to the next piece, compressed, size)]
+        from the block table: a changed piece must keep its room (replacement())."""
+        offset, length, _block, _ = self.files[name.lower()]
+        blocks = self.blocks(name)
+        out = []
         with open(self.path, 'rb') as raw_file:
             f = Overlaid(raw_file, overlay)
             for k in range((length + PIECE - 1) // PIECE):
                 size = min(PIECE, length - k * PIECE)
-                packed = not stored_whole and self.compressed((block & 0xfffffff) + k)
-                if packed:  # u32 size of the LZMA data, the 5 properties, the data
+                if blocks is None:
+                    out.append((offset + k * PIECE, size, size, False, size))
+                    continue
+                position = offset + blocks[k][0] * self.sector
+                room = (blocks[k + 1][0] - blocks[k][0]) * self.sector
+                if blocks[k][1]:  # u32 size of the LZMA data, the 5 properties, the data
                     f.seek(position)
                     stored = 9 + struct.unpack('<I', f.read(4))[0]
                 else:
                     stored = size
-                room = (stored + self.sector - 1) // self.sector * self.sector
-                out.append((position, stored, room, packed, size))
-                position += room
+                out.append((position, stored, room, blocks[k][1], size))
         return out
 
     def read(self, name, overlay=()):
@@ -158,6 +168,65 @@ def replacement(archive, name, data):
     if archive.read(name, out) != bytes(data):
         raise ValueError(f'{name}: the overlay does not read back as the new file')
     return out
+
+
+def build(out_path, sources):
+    """Writes a new archive of the files [(Archive, name)]: each file's sectors and block entries
+    copied as they are (Archive.blocks(): the entries count from the file's start), the block index
+    counting in the table of its size class."""
+    files = {}
+    for archive, name in sources:
+        files.setdefault(name.lower(), (archive, name))
+    order = sorted(files, key=lambda key: fnv1a(files[key][1]))
+    sector = 0x800
+    tables = {'small': [], 'medium': [], 'large': []}
+    plans = []
+    for key in order:
+        archive, name = files[key]
+        if archive.sector != sector:
+            raise ValueError(f'{archive.path}: sector size {archive.sector}')
+        offset, length, block, game_name = archive.files[key]
+        blocks = archive.blocks(name)
+        if blocks is None:
+            span, new_block = (length + sector - 1) // sector * sector, block
+        else:
+            sectors = (length + sector - 1) // sector
+            kind, top = (('small', 1 << 7) if sectors <= 0x7f else ('medium', 1 << 15) if sectors <= 0x7fff
+                         else ('large', 1 << 31))
+            new_block = (block & 0xf0000000) | len(tables[kind])
+            tables[kind] += [at | (top if packed else 0) for at, packed in blocks]
+            span = blocks[-1][0] * sector
+        plans.append((archive, game_name, offset, length, span, new_block))
+    count = len(plans)
+    large, medium, small = tables['large'], tables['medium'], tables['small']
+    toc = 20 * count + 4 * len(large) + 2 * len(medium) + len(small)
+    data_at = (0x38 + toc + sector - 1) // sector * sector
+    with open(out_path, 'wb') as w:
+        w.seek(data_at)
+        entries, names = [], []
+        for i, (archive, game_name, offset, length, span, new_block) in enumerate(plans):
+            at = w.tell()
+            with open(archive.path, 'rb') as f:
+                f.seek(offset)
+                data = f.read(span)
+            w.write(data + b'\0' * (span - len(data)))
+            entries.append(struct.pack('<4I', at & 0xffffffff, (i << 8) | (at >> 32), length, new_block))
+            names.append(f'temporary/octane/data/ps4/output/{game_name}'.encode('latin1') + b'\0'
+                         + game_name.encode('latin1') + b'\0' * 5)
+        names_at = w.tell()
+        table = bytearray(4 * count)
+        for i, name in enumerate(names):
+            struct.pack_into('<I', table, 4 * i, len(table))
+            table += name
+        w.write(table)
+        hashes = [fnv1a(files[key][1]) for key in order]
+        divider = 0xffffffff // count
+        slop = max(abs(i - h // divider) for i, h in enumerate(hashes))
+        w.seek(0)
+        w.write(b'IGA\x1a' + struct.pack('<9I', 13, toc, count, sector, divider, slop, len(large), len(medium),
+                                         len(small)) + struct.pack('<QII', names_at, len(table), 1))
+        w.write(struct.pack(f'<{count}I', *hashes) + b''.join(entries))
+        w.write(struct.pack(f'<{len(large)}I', *large) + struct.pack(f'<{len(medium)}H', *medium) + bytes(small))
 
 
 def replace_string(data, old, new):

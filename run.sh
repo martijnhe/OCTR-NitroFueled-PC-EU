@@ -263,15 +263,20 @@ elif [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_at_start=1' "$BB_CONFIG"; then
 fi
 # The start screen's hidden parts (scripts/startscreen.py, src/runtime_file.c byte overlay):
 # startscreen_tga (the Game Awards statue), startscreen_gp8 (the Gasmoxia guests), startscreen_gp7
-# (the Rustland embers), built from this game's own update2.pak.
-unset BB_FILE_OVERLAY
+# (the Rustland embers), startscreen_gp4 (the Spooky guest, Nina Cortex: with a start screen archive
+# holding her files, served in place of the game's), built from this game's own files.
+unset BB_FILE_OVERLAY BB_FILE_REPLACE
 startscreen_args=()
-for part in tga gp8 gp7; do
+for part in tga gp8 gp7 gp4; do
     if [[ -f $BB_CONFIG ]] && grep -qx "startscreen_$part=1" "$BB_CONFIG"; then startscreen_args+=("--$part"); fi
 done
+[[ " ${startscreen_args[*]} " == *' --gp4 '* ]] && startscreen_args+=(--archive-out "$out/octane_startscreen.pak")
 if (( ${#startscreen_args[@]} )); then
     if "$PYTHON" scripts/startscreen.py --game "$game" --out "$out/startscreen.ovl" "${startscreen_args[@]}"; then
         export BB_FILE_OVERLAY=$out/startscreen.ovl
+        if [[ -f $out/octane_startscreen.pak && " ${startscreen_args[*]} " == *' --gp4 '* ]]; then
+            export BB_FILE_REPLACE=/app0/archives/octane_startscreen.pak=$out/octane_startscreen.pak
+        fi
     fi
 fi
 # Discord (online on, bbport.ini discord_rpc not 0): the presence, invites and "Ask to Join" while

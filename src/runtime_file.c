@@ -207,6 +207,20 @@ static int translate(const char *guest,char *out,size_t size) {
     const size_t length=strlen(buffer), opening_length=sizeof(opening)-1;
     if (ctrtv && length>=opening_length && !strcasecmp(buffer+length-opening_length,opening))
         snprintf(buffer+length-opening_length,sizeof(buffer)-(length-opening_length),"/archives/%s.bk2",episode);
+    /* SacredFire: whole files served from elsewhere (BB_FILE_REPLACE, "guest=host" pairs split by
+     * ';', written by run.sh): the start screen's archive with the Spooky Grand Prix guest's files
+     * added (scripts/startscreen.py --gp4). */
+    const char *replace=getenv("BB_FILE_REPLACE");
+    for (const char *p=replace;p && *p;) {
+        const char *eq=strchr(p,'='), *end=strchr(p,';');
+        if (!end) end=p+strlen(p);
+        if (eq && eq<end && (size_t)(eq-p)==strlen(buffer) && !strncasecmp(p,buffer,eq-p)) {
+            if ((size_t)(end-eq-1)>=size) return ENAMETOOLONG;
+            memcpy(out,eq+1,end-eq-1); out[end-eq-1]=0;
+            return 0;
+        }
+        p=*end ? end+1 : end;
+    }
     pthread_mutex_lock(&lock);
     size_t best=0; const Mount *m=NULL;
     for (size_t i=0;i<mount_count;++i) {
