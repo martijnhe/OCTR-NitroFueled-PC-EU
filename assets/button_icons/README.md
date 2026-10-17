@@ -12,5 +12,8 @@ the game's PlayStation icons take in its fonts. It holds no pixels from the game
 in the fonts when the game starts (the in-game menu's **Button icons**, `button_icons=` in
 `bbport.ini`).
 
+`deck.png` (the menu's *Steam Deck / Steam Controller*) also fits the new Steam Controller, which has
+the Deck's buttons and layout (not the 2015 one, which has a trackpad where the right stick is).
+
 The icons go by the button's position, so the bottom face button (the game's confirm, ✕ on
 PlayStation) shows A on Xbox and the Steam Deck, and B on Switch.
