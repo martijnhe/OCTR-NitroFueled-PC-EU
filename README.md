@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
+  <img src="docs/images/wordmark.svg" alt="CTR Nitro-Fueled PC, unofficial fan project" width="480">
 </p>
 
 # CTR Nitro-Fueled PC: EU edition, online, ultrawide and unlock-all
@@ -513,6 +513,12 @@ temporal upscalers and motion vectors remain in `gpu/`, off; its libGnm hook cod
 a function table (the table was generated from Bloodborne's executable and is not distributed).
 
 ## Credits and licenses
+
+**Trademarks:** Crash Team Racing, Crash Team Racing Nitro-Fueled and Crash Bandicoot are trademarks
+of Activision Publishing, Inc.; PlayStation is a trademark of Sony Interactive Entertainment. Game
+screenshots © Activision Publishing, Inc. This is an unofficial, non-commercial fan project, not
+affiliated with, endorsed or sponsored by Activision, Beenox or Sony Interactive Entertainment. No
+game files are included or downloaded: you need your own copy of the game.
 
 SacredFire is licensed under the **GNU GPL v2 or later** ([LICENSE](LICENSE)): it contains code
 from bbport and shadPS4 (both GPL-2.0-or-later). Third-party components keep their licenses:

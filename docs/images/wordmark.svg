@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 170" role="img" aria-label="CTR Nitro-Fueled PC, unofficial fan project">
+  <!-- The project's own wordmark: plain lettering on a slanted banner, no game artwork -->
+  <path d="M38 18h670l-28 112H10z" fill="#0b3b91"/>
+  <path d="M28 8h670l-28 112H0z" fill="#fff"/>
+  <text x="54" y="88" font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-weight="900" font-style="italic"
+        font-size="54" fill="#1b5fd1" letter-spacing="1">CTR Nitro-Fueled PC</text>
+  <path d="M40 132h360l-8 30H32z" fill="#ff8a1d"/>
+  <text x="56" y="154" font-family="'Helvetica Neue', Arial, sans-serif" font-weight="700" font-size="20" fill="#2b1300">Unofficial fan project, EU edition</text>
+</svg>
