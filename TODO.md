@@ -160,6 +160,24 @@ Rustland). `scripts/startscreen.py` turns chosen ones on in the player's own upd
 writes the changed compressed pieces as a byte overlay the runtime serves (BB_FILE_OVERLAY,
 src/runtime_file.c); menu *Start screen*. `scripts/iga.py` reads the IGA archives and igz objects.
 
+**The "Shooting" set (2026-10-17):** `update2.pak` holds `archives/Octane_StartScreen_Shooting.pak`, a
+second start screen with its own guest (`GrandPrixGuest`, on: `CutsceneDriverNCX`, materials
+`GP4_Driver_NCX`: Nina Cortex, the Spooky season's guest), trophy, props and tint scripts. The game
+loads it when `loosedata/GuiSystemData.igz` names `Octane_StartScreen_Shooting/Octane_StartScreen_Shooting`
+in place of `Octane/Octane_StartScreen/Octane_StartScreen` (`scripts/startscreen.py --shooting`
+builds that overlay; the executable's own start-screen checks use
+`octane\Octane_StartScreen\Octane_StartScreen`, 8 lea references, and the reload one
+`Octane/Octane_StartScreen` at 0xff95af in EU 1.21). It loads but shows almost nothing: the set
+has no start-screen camera (`CCutsceneCamera_StartScreen` is only in the real map) and ShowRoom
+lighting, a capture set for promotional shots. Nina could perhaps be shown by bringing its guest
+entity's data into the real map.
+
+**Reference:** a recording of all start-up intros ("Intro Comparison + All Grand Prix Intros"):
+each season changed the background colour, corner props (gems, pumpkins, balloons, cupcakes,
+gears, crates), sometimes the logo (Rustland's saw ring, Gasmoxia's teal CTR) and the guest.
+1.21 only keeps the last two seasons' guests and Rustland's embers; colour, props and logo
+variants of those seasons are not in its start screen.
+
 **Open:** the first six seasons' start-screen guests are not in 1.21's map (only GP7 and GP8). They
 would need the older updates' start screens (1.04 to 1.16; the issue form *Grand Prix start-up
 intro*); the same switch may then work on those maps' guests. Also: what `Octane_StartScreen_Shooting`

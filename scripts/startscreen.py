@@ -34,6 +34,19 @@ CHOICES = {
 }
 
 
+GUI_DATA = 'loosedata/GuiSystemData.igz'
+START_MAP = 'Octane/Octane_StartScreen/Octane_StartScreen'
+SHOOTING_MAP = 'Octane_StartScreen_Shooting/Octane_StartScreen_Shooting'
+
+
+def shooting(game):
+    """[(file offset, bytes)] that make the game start in the second start screen set
+    (Octane_StartScreen_Shooting, in update2.pak's archives/Octane_StartScreen_Shooting.pak): its
+    map name in place of the start screen's in loosedata/GuiSystemData.igz."""
+    archive = iga.Archive(Path(game) / ARCHIVE)
+    return iga.replacement(archive, GUI_DATA, iga.replace_string(archive.read(GUI_DATA), START_MAP, SHOOTING_MAP))
+
+
 def overlay(game, chosen):
     """[(file offset, bytes)] that turn the chosen parts on."""
     archive = iga.Archive(Path(game) / ARCHIVE)
@@ -46,25 +59,7 @@ def overlay(game, chosen):
                 raise ValueError(f'the start screen has no entity {name} (another game version?)')
             at = objects.base + names[name] + CAN_SPAWN
             data[at] = (data[at] & ~1) | on
-    original = archive.read(MAP)
-    out = []
-    with open(archive.path, 'rb') as f:
-        for k, (position, stored, room, packed, size) in enumerate(archive.pieces(MAP)):
-            piece = bytes(data[k * iga.PIECE:k * iga.PIECE + size])
-            if piece == original[k * iga.PIECE:k * iga.PIECE + size]:
-                continue
-            if not packed:
-                out.append((position, piece))
-                continue
-            f.seek(position + 4)
-            props = f.read(5)
-            new = iga.pack_piece(props, piece)
-            if len(new) > room:
-                raise ValueError(f'the changed piece {k} does not fit ({len(new)} > {room} bytes)')
-            out.append((position, new))
-    # What the game will read: the changed map, decoded through the overlay.
-    if archive.read(MAP, out) != bytes(data):
-        raise ValueError('the overlay does not decode to the changed map')
+    out = iga.replacement(archive, MAP, bytes(data))
     return out
 
 
@@ -74,13 +69,15 @@ def main():
     p.add_argument('--out', required=True, type=Path)
     for choice in CHOICES:
         p.add_argument(f'--{choice}', action='store_true')
+    # Research only (TODO.md): the set loads, but has no start-screen camera (a capture set).
+    p.add_argument('--shooting', action='store_true', help='start in the second start screen set (research)')
     a = p.parse_args()
     chosen = [c for c in CHOICES if getattr(a, c)]
-    if not chosen:
+    if not chosen and not a.shooting:
         a.out.unlink(missing_ok=True)
         return 0
     try:
-        records = overlay(a.game, chosen)
+        records = (overlay(a.game, chosen) if chosen else []) + (shooting(a.game) if a.shooting else [])
     except (OSError, ValueError, KeyError) as e:
         print(f'Start screen: {e}; unchanged', file=sys.stderr)
         a.out.unlink(missing_ok=True)
