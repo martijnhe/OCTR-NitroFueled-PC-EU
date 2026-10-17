@@ -101,8 +101,9 @@ presence names the running title id.
   differ per region; the EU executable's own title id is sent at sign-in).
 - The Windows launcher (`launcher/windows/launcher.cpp`) still names CUSA13795 for the game
   folder, saves and languages.
-- `build.sh --test`: upstream's new code fails the tests' -Werror on format truncation
-  (`runtime_services.c`, `runtime_net_overrides.c`); the game build itself passes.
+- ~~`build.sh --test` failed on format truncation~~: done (2026-10-17): the test programs get the game
+  build's `-Wno-format-truncation -Wno-stringop-truncation`; test_file_mods.c stubs
+  runtime_cinematic_video.
 
 ## Discord on Linux and the Steam Deck
 
@@ -196,7 +197,11 @@ him away, Nina takes his place with the trophy):
 - **Crash makes room for the guest** (user's choice, for now): with a guest on (`startscreen_gp8` or
   `startscreen_gp4`) the `Crash` entity's _canSpawn bit is off, so the logo is free for Cortex /
   Nina. Wanted later: Crash first, then the guest, as in the seasons (needs the guest vsc timed after
-  Crash's, or the hook, which 1.21 lacks). Tested with Nina: she still comes in without Crash, on the
+  Crash's, or the hook, which 1.21 lacks). The 1.21 guest script (`Octane_StartScreen_GrandPrixGuest.igz`)
+  is self-contained: its own timers, `TitleScreen_Guest_In` then `_Loop`, VFX on `Bone_Hat`; it never
+  refers to Crash (the seasons' exchange with Crash was in their own animations/scripts). So "Crash
+  first" needs new script logic or a runtime watcher that hides Crash when the guest's In animation
+  starts. Tested with Nina: she still comes in without Crash, on the
   guest script's own timer (about a minute after the start screen shows); until then the logo has
   only the trophy.
 - **Background colour**: the visible full-screen background is the material
