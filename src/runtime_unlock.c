@@ -19,8 +19,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #ifdef _WIN32
+#include <direct.h>
 #include <windows.h>
-#define make_dir(path) mkdir(path)
+#define make_dir(path) _mkdir(path) /* MinGW's mkdir is a two-argument macro */
 #else
 #define make_dir(path) mkdir(path, 0755)
 #endif

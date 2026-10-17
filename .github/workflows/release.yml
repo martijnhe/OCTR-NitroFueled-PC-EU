@@ -68,7 +68,7 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           if ! bash build.sh > build.log 2>&1; then
-            log=$( (tail -40 build.log; [ -f out/gpu-build.log ] && grep -E 'error|Error' out/gpu-build.log | head -40) )
+            log=$( (grep -F 'error:' out/gpu-build.log 2>/dev/null | head -20; tail -15 build.log) )
             echo "::error title=Windows build failed::$(echo "$log" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
             exit 1
           fi
