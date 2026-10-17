@@ -478,6 +478,9 @@ def main():
             env.pop('BB_FILE_OVERLAY', None)
             env.pop('BB_FILE_REPLACE', None)
             parts = [f'--{p}' for p in ('tga', 'gp8', 'gp7', 'gp4') if ini_has(config, f'startscreen_{p}=1')]
+            for season in ('spyro', 'spooky', 'neon', 'winter', 'rustland', 'gasmoxia'):
+                if ini_has(config, f'startscreen_color={season}'):  # a Grand Prix season's background
+                    parts += ['--color', season]
             if parts:
                 overlay = Path(out) / 'startscreen.ovl'
                 archive = Path(out) / 'startscreen_gp4.pak'  # Nina's files (--gp4), served as update3.pak

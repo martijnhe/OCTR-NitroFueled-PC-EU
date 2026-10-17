@@ -212,6 +212,14 @@ him away, Nina takes his place with the trophy):
   same spots. (1.5, 2.0, 0.47) was lime, (1.0, 1.37, 0.71) too green; **(1.09, 1.14, 0.87) matches** the recording's teal.
   Other seasons' colours work the same way: measure the season's frame in intros.mp4, take the
   ratio, power 1/2.4.
+- **Season colours in the menu** (*Start screen colour*, bbport.ini `startscreen_color=`): Spyro &
+  Friends, Spooky, Neon Circus, Winter Festival, Rustland, Gasmoxia (`SEASON_TINTS`, measured in
+  intros.mp4 at 2:10, 2:45, 3:10, 3:35, 4:05, 4:50). Spooky is checked against the recording; the
+  red seasons need a big red boost from our blue (rougher; check them). Nina is in the menu too
+  (*Start screen: Spooky guest*) and brings Spooky's teal when no colour is chosen.
+- **The Game Awards statue belongs to Rustland**, not Spooky: in intros.mp4 the Spooky season (2:35-3:00,
+  Nina included) has the normal gold race cup; the silver Game Awards statue shows at 4:15 (Rustland,
+  after the Game Awards of December 2019).
 - **Tools**: `iga.strings()` and `iga.dependencies()` read an .igz file's string table (TSTR, strings
   2-aligned) and dependency list (TDEP: names and load paths, packed); `iga.replace_string(...,
   section=b'TDEP')` replaces a dependency. A texture swap needs the name in TSTR and the name and

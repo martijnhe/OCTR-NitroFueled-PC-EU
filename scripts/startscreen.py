@@ -90,6 +90,16 @@ _BACKGROUND = 'materialinstances/Octane/M101_Customization/M101_Customization_ba
 BACKGROUND_MATERIALS = (_BACKGROUND + 'octane_ui_custo_bg_color_event,008000.igz',
                         _BACKGROUND + 'octane_ui_custo_bg_color_1p,000800.igz')
 SPOOKY_TINT = (1.09, 1.14, 0.87, 1.0)
+# The other seasons the same way (intros.mp4: Spyro & Friends 2:10, Neon Circus 3:10, Winter Festival
+# 3:35, Rustland 4:05, Gasmoxia 4:50). Their red is far from our blue's, so they are rougher.
+SEASON_TINTS = {
+    'spyro': (1.69, 0.70, 1.03, 1.0),
+    'spooky': SPOOKY_TINT,
+    'neon': (2.28, 0.57, 0.35, 1.0),
+    'winter': (2.30, 0.92, 0.87, 1.0),
+    'rustland': (2.24, 1.01, 0.51, 1.0),
+    'gasmoxia': (1.74, 1.03, 0.45, 1.0),
+}
 
 
 def background(archive, tint):
@@ -137,9 +147,12 @@ def nina_archive(game, out, work):
         Path(work).unlink(missing_ok=True)
 
 
-def overlay(game, chosen):
-    """[(file offset, bytes)] that turn the chosen parts on."""
+def overlay(game, chosen, color=None):
+    """[(file offset, bytes)] that turn the chosen parts on, and the background in a season's
+    colour (with Nina: Spooky's unless another is chosen)."""
     archive = iga.Archive(Path(game) / ARCHIVE)
+    if 'gp4' in chosen and not color:
+        color = 'spooky'
     data = bytearray(archive.read(MAP))
     if 'gp4' in chosen:
         data = bytearray(iga.replace_string(bytes(data), GUEST_SKIN, NINA_SKIN))
@@ -158,7 +171,8 @@ def overlay(game, chosen):
         for old, new in NINA_PACKAGE:
             package = iga.replace_string(package, old, new)
         out += iga.replacement(archive, PACKAGE, package)
-        out += background(archive, SPOOKY_TINT)
+    if color:
+        out += background(archive, SEASON_TINTS[color])
     return out
 
 
@@ -171,15 +185,16 @@ def main():
     # Research only (TODO.md): the set loads, but has no start-screen camera (a capture set).
     p.add_argument('--shooting', action='store_true', help='start in the second start screen set (research)')
     p.add_argument('--archive-out', type=Path, help='with --gp4: the start screen archive to write')
+    p.add_argument('--color', choices=sorted(SEASON_TINTS), help="a Grand Prix season's background colour")
     a = p.parse_args()
     if a.gp4 and not a.archive_out:
         p.error('--gp4 needs --archive-out')
     chosen = [c for c in CHOICES if getattr(a, c)]
-    if not chosen and not a.shooting:
+    if not chosen and not a.shooting and not a.color:
         a.out.unlink(missing_ok=True)
         return 0
     try:
-        records = (overlay(a.game, chosen) if chosen else []) + (shooting(a.game) if a.shooting else [])
+        records = (overlay(a.game, chosen, a.color) if chosen or a.color else []) + (shooting(a.game) if a.shooting else [])
         if a.gp4:
             nina_archive(a.game, a.archive_out, a.archive_out.with_suffix('.tmp'))
     except (OSError, ValueError, KeyError) as e:
@@ -193,7 +208,8 @@ def main():
         path = ('/app0/' + ARCHIVE).encode()
         for offset, data in records:
             w.write(struct.pack('<H', len(path)) + path + struct.pack('<QI', offset, len(data)) + data)
-    print(f'Start screen: {", ".join(chosen)} ({sum(len(d) for _, d in records)} bytes over {ARCHIVE})')
+    print(f'Start screen: {", ".join(chosen + ([a.color] if a.color else []))} '
+          f'({sum(len(d) for _, d in records)} bytes over {ARCHIVE})')
     return 0
 
 

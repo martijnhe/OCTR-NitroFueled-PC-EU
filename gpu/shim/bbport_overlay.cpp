@@ -687,6 +687,7 @@ void Menu() {
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= s.effects[e] != s.startup_effects[e];
     }
+    restart |= s.startscreen_color != s.startup_startscreen_color;
     for (int g = 0; g < BbSettings::GamePatchCount; ++g) {
         restart |= s.game_patches[g] != s.startup_game_patches[g];
     }
@@ -760,10 +761,24 @@ void Menu() {
         if (std::strncmp(effect.key, "startscreen_", 12) != 0) continue;
         Checkbox(BbSettings::MenuText(effect.label, effect.label_ru), s.effects[e]);
     }
+    {
+        const int current = std::clamp(s.startscreen_color.load(), 0, BbSettings::StartScreenColorCount - 1);
+        if (ImGui::BeginCombo(BbSettings::MenuText("Start screen colour", "Цвет титульного экрана"),
+                              BbSettings::StartScreenColorLabels[current])) {
+            for (int c = 0; c < BbSettings::StartScreenColorCount; ++c) {
+                if (ImGui::Selectable(BbSettings::StartScreenColorLabels[c], c == current)) {
+                    Store(s.startscreen_color, c, c != current);
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
     Hint(BbSettings::MenuText(
         "Parts of the 1.21 start screen the game keeps hidden since the Grand Prix ended: the Game Awards "
-        "2019 statue (in place of the cup), the Gasmoxia guests and the Rustland embers. Applies after "
-        "restarting the game; the game files are not changed.",
+        "2019 statue (in place of the cup), the Gasmoxia guests, the Rustland embers and the Spooky guest "
+        "(Nina). A guest takes Crash's place on the logo. The colour is a Grand Prix season's background "
+        "(Nina brings Spooky's teal when the game's colour is chosen). Applies after restarting the game; "
+        "the game files are not changed.",
         "Скрытые части титульного экрана 1.21. Применяется после перезапуска."));
 
     // SacredFire online (RyuNET): the nickname and online play, applied by a restart.
