@@ -2,12 +2,6 @@
   <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
 </p>
 
-<p align="center">
-  <a href="https://star-history.dera.page/martijnhe/OCTR-NitroFueled-PC-EU">
-    <img src="https://api.star-history.com/svg?repos=martijnhe/OCTR-NitroFueled-PC-EU&type=Date" alt="Star History Chart" width="600">
-  </a>
-</p>
-
 # CTR Nitro-Fueled PC: EU edition, online, ultrawide and unlock-all
 
 **Crash Team Racing: Nitro-Fueled (PS4) running natively on Linux, the Steam Deck and Windows,
@@ -521,3 +515,9 @@ and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-
 names from shadPS4's aerolib list. Button icons for Xbox, Steam Deck and Switch: [Xelu's Free Controller & Key
 Prompts](https://thoseawesomeguys.com/prompts/) by Nicolae "Xelu" Berbece, [Those Awesome
 Guys](https://thoseawesomeguys.com/) (CC0, [assets/button_icons](assets/button_icons/README.md)).
+
+<p align="center">
+  <a href="https://star-history.dera.page/martijnhe/OCTR-NitroFueled-PC-EU">
+    <img src="https://api.star-history.com/svg?repos=martijnhe/OCTR-NitroFueled-PC-EU&type=Date" alt="Star History Chart" width="600">
+  </a>
+</p>
