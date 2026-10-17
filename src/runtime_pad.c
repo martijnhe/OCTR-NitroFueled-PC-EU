@@ -186,6 +186,7 @@ static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,
 #define PAD_CAL_QUIET_SAMPLES 8
 #define PAD_CAL_TIMEOUT_US 3000000u    /* after this, an all-zero reading is accepted as the neutral */
 #define PAD_CAL_BIAS 8192              /* |neutral| past this: a biased neutral and a reduced travel */
+#define PAD_CAL_EXTREME 30000          /* |value| past this: the end of the range, never a resting stick */
 #define PAD_CAL_REFINE 90              /* % of the base travel a push must reach to count as the full scale */
 static int cal_enabled=-1, pad_deadzone=-1, pad_deadzone_outer=-1, cal_manual, cal_manual_center[4];
 static void cal_load(void) {
@@ -245,7 +246,9 @@ static void cal_sample(PadCal *c,const int16_t raw[4]) {
         }
         return;
     }
-    int allzero=1; for (int i=0;i<4;++i) if (raw[i]) allzero=0;
+    /* No report yet: SDL's zeros, or (an 8BitDo Ultimate 2 under Linux) every axis at the end of
+     * its range. Neither is taken as a neutral; after the timeout the neutral is 0. */
+    int allzero=1; for (int i=0;i<4;++i) if (raw[i] && abs(raw[i])<PAD_CAL_EXTREME) allzero=0;
     int quiet=1; for (int i=0;i<4;++i) if (c->started && abs(raw[i]-c->prev[i])>PAD_CAL_QUIET) quiet=0;
     const uint64_t now=now_us();
     if (!c->started) { c->started=1; c->since=now; }
@@ -255,7 +258,7 @@ static void cal_sample(PadCal *c,const int16_t raw[4]) {
             /* Only the clone pattern (all four axes biased) is taken as the neutral: a genuine pad
              * opened with a stick held steady would otherwise keep that push as its neutral. */
             int biased=0;
-            for (int i=0;i<4;++i) biased+=abs(raw[i])>=PAD_CAL_BIAS;
+            for (int i=0;i<4;++i) biased+=abs(raw[i])>=PAD_CAL_BIAS && abs(raw[i])<PAD_CAL_EXTREME;
             for (int i=0;i<4;++i) c->center[i]=biased==4 ? raw[i] : 0;
             c->have_center=1;
             if (biased==4)
