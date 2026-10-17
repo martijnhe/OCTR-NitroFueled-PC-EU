@@ -93,11 +93,11 @@ SPOOKY_TINT = (1.09, 1.14, 0.87, 1.0)
 # The other seasons the same way (intros.mp4: Spyro & Friends 2:10, Neon Circus 3:10, Winter Festival
 # 3:35, Rustland 4:05, Gasmoxia 4:50). Their red is far from our blue's, so they are rougher.
 SEASON_TINTS = {
-    'spyro': (1.69, 0.70, 1.03, 1.0),
+    'spyro': (1.88, 0.76, 1.05, 1.0),
     'spooky': SPOOKY_TINT,
     'neon': (2.54, 0.63, 0.38, 1.0),
-    'winter': (2.30, 0.92, 0.87, 1.0),
-    'rustland': (2.24, 1.01, 0.51, 1.0),
+    'winter': (2.55, 0.93, 0.88, 1.0),
+    'rustland': (2.47, 1.02, 0.54, 1.0),
     'gasmoxia': (1.92, 1.06, 0.44, 1.0),
 }
 
