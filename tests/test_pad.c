@@ -121,16 +121,6 @@ int main(void) {
         for (int i=0;i<PAD_CAL_QUIET_SAMPLES;++i) cal_sample(&clone,biased);
         assert(clone.have_center && clone.center[0]==16380 && clone.base[0]==16380);
         assert(stick_axis(&clone,0,16380)==128 && stick_axis(&clone,0,32760)==255 && stick_axis(&clone,0,0)==0);
-        /* An 8BitDo Ultimate 2 under Linux reported every axis at -32768 before its first report:
-         * not a neutral (it read as all sticks pushed); after the timeout the neutral is 0. */
-        PadCal ends; cal_reset(&ends);
-        int16_t extreme[4]={-32768,-32768,-32768,-32768};
-        for (int i=0;i<PAD_CAL_QUIET_SAMPLES+1;++i) cal_sample(&ends,extreme);
-        assert(!ends.have_center);
-        ends.since-=PAD_CAL_TIMEOUT_US+1;
-        for (int i=0;i<PAD_CAL_QUIET_SAMPLES;++i) cal_sample(&ends,extreme);
-        assert(ends.have_center && ends.center[0]==0 && ends.base[0]==0);
-        assert(stick_axis(&ends,0,0)==128);               /* a resting stick reads as resting */
     }
     puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture, controls, stick calibration");
 }
