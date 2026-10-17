@@ -41,6 +41,7 @@ inline constexpr Effect Effects[] = {
     {"startscreen_tga", "Start screen: Game Awards statue (as in 1.18)", "Титульный экран: статуэтка Game Awards", false},
     {"startscreen_gp8", "Start screen: Gasmoxia guests (Cortex, Nitros Oxide)", "Титульный экран: гости Gasmoxia", false},
     {"startscreen_gp7", "Start screen: Rustland embers", "Титульный экран: искры Rustland", false},
+    {"startscreen_gp4", "Start screen: Spooky guest (Nina Cortex)", "Титульный экран: гость Spooky (Нина Кортекс)", false},
     {"ctrtv_at_start", "CTR TV at every start (the February Grand Prix broadcast)", "CTR TV при каждом запуске", false},
     {"ultrawide_frontend", "Ultrawide: title and customization screens fill the width", "Ультраширокий: титульный экран и настройка карта на всю ширину", true},
     {"unlock_all", "Unlock everything (all Pit Stop items, characters, karts)", "Открыть всё (предметы Pit Stop, персонажи, карты)", false},
@@ -49,6 +50,17 @@ inline constexpr Effect Effects[] = {
     {"debug_menu", "Debug menu (requires font files)", "Debug menu (нужны файлы шрифтов)", false},
 };
 inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
+/// SacredFire: start screen background colours (scripts/startscreen.py SEASON_TINTS); 0 = the game's.
+inline constexpr const char* StartScreenColors[] = {"", "spyro", "spooky", "neon", "winter", "rustland", "gasmoxia"};
+inline constexpr const char* StartScreenColorLabels[] = {
+    "The game's (blue)", "Spyro & Friends (purple)", "Spooky (teal)", "Neon Circus (red)",
+    "Winter Festival (pink)", "Rustland (orange)", "Gasmoxia (green)"};
+inline constexpr int StartScreenColorCount = 7;
+/// SacredFire: a Grand Prix season's whole start screen (guest, colour, extras; startscreen.py
+/// SEASONS); same names as the colours, 0 = none.
+inline constexpr const char* StartScreenSeasonLabels[] = {
+    "None (choose parts below)", "Spyro & Friends (purple)", "Spooky (Nina, teal)", "Neon Circus (red)",
+    "Winter Festival (pink)", "Rustland (embers, Game Awards statue, orange)", "Gasmoxia (Cortex, Nitros Oxide, green)"};
 /// SacredFire: game patches (patches/CrashTeamRacing.xml), selected by these bbport.ini keys and
 /// compiled into the executable at start by scripts/patches.py; a restart applies a change.
 /// The patches are community work from illusionyy/PS-Game-Patch
@@ -150,6 +162,12 @@ struct Values {
     std::atomic<bool> ctrtv_next{false};
     /// The CTR TV episode (archives/<name>.bk2; empty: CTRTV_FebGP). Menu thread only.
     std::array<char, 64> ctrtv_episode{};
+    /// SacredFire: the start screen's background colour, a Grand Prix season's (bbport.ini
+    /// startscreen_color, scripts/startscreen.py --color; restart): index into StartScreenColors.
+    std::atomic<int> startscreen_color{0};
+    int startup_startscreen_color = 0;
+    std::atomic<int> startscreen_season{0}; ///< startscreen_season, index into StartScreenColors
+    int startup_startscreen_season = 0;
     std::atomic<bool> online{false};
     std::atomic<bool> online_asked{false};
     std::array<char, 32> online_name{};

@@ -20,7 +20,7 @@ draws with Vulkan. No emulator, no game files included.
 | **Unlock everything** | Every character, kart, wheel, paint, decal and sticker, including all Pit Stop items, through the game's own unlock-all switch, on and off at any time. Nothing is written to your save or your online items: turned off, you have exactly what you bought or won again. Turning it on asks first (the Pit Stop does not work while it is on) and backs up your saves to `user/savedata-backups`. | off by default; menu *Unlock everything* / `unlock_all=1` |
 | **Online (RyuNET)** | Online races, matchmaking, private rooms, the friends list and the Pit Stop on the RyuNET server, from [Ryu7w7's OCTR-NitroFueled-PC](https://github.com/Ryu7w7/OCTR-NitroFueled-PC) v0.5, also for the European edition (its own key patch, `patches/CrashTeamRacingOnlineEU.xml`). Needs your own nickname: the first start asks for it (*Play online?*), later the menu's *Online (RyuNET)* section; the game restarts to go online. The nickname belongs to this PC's `ryunet_online.key` (a second copy in `~/.config/CTR-NitroFueled-PC/` on Linux); *Link with Discord* in the menu keeps it across reinstalls and other PCs (*Recover with Discord*), with your online items and friends. | off by default; first-start question / menu / `online=1` and `online_name=` in `bbport.ini` |
 | **Discord** | Linux and Steam Deck too: your Discord status shows the game while you play online ("Playing online", your nickname, the time played), with *Join* and the chat's *+ > Invite to play*; accepting an invite makes the host your friend and the game joins their private room. *Link with Discord* / *Recover with Discord* in the menu keep your online nickname. Works with the Discord app (also Flatpak) on the same PC. On Windows: the launcher's Online tab. | with online; `discord_rpc=0` turns the status off, `discord_accept_requests=0` stops accepting "Ask to Join" |
-| **Start screen extras** | The 1.21 start screen's hidden parts, back on: the Game Awards 2019 statue in Crash's hand (as in 1.18), the Gasmoxia Grand Prix guests (Cortex, Nitros Oxide) and the Rustland embers. Each a switch; the game files stay unchanged (a byte overlay built from your own `update2.pak`). | menu *Start screen* / `startscreen_tga=1`, `startscreen_gp8=1`, `startscreen_gp7=1` |
+| **Grand Prix intros** | A Grand Prix season's start screen as it looked, with what 1.21 still has: *Spooky* (Nina Cortex on the logo, teal), *Rustland* (embers, the Game Awards statue, orange), *Gasmoxia* (Cortex and Nitros Oxide, green), and the background colours of *Spyro & Friends*, *Neon Circus* and *Winter Festival*. A guest takes Crash's place. Or pick parts by hand: the statue, each season's guests, the embers, any season's colour. The game files stay unchanged (a byte overlay built from your own `update2.pak`). | menu *Start screen > Grand Prix intro* / `startscreen_season=spooky` (or `rustland`, `gasmoxia`, ...) |
 | **CTR TV** | The Grand Prix's CTR TV broadcast in place of the opening video: once (*Watch CTR TV*, the game restarts) or at every start. 1.21 has the February Grand Prix's episode; an older update's `CTRTV_*.bk2` in your own game folder's `archives` shows up as another episode. | menu *CTR TV* / `ctrtv_at_start=1`, `ctrtv_episode=` |
 | **From upstream v0.5** | Game volume (0-200%), the keyboard as a split-screen player, fixes for error codes 3 (memory) and 23 (GPU hang). | menu |
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
@@ -92,12 +92,12 @@ What this port has (from the final update, 1.21) and what is missing:
 |---|---|---|---|---|
 | Nitro Tour | July 3, 2019 | 1.04 | ❌ missing | ❌ missing |
 | Back N. Time | August 2, 2019 | 1.08 | ❌ missing | ❌ missing |
-| Spyro & Friends | August 30, 2019 | 1.09 | ❌ missing | ❌ missing |
-| Spooky | October 3, 2019 | 1.12 | ❌ missing | ❌ missing |
-| Neon Circus | November 8, 2019 | 1.14 | ❌ missing | ❌ missing |
-| Winter Festival | December 12, 2019 | 1.16 | ❌ missing | ❌ missing |
-| Rustland | January 16, 2020 | 1.17 | ✅ its embers (menu *Start screen*) | ❌ missing |
-| Gasmoxia | February 20, 2020 | 1.19 | ✅ Cortex and Nitros Oxide (menu *Start screen*) | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
+| Spyro & Friends | August 30, 2019 | 1.09 | ◐ its purple only (menu *Grand Prix intro*; Spyro not in 1.21) | ❌ missing |
+| Spooky | October 3, 2019 | 1.12 | ✅ Nina Cortex and the teal (menu *Grand Prix intro*); no pumpkins or hook | ❌ missing |
+| Neon Circus | November 8, 2019 | 1.14 | ◐ its red only (menu *Grand Prix intro*) | ❌ missing |
+| Winter Festival | December 12, 2019 | 1.16 | ◐ its pink only (menu *Grand Prix intro*) | ❌ missing |
+| Rustland | January 16, 2020 | 1.17 | ✅ embers, the Game Awards statue, orange (menu *Grand Prix intro*) | ❌ missing |
+| Gasmoxia | February 20, 2020 | 1.19 | ✅ Cortex and Nitros Oxide, green (menu *Grand Prix intro*) | ✅ `CTRTV_FebGP.bk2` (menu *CTR TV*) |
 
 - **We have:** Gasmoxia's CTR TV episode, Gasmoxia's start-screen guests (Cortex flying through,
   Nitros Oxide) and Rustland's embers, and the Game Awards 2019 statue Crash held from 1.18: the 1.21

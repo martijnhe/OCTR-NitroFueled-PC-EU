@@ -66,7 +66,8 @@ export BB_GAME_DIR=$game  # the in-game menu lists the CTR TV episodes in its ar
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
-read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game")
+read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
+title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}  # game_check.py had no answer
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
@@ -270,12 +271,19 @@ startscreen_args=()
 for part in tga gp8 gp7 gp4; do
     if [[ -f $BB_CONFIG ]] && grep -qx "startscreen_$part=1" "$BB_CONFIG"; then startscreen_args+=("--$part"); fi
 done
-[[ " ${startscreen_args[*]} " == *' --gp4 '* ]] && startscreen_args+=(--archive-out "$out/octane_startscreen.pak")
+# startscreen_season: a Grand Prix season's start screen (its guest, colour and extras together).
+season=$(sed -n 's/^startscreen_season=\([a-z]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
+[[ -n $season ]] && startscreen_args+=(--season "$season")
+# Nina's archive (written only when she is chosen, directly or by the season).
+(( ${#startscreen_args[@]} )) && startscreen_args+=(--archive-out "$out/startscreen_gp4.pak")
+# startscreen_color: a Grand Prix season's background colour (scripts/startscreen.py SEASON_TINTS).
+color=$(sed -n 's/^startscreen_color=\([a-z]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
+[[ -n $color ]] && startscreen_args+=(--color "$color")
 if (( ${#startscreen_args[@]} )); then
     if "$PYTHON" scripts/startscreen.py --game "$game" --out "$out/startscreen.ovl" "${startscreen_args[@]}"; then
         export BB_FILE_OVERLAY=$out/startscreen.ovl
-        if [[ -f $out/octane_startscreen.pak && " ${startscreen_args[*]} " == *' --gp4 '* ]]; then
-            export BB_FILE_REPLACE=/app0/archives/octane_startscreen.pak=$out/octane_startscreen.pak
+        if [[ -f $out/startscreen_gp4.pak ]]; then
+            export BB_FILE_REPLACE=/app0/archives/update3.pak=$out/startscreen_gp4.pak
         fi
     fi
 fi
