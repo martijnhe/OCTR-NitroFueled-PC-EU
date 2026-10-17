@@ -282,6 +282,10 @@ FRONTEND_FOV_SIGNATURE=bytes.fromhex('c4c17a1085d0000000c5fa5905')
 FRONTEND_FOV_AFTER=bytes.fromhex('c5fa1195f0feffffc5fa11433c')
 
 
+FRONTEND_POSITION_LOAD=bytes.fromhex('c4c178109db0010000')  # vmovups xmm3,[r13+0x1b0]
+FRONTEND_POSITION_STORE=bytes.fromhex('c5f8119ba0000000')   # vmovups [rbx+0xa0],xmm3
+
+
 def frontend_state(out):
     """(instruction, CPreRenderUpdatePass vtable, slot) image offsets for the field of view of the
     title and customization screens in ultrawide (src/runtime_frontend.c), or None. The slot is a
@@ -299,7 +303,14 @@ def frontend_state(out):
     vtable=registered_vtable(image,rel,'CPreRenderUpdatePass')
     slot=(len(image)+15)&~15
     if vtable is None or slot+4>(len(image)+0xfff)&~0xfff: return None
-    return sites[0],vtable,slot
+    # The same function stores the camera's world matrix; its last row (the position) is stored by
+    # vmovups [rbx+0xa0],xmm3 after loading it from the camera setup (vmovups xmm3,[r13+0x1b0]).
+    # The runtime lowers the camera there on the title screen (the logo then clears "Press X").
+    near=image[sites[0]:sites[0]+0x100]
+    load=near.find(FRONTEND_POSITION_LOAD)
+    store=near.find(FRONTEND_POSITION_STORE,load) if load>=0 else -1
+    position=sites[0]+store if store>=0 and store-load<0x30 else None
+    return (sites[0],vtable,slot)+((position,) if position is not None else ())
 
 
 def cutscene_state(out):

@@ -56,7 +56,13 @@ their ultrawide layout. On the title screen the 3D logo grows by about 1.34 and 
 ("Nitro-Fueled") now overlaps the 2D "Press X to begin". Narrowing less does not help: the backdrop
 covers only 75.5% of the ultrawide width (16:9 is 74.4%).
 
-**Wanted:** the logo a little higher on the title screen only (or the text lower).
+**Done (2026-10-17):** the logo sits higher on the title screen in ultrawide, clear of "Press X to
+begin": src/runtime_frontend.c turns the store of the camera's position (`vmovups [rbx+0xa0],xmm3` in
+the camera update, 0xaf7326 in EU 1.21; patches.py --print-frontend's fourth value) into a jump to a
+page next to the image that adds an offset vector first: zero, except on the title screen in
+ultrawide, -12 along matrix row 0x90. Rows found by trying each on the title screen: 0x70 forward
+(zoom), 0x80 sideways, 0x90 vertical (pointing down on screen). Crash's ears touch the top a little
+more. (Wanted was: the logo a little higher on the title screen only.)
 
 **How the field of view works (found 2026-10-16 with a hardware watchpoint on the render camera
 and Ghidra):** the main render pass (`CPreRenderUpdatePass`, `_cameraName` "main",
