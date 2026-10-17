@@ -9,7 +9,7 @@ with the European edition, online play, Discord, ultrawide monitors and everythi
 
 <p align="center">
   <a href="https://martijnhe.github.io/OCTR-NitroFueled-PC-EU/"><b>Website</b></a> ·
-  <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases/latest"><b>Download</b> (Steam Deck / Linux AppImage, Windows ZIP)</a>
+  <a href="https://github.com/martijnhe/OCTR-NitroFueled-PC-EU/releases"><b>Download</b> (Steam Deck / Linux AppImage, Windows ZIP)</a>
 </p>
 
 <p align="center">
