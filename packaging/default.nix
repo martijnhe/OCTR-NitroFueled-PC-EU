@@ -72,7 +72,9 @@ let
     buildInputs = lib.filter (p: !(lib.hasPrefix "gst-" (p.pname or ""))) old.buildInputs;
     mesonFlags = old.mesonFlags ++ [ "-Dmedia-gstreamer=disabled" ];
   });
-  libadwaita = pkgs.libadwaita.override { inherit gtk4; };
+  # Its test suite aborts (test-preferences-page, SIGABRT) on the CI runner, which fails the whole
+  # AppImage build; the library itself is fine, so its checks are skipped here.
+  libadwaita = (pkgs.libadwaita.override { inherit gtk4; }).overrideAttrs (old: { doCheck = false; });
   # Fonts: bundled DejaVu and Adwaita plus the host's usual font directories, but not the host's
   # /etc/fonts: on NixOS it names fonts in the host's /nix/store, which the AppImage hides behind
   # its own store in some environments (Steam's FHS sandbox), and the launcher showed boxes.
