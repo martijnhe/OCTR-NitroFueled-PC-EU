@@ -68,6 +68,11 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.show_fps = i != 0;
     } else if (key == "fps_limit") {
         v.fps_limit = std::clamp(i, 0, 1000);
+    } else if (key == "framegen") {
+        // off | fsr3 (fsr, on and 1 from test builds). Anything else: off.
+        v.framegen = (value == "fsr3" || value == "fsr" || value == "on" || value == "1")
+                         ? FrameGenFsr3
+                         : FrameGenOff;
     } else if (key == "async_pipelines") {
         v.async_pipelines = i != 0;
     } else if (key == "msaa") {
@@ -156,6 +161,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.output_res = r;
             }
         }
+    } else if (key == "aspect_ratio") {
+        if (value == "21:9" || value == "21x9") v.aspect_ratio = 1;
+        else if (value == "32:9" || value == "32x9") v.aspect_ratio = 2;
+        else v.aspect_ratio = 0;
     } else {
         for (int e = 0; e < EffectCount; ++e) {
             if (key == Effects[e].key) {
@@ -266,6 +275,7 @@ void Load() {
         }
     }
     const std::pair<const char*, const char*> env_keys[] = {
+        {"BB_FRAMEGEN", "framegen"},
         {"BB_FSR_SHARPNESS", "sharpness"},        {"BB_JITTER", "jitter"},
         {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
@@ -321,12 +331,14 @@ void Load() {
     v.startup_dlss_quality = v.dlss_quality;
     v.startup_dlss_output = v.dlss_output;
     v.startup_output_res = v.output_res;
+    v.startup_aspect_ratio = v.aspect_ratio;
     v.startup_live_resolution = v.live_resolution;
 }
 
 bool RenderSizeNeedsRestart() {
     const auto& v = Get();
     // As scripts/patches.py render_plan: a DLSS quality mode decides, else render_res.
+    // v0.3: the ultrawide aspect also needs a restart (archives + executable).
     const auto key = [](int temporal, int quality, int output, int render_res) {
         return temporal == TemporalDlss && quality > 0 ? 100 + quality * 2 + output : render_res;
     };
@@ -340,7 +352,8 @@ bool RenderSizeNeedsRestart() {
     }
     return key(v.temporal, v.dlss_quality, v.dlss_output, v.render_res) !=
            key(v.startup_temporal, v.startup_dlss_quality, v.startup_dlss_output,
-               v.startup_render_res);
+               v.startup_render_res) ||
+           v.aspect_ratio != v.startup_aspect_ratio;
 }
 
 bool UltrawideAvailable() {
@@ -426,6 +439,7 @@ void Save() {
     put("debug_view", std::to_string(v.debug_view.load()));
     put("show_fps", flag(v.show_fps));
     put("fps_limit", std::to_string(v.fps_limit.load()));
+    put("framegen", FrameGenNames[std::clamp(v.framegen.load(), 0, FrameGenCount - 1)]);
     put("async_pipelines", flag(v.async_pipelines));
     put("msaa", flag(v.msaa));
     put("fullscreen", flag(v.fullscreen));
@@ -465,6 +479,10 @@ void Save() {
     put("fsr3_sharpness", fixed(v.fsr3_sharpness, 2));
     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                           std::to_string(OutputHeights[v.output_res]));
+    {
+        const int aspect = std::clamp(v.aspect_ratio.load(), 0, 2);
+        put("aspect_ratio", aspect == 1 ? "21:9" : aspect == 2 ? "32:9" : "16:9");
+    }
     // Read by run.sh at start.
     put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
     if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {

@@ -124,6 +124,10 @@ def third_party(dlls, python=None, dlss=False):
         lines += DLSS_THIRD_PARTY
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
               'https://github.com/FireBurn/FSR-Vulkan).', '']
+    lines += ['fsr4_shaders\\ holds the FSR 4 v07 INT8 model and shader bundle built by the',
+              'Q2RTX project from AMD-published FSR 4 source (MIT, Copyright (c) 2025 Advanced',
+              'Micro Devices, Inc.; see fsr4_shaders\\LICENSE-FSR4-v07.txt), run through',
+              'https://github.com/FireBurn/FSR-Vulkan (MIT).', '']
     lines += ['The launcher (CTR-NitroFueled-PC.exe) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
     lines += ['The game files are not included and are not covered by any of these licenses.',
@@ -200,6 +204,13 @@ def main():
     shutil.copy2(ROOT / 'run.py', folder)
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
+    # v0.3 native ultrawide data (manifests, baseline, shaders): needed by run.py.
+    for data in list((ROOT / 'scripts').glob('ultrawide_*_data')):
+        if data.is_dir():
+            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True)
+    # v0.4 FSR4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
+    if (ROOT / 'fsr4_shaders').is_dir():
+        shutil.copytree(ROOT / 'fsr4_shaders', folder / 'fsr4_shaders', dirs_exist_ok=True)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     for patch in (ROOT / 'patches').glob('*.xml'):
@@ -208,6 +219,8 @@ def main():
     steamgrid_dir = PORTABLE.parent / 'steamgrid'
     if steamgrid_dir.is_dir():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
+    for xml in (ROOT / 'patches').glob('*.xml'):
+        shutil.copy2(xml, folder / 'patches')
     if (ROOT / 'out' / 'aerolib.inl').is_file():
         shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in

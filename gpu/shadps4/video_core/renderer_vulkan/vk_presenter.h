@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <deque>
 
 #include <condition_variable>
@@ -11,6 +12,7 @@
 #include "core/libraries/videoout/buffer.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/vk_ctr_framegen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -38,6 +40,11 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+    /// SacredFire: frame generation recorded a generated frame to show before this one
+    /// (CtrFrameGen::OutputImage(id)); set while preparing, read when presenting.
+    bool fg_ready{false};
+    /// The smoothed time between game frames when it was prepared (frame pacing).
+    float fg_interval_ms{16.6f};
 
 };
 
@@ -109,6 +116,13 @@ private:
 
     void SetExpectedGameSize(s32 width, s32 height);
 
+    /// SacredFire: frame generation for the frame being prepared (after post-processing).
+    void GenerateFrame(Frame* frame);
+    /// SacredFire: presents the generated frame recorded for `frame` (the half-way image
+    /// between the previous game frame and this one), before the frame itself. False when it
+    /// could not be presented (the frame then goes out alone).
+    bool PresentGenerated(Frame* frame);
+
 private:
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
@@ -138,6 +152,14 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+
+    /// SacredFire: FSR 3.1.6 frame generation (bbport.ini framegen; docs/sacredfire/16-framegen.md).
+    CtrFrameGen framegen;
+    std::chrono::steady_clock::time_point fg_last_prepare{};
+    float fg_interval_ms = 16.6f; ///< smoothed time between game frames
+    u64 fg_vector_sequence = 0;   ///< the upscaler's last vectors handed to frame generation
+    u64 fg_flips = 0, fg_presented = 0, fg_skipped = 0;
+    std::chrono::steady_clock::time_point fg_stats_since{};
 };
 
 } // namespace Vulkan

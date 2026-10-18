@@ -171,6 +171,28 @@ void DumpFinalFrameIfDue(const Instance& instance, Scheduler& scheduler, vk::Com
                {{image, width, height, 4, "final", bgra ? "bgra" : "rgba"}});
 }
 
+void DumpFrameGenIfDue(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                       vk::Image generated, vk::Image real, u32 width, u32 height,
+                       vk::Format format) {
+    static const char* trigger = std::getenv("BB_FG_DUMP_TRIGGER");
+    static int remaining = 0, index = 0;
+    if (!trigger) {
+        return;
+    }
+    if (remaining == 0) {
+        if (std::remove(trigger) != 0) {
+            return;
+        }
+        remaining = 4;
+    }
+    --remaining;
+    const bool bgra = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
+    const char* order = bgra ? "bgra" : "rgba";
+    DumpImages(instance, scheduler, cmdbuf, 900 + index++,
+               {{generated, width, height, 4, "fg_generated", order},
+                {real, width, height, 4, "fg_real", order}});
+}
+
 TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& scheduler_,
                                    VideoCore::TextureCache& texture_cache_, Runtime& runtime_,
                                    CameraMotion& camera_motion_, SceneTargets& scene_targets_)

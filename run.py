@@ -285,6 +285,77 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
+def uw_disabled(game, config):
+    """Fallback when the ultrawide helpers are absent: 16:9, nothing to do."""
+    from types import SimpleNamespace
+    return SimpleNamespace(enabled=False, game=Path(game), config=str(config),
+                           render_config=str(config))
+
+
+def uw_prepare_native(port, data, env, game, config):
+    """v0.3 native ultrawide dispatch (Settings > Display > Aspect ratio).
+
+    bbport.ini aspect_ratio=16:9|21:9|32:9 drives scripts/ultrawide_dispatch.py;
+    a legacy patches.json toggle still applies when the aspect is 16:9/unset.
+    Missing helpers mean 16:9 (never a fatal error for normal launches).
+    """
+    sys.path.insert(0, str(Path(port) / 'scripts'))
+    try:
+        from ultrawide_dispatch import prepare as dispatch_prepare
+    except Exception as error:
+        print(f'Ultrawide: helpers not available ({error}); running 16:9', flush=True)
+        return uw_disabled(game, config)
+    try:
+        return dispatch_prepare(Path(port), Path(data), env, Path(game), str(config))
+    finally:
+        try:
+            sys.path.remove(str(Path(port) / 'scripts'))
+        except ValueError:
+            pass
+
+
+def uw_refresh_native(mode, env, config):
+    try:
+        sys.path.insert(0, str(PORT / 'scripts'))
+        from ultrawide_dispatch import refresh as dispatch_refresh
+        return dispatch_refresh(mode, env, config)
+    except Exception as error:
+        if getattr(mode, 'enabled', False):
+            raise
+        print(f'Ultrawide refresh skipped: {error}', flush=True)
+    finally:
+        try:
+            sys.path.remove(str(PORT / 'scripts'))
+        except ValueError:
+            pass
+
+
+def uw_shaders_native(mode, user_dir, out):
+    try:
+        sys.path.insert(0, str(PORT / 'scripts'))
+        from ultrawide_dispatch import shaders as dispatch_shaders
+        return dispatch_shaders(mode, user_dir, out)
+    except Exception as error:
+        if getattr(mode, 'enabled', False):
+            raise
+        print(f'Ultrawide shaders skipped: {error}', flush=True)
+    finally:
+        try:
+            sys.path.remove(str(PORT / 'scripts'))
+        except ValueError:
+            pass
+
+
+# Short names match the v1.0 external installer hook so its rewrite() can still
+# strip and re-apply cleanly on a v0.3 tree (backward compatibility).
+uw_prepare = uw_prepare_native
+uw_refresh = uw_refresh_native
+uw_shaders = uw_shaders_native
+
+
+# Online play (docs/sacredfire/15-online.md): off unless bbport.ini's online_server (or
+# BB_ONLINE_SERVER) names a private server. Every name the game resolves then answers that
+# server; nothing else is reachable. online_id is the PSN name shown to other players.
 
 
 def pump(stream):
@@ -386,6 +457,13 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
+    # UltraWide v1.0: dispatch the selected aspect-ratio patch (v0.3 native, Settings > Display).
+    try:
+        uw_mode = uw_prepare(PORT, data, env, game, config)
+    except RuntimeError as error:
+        fail(f'Ultrawide: {error}')
+    game, config = uw_mode.game, uw_mode.config
+
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
@@ -403,7 +481,7 @@ def main():
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
                    '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
         env.setdefault('BB_NEO', '0')
-        apply_render_res(env, config)
+        apply_render_res(env, uw_mode.render_config if uw_mode.enabled else config)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
         if env.get('BB_CLEAR_SHADER_CACHE', '0') == '1':
@@ -438,13 +516,15 @@ def main():
                    '--timeout', env.get('BB_TIMEOUT', '0'), *args]
         first = True
         while True:
+            uw_refresh(uw_mode, env, config)
+            uw_shaders(uw_mode, user_dir, out)
             if not first:  # the in-game menu may have changed render_res
-                apply_render_res(env, config)
+                apply_render_res(env, uw_mode.render_config if uw_mode.enabled else config)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
-                       '--settings', config)
+                       '--settings', uw_mode.render_config if uw_mode.enabled else config)
             # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
             for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
                 env.pop(key, None)

@@ -34,6 +34,11 @@ public:
     /// Presents the current image and move to the next one
     bool Present();
 
+    /// SacredFire: frame generation paces its two presents itself unless FIFO does.
+    vk::PresentModeKHR GetPresentMode() const {
+        return present_mode;
+    }
+
     vk::SurfaceKHR GetSurface() const {
         return surface;
     }

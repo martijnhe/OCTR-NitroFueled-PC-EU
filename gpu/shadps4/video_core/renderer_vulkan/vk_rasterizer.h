@@ -58,6 +58,11 @@ public:
         return *upscaler;
     }
 
+    /// SacredFire: CTR's temporal upscaler (frame generation motion data).
+    [[nodiscard]] CtrFsr3* CtrUpscaler() noexcept {
+        return ctr_fsr3.get();
+    }
+
     [[nodiscard]] VideoCore::TextureCache& GetTextureCache() noexcept {
         return texture_cache;
     }

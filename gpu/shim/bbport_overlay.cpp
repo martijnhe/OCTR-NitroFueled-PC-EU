@@ -475,31 +475,33 @@ void Menu() {
     ImGui::EndDisabled(); // upscaler off
 
     ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
-    int output = s.output_res;
-    if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
-                          outputs[output])) {
-        for (int i = 0; i < BbSettings::OutputCount; ++i) {
-            if (ImGui::Selectable(outputs[i], i == output)) {
-                Store(s.output_res, i, true);
+    // v0.3 native ultrawide (by tcosi): one selector sets the aspect and the output
+    // together, so they can never mismatch; run.py prepares the matching assets.
+    {
+        static const char* entries[] = {"16:9 — 1280 x 720", "16:9 — 1920 x 1080", "16:9 — 2560 x 1440", "16:9 — 3840 x 2160",
+                                        "21:9 UltraWide — 2560 x 1080", "21:9 UltraWide — 3440 x 1440", "32:9 Super UltraWide — 5120 x 1440"};
+        static const int aspects[] = {0, 0, 0, 0, 1, 1, 2};
+        static_assert(sizeof(entries) / sizeof(entries[0]) == BbSettings::OutputCount, "outputs match settings");
+        int current = std::clamp(s.output_res.load(), 0, BbSettings::OutputCount - 1);
+        if (ImGui::BeginCombo(BbSettings::MenuText("Aspect / output (restart required)",
+                                                   "Aspecto / salida (tras reiniciar)"),
+                              entries[current])) {
+            for (int i = 0; i < BbSettings::OutputCount; ++i) {
+                if (ImGui::Selectable(entries[i], i == current)) {
+                    Store(s.output_res, i, i != current);
+                    Store(s.aspect_ratio, aspects[i], aspects[i] != s.aspect_ratio);
+                }
             }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
-    }
-    if (BbSettings::FixedRenderSession()) {
         Hint(BbSettings::MenuText(
-            "Size of the final frame and UI. The preset sets the scene size relative to "
-            "the output: 4K Performance = 1920x1080. Applies after restarting the game.",
-            "Размер готового кадра и интерфейса. Пресет задаёт размер сцены относительно "
-            "вывода: 4K Performance = 1920x1080. Применяется после перезапуска игры."));
-    } else {
-        Hint(BbSettings::MenuText(
-            "The final frame and UI size changes at the next frame boundary. "
-            "The preset sets the scene size relative to the output: 4K Performance = 1920x1080. "
-            "Changing the size resets FSR history and may cause a brief pause.",
-            "Размер готового кадра и интерфейса меняется на границе следующего кадра. "
-            "Пресет задаёт размер сцены относительно вывода: 4K Performance = 1920x1080. "
-            "Смена размера сбрасывает историю FSR и может вызвать короткую паузу."));
+            "One choice: the aspect and the output size together. 21:9 centres the HUD at "
+            "2560x1080 or 3440x1440; 32:9 at 5120x1440. Upscaling is off while ultrawide is on "
+            "and internal resolution is capped at 1440p. The first ultrawide launch prepares "
+            "about 9 GB of patched archives; original files are kept. Applies after restarting.",
+            "Una sola opción: aspecto y salida juntos. 21:9 centra el HUD a 2560x1080 o 3440x1440; "
+            "32:9 a 5120x1440. Sin escalado con ultra-panorámico; interna hasta 1440p. El primer "
+            "arranque prepara unos 9 ГБ архивов; originales intactos. Tras reiniciar."));
     }
     const char* live_modes[] = {BbSettings::MenuText("Auto (based on GPU)", "Авто (по видеокарте)"),
                                 BbSettings::MenuText("Off (faster)", "Выключена (быстрее)"),
@@ -580,10 +582,11 @@ void Menu() {
             "выводится в 4K; на экране 1080p это сглаживает края. Для 4K нужна мощная видеокарта."));
     }
     // SacredFire: one upscaler at a time (bbport.ini temporal): FSR 1 (spatial) or the temporal
-    // ones, FSR 3 and DLSS (vk_ctr_fsr3). Live; DLSS's quality mode and output need a restart.
+    // ones, FSR 3, DLSS and FSR 4 (vk_ctr_fsr3). Live; DLSS's quality mode and output need a restart.
     {
         static constexpr const char* labels[BbSettings::TemporalCount] = {
-            "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)"};
+            "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)",
+            "AMD FSR 4 (experimental)"};
         const int current = std::clamp(s.temporal.load(), 0, BbSettings::TemporalCount - 1);
         if (ImGui::BeginCombo(BbSettings::MenuText("Upscaling", "Апскейл"), labels[current])) {
             for (int t = 0; t < BbSettings::TemporalCount; ++t) {
@@ -595,11 +598,36 @@ void Menu() {
         }
         Hint(BbSettings::MenuText(
             "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. "
-            "FSR 3 and DLSS rebuild detail over several frames from the game's depth and motion, "
+            "FSR 3, FSR 4 and DLSS rebuild detail over several frames from the game's depth and motion, "
             "and smooth edges even at the same resolution. DLSS needs an NVIDIA RTX card (FSR 3 "
-            "runs otherwise). Applies at once.",
-            "FSR 1 увеличивает сцену чётче простого растяжения. FSR 3 и DLSS восстанавливают "
+            "runs otherwise); FSR 4 needs INT8 dot-product support and its model files. Applies at once.",
+            "FSR 1 увеличивает сцену чётче простого растяжения. FSR 3, FSR 4 и DLSS восстанавливают "
             "детали за несколько кадров. DLSS нужна видеокарта RTX. Применяется сразу."));
+    }
+    // SacredFire: frame generation (bbport.ini framegen=off|fsr3): one interpolated frame
+    // between each pair of game frames, shown halfway between them. Live.
+    {
+        static constexpr const char* fg_modes[BbSettings::FrameGenCount] = {
+            "Off", "AMD FSR 3 (experimental)"};
+        const int fg = std::clamp(s.framegen.load(), 0, BbSettings::FrameGenCount - 1);
+        if (ImGui::BeginCombo(BbSettings::MenuText("Frame generation", "Генерация кадров"),
+                              fg_modes[fg])) {
+            for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
+                if (ImGui::Selectable(fg_modes[i], i == fg)) {
+                    Store(s.framegen, i, i != fg);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        Hint(BbSettings::MenuText(
+            "Shows an interpolated frame between each pair of game frames: about twice the "
+            "frames on screen (the game itself, its FPS limit and its timing do not change). "
+            "Best on 120 Hz+ screens with the game at about half the refresh rate. Works with any "
+            "upscaler; FSR 3/4 and DLSS also give it the game's motion. Fast HUD elements may "
+            "shimmer. Applies at once.",
+            "Показывает промежуточный кадр между каждой парой кадров игры: примерно вдвое больше "
+            "кадров на экране (сама игра, её лимит FPS и тайминг не меняются). Лучше всего на "
+            "экранах 120 Гц+. Работает с любым апскейлом. Применяется сразу."));
     }
     if (s.temporal == BbSettings::TemporalDlss) {
         static constexpr const char* qualities[BbSettings::DlssQualityCount] = {
@@ -646,7 +674,7 @@ void Menu() {
             "CNN: the older model (preset E), lighter; NVIDIA marks it deprecated. Applies at once.",
             "Transformer: текущая модель NVIDIA. CNN: старая, легче. Применяется сразу."));
     }
-    if (s.temporal == BbSettings::TemporalFsr3) {
+    if (s.temporal == BbSettings::TemporalFsr3 || s.temporal == BbSettings::TemporalFsr4) {
         Slider(BbSettings::MenuText("FSR 3 sharpness", "Резкость FSR 3"), s.fsr3_sharpness, 0.0f, 1.0f);
     }
 

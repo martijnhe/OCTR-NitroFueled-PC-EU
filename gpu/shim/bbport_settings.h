@@ -85,20 +85,26 @@ inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatch
 inline constexpr int RenderResHeights[] = {480, 720, 1080, 1440, 1620, 2160};
 inline constexpr int RenderResCount = 6;
 /// Live output resolutions: the upscaler's output and the UI host targets.
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
-inline constexpr int OutputCount = 4;
+/// v0.3: 16:9 modes plus the ultrawide outputs (Settings > Display > Aspect ratio).
+inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 2560, 3440, 5120};
+inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 1080, 1440, 1440};
+inline constexpr int OutputCount = 7;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 /// SacredFire: controller ports for split screen (bbport.ini port.1..4: SDL GUID or part of the
 /// gamepad name; the runtime re-reads the file when the menu saves it).
 constexpr int ControllerPorts = 4;
-/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss): FSR 1 (spatial, the
+/// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss|fsr4): FSR 1 (spatial, the
 /// display pass's stretch) or temporal upscaling/AA of the finished frame (vk_ctr_fsr3; FSR 3
-/// where DLSS cannot run).
+/// where DLSS cannot run, FSR 4 where INT8 and its models allow).
 enum Temporal : int { TemporalOff = 0, TemporalFsr1 = 1, TemporalFsr3 = 2, TemporalDlss = 3,
-                      TemporalCount = 4 };
-inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss"};
+                      TemporalFsr4 = 4, TemporalCount = 5 };
+inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss", "fsr4"};
+/// SacredFire: frame generation (bbport.ini framegen=off|fsr3): AMD FSR 3.1.6 frame
+/// interpolation of the finished frame at flip time (vk_ctr_framegen, docs/sacredfire/
+/// 16-framegen.md). One generated frame is shown before every real one.
+enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenCount = 2 };
+inline constexpr const char* FrameGenNames[FrameGenCount] = {"off", "fsr3"};
 /// bbport.ini dlss_quality: auto (render_res decides the render size) or one of NVIDIA's modes,
 /// which set the render size from dlss_output (scripts/patches.py render_plan; at start).
 inline constexpr const char* DlssQualityNames[] = {"auto", "dlaa", "quality", "balanced",
@@ -128,6 +134,12 @@ struct Values {
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.
     /// Applies at once. BB_FPS_LIMIT overrides it.
     std::atomic<int> fps_limit{60};
+    /// SacredFire: frame generation (FrameGen; bbport.ini framegen=off|fsr3, BB_FRAMEGEN):
+    /// one interpolated frame between each pair of game frames, presented halfway between
+    /// them (the display shows twice the game's rate; the game, its FPS limit and the guest
+    /// vblank are untouched). Works with any upscaler; FSR 3/4 and DLSS add the game's
+    /// motion vectors. Applies live.
+    std::atomic<int> framegen{FrameGenOff};
     /// SacredFire: graphics pipelines compiled on worker threads (BB_ASYNC_PIPELINES): a new
     /// shader no longer stops the game; a pass drawn every frame may miss a frame or two.
     /// Experimental (STATUS.md, issue #2). Applies at once. BB_ASYNC_PIPELINES overrides it.
@@ -194,6 +206,9 @@ struct Values {
     bool legacy_fsr3 = false;
     std::atomic<float> fsr3_sharpness{0.3f}; ///< FSR 3's RCAS, 0 off .. 1
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
+    /// v0.3 native ultrawide aspect (bbport.ini aspect_ratio): 0=16:9, 1=21:9, 2=32:9.
+    /// Applied at start by run.py (needs a restart); upscaling is off while ultrawide.
+    std::atomic<int> aspect_ratio{0};
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
     std::atomic<int> live_resolution{0};
@@ -213,6 +228,7 @@ struct Values {
     int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
+    int startup_aspect_ratio = 0;
     int startup_live_resolution = 0;
 };
 
