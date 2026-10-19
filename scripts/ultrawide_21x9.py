@@ -104,20 +104,30 @@ def configure_profile(settings):
  if not (DATA/'manifest.json').exists() or (DATA/'manifest.json').read_bytes()!=source.read_bytes():atomic(DATA/'manifest.json',source.read_bytes())
  MANIFEST=json.loads(source.read_text())
 
+def view_root(source,base):
+ """Where the prepared view goes: DATA (in the port folder), or next to the game when the game is
+ on another drive: the view is hard links to the game's files, and links only work within one
+ drive (else the whole game, 20+ GB, would be copied)."""
+ try:
+  same=os.stat(source).st_dev==os.stat(base).st_dev
+ except OSError:
+  same=True
+ return base if same else Path(source).parent/(Path(source).name+'-ultrawide')/base.name
+
 def ensure_view(source):
- source=Path(source).resolve();game=DATA/'view/game';record=DATA/'view/ready.json'
+ source=Path(source).resolve();ROOT=view_root(source,DATA);ROOT.mkdir(parents=True,exist_ok=True);game=ROOT/'view/game';record=ROOT/'view/ready.json'
  if record.exists():
   state=json.loads(record.read_text(encoding='utf-8'))
   if state['source']!=str(source) or state['manifest_sha256']!=digest(DATA/'manifest.json'):raise RuntimeError('21:9 UltraWide view belongs to another game or package version; reinstall the package.')
   for a in state['archives']:
    if stamp(source/'archives'/a['archive'])!=a['source_stamp'] or stamp(game/'archives'/a['archive'])!=a['view_stamp']:raise RuntimeError('21:9 UltraWide source or prepared archives changed; reinstall before launching.')
   return game
- if (DATA/'view').exists():raise RuntimeError('Incomplete 21:9 UltraWide view; reinstall before launching.')
+ if (ROOT/'view').exists():raise RuntimeError('Incomplete 21:9 UltraWide view; reinstall before launching.')
  required=sum(a['original_size'] for a in MANIFEST['archives'])+64*1024*1024
- if shutil.disk_usage(DATA).free<required:raise RuntimeError('21:9 UltraWide needs about 9 GB free for its first preparation; original game files are retained.')
+ if shutil.disk_usage(ROOT).free<required:raise RuntimeError('21:9 UltraWide needs about 9 GB free for its first preparation; original game files are retained.')
  for a in MANIFEST['archives']:
   if digest(source/'archives'/a['archive'])!=a['original_sha256']:raise RuntimeError('Unsupported or modified archive: '+a['archive'])
- temporary=DATA/('view-building-'+uuid.uuid4().hex);view=temporary/'game';view.mkdir(parents=True)
+ temporary=ROOT/('view-building-'+uuid.uuid4().hex);view=temporary/'game';view.mkdir(parents=True)
  # Partial builds are kept on failure for diagnosis; never modify source links.
  link_tree(source,view)
  for item in MANIFEST['archives']:
@@ -137,7 +147,7 @@ def ensure_view(source):
     old=struct.unpack('<4I',old_headers[entry['index']]);headers.append((56+count*4+entry['index']*16,struct.pack('<4I',offset&0xffffffff,(old[1]&0xffffff00)|(offset>>32),len(payload),0xffffffff)))
    for off,value in headers:f.seek(off);f.write(value)
    f.flush();os.fsync(f.fileno())
- verify_assets(view);json_write(temporary/'ready.json',view_record(source,view));os.replace(temporary,DATA/'view')
+ verify_assets(view);json_write(temporary/'ready.json',view_record(source,view));os.replace(temporary,ROOT/'view')
  return game
 
 def prepare(port,data,env,game,config):
