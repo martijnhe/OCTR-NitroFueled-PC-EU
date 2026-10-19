@@ -20,6 +20,10 @@ static_assert(int(Pads::AxLeftX) == SDL_GAMEPAD_AXIS_LEFTX && int(Pads::AxTrigge
 namespace Pads {
 namespace {
 
+// SDL_GAMEPAD_TYPE_STEAM (the Steam Deck's and Steam Controller's own type) is newer than some
+// SDL 3.4 releases (the AppImage's): the value after SDL_GAMEPAD_TYPE_GAMECUBE.
+constexpr SDL_GamepadType kGamepadTypeSteam = SDL_GamepadType(int(SDL_GAMEPAD_TYPE_GAMECUBE) + 1);
+
 // The SDL3 functions used, resolved from the DLL.
 #define PADS_SDL_FUNCTIONS(X)                                                                   \
     X(SDL_SetHint) X(SDL_InitSubSystem) X(SDL_QuitSubSystem) X(SDL_GetError) X(SDL_free)        \
@@ -287,7 +291,7 @@ std::string TypeName(int type, bool es) {
     case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
     case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return "Joy-Con";
     case SDL_GAMEPAD_TYPE_GAMECUBE: return "GameCube";
-    case SDL_GAMEPAD_TYPE_STEAM: return "Steam";
+    case kGamepadTypeSteam: return "Steam";
     case SDL_GAMEPAD_TYPE_STANDARD: return es ? "Mando estándar (XInput)" : "Standard gamepad (XInput)";
     default: return es ? "Mando genérico" : "Generic gamepad";
     }
