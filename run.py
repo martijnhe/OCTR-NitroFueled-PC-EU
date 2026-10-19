@@ -32,6 +32,12 @@ PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
 APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
+
+sys.path.insert(0, str(PORT / 'scripts'))
+import archive_patch  # noqa: E402  (scripts/)
+import widescreen  # noqa: E402
+sys.path.pop(0)
+
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
 
 
@@ -57,6 +63,22 @@ def no_console():
     return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
 
 
+def parse_cpu_features(output):
+    """Instruction sets `sacredfire.exe --cpu-features` reports missing ([] when complete)."""
+    for line in output.splitlines():
+        if line.startswith('CPU: missing '):
+            return [name.strip() for name in line[len('CPU: missing '):].split(',') if name.strip()]
+    return []
+
+
+def isa_rewrite_wanted(missing, env):
+    """BB_ISA_REWRITE=1 forces the ISA rewrite table, 0 disables it; otherwise the CPU decides."""
+    policy = env.get('BB_ISA_REWRITE')
+    if policy in ('0', '1'):
+        return policy == '1'
+    return bool(missing)
+
+
 def emit(text):
     try:
         sys.stdout.write(text)
@@ -75,7 +97,7 @@ def say(message):
     emit(message + '\n')
 
 
-def run_python(script, *args, capture=False):
+def run_python(script, *args, capture=False, check=True):
     # -X utf8: the embeddable Python of the portable package ignores PYTHONUTF8, and the scripts
     # print the game's title (with its trademark sign) to a pipe.
     command = [sys.executable, '-X', 'utf8', str(PORT / script), *map(str, args)]
@@ -84,9 +106,9 @@ def run_python(script, *args, capture=False):
                             encoding='utf-8', errors='replace', creationflags=no_console())
     if not capture and result.stdout:
         emit(result.stdout)
-    if result.returncode:
+    if check and result.returncode:
         sys.exit(result.returncode)
-    return result.stdout if capture else None
+    return result if capture else None
 
 
 def find_executable(name):
@@ -199,6 +221,18 @@ def server_key(key, host):
     return hmac.new(bytes.fromhex(key), host.strip().lower().encode('utf-8'), hashlib.sha256).hexdigest()
 
 
+def season_theme(host, port):
+    """The season theme the server announces (GET /ryunet/theme), or None when it does not answer.
+    scripts/patches.py loads it in every level (THEME_VALUES)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f'http://{host}:{port}/ryunet/theme', timeout=3) as reply:
+            theme = json.loads(reply.read(4096)).get('theme')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return theme if theme in ('default', 'halloween', 'golden') else None
+
+
 def setup_online(env, config, data):
     ini_values = {}
     try:
@@ -285,77 +319,13 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
-def uw_disabled(game, config):
-    """Fallback when the ultrawide helpers are absent: 16:9, nothing to do."""
-    from types import SimpleNamespace
-    return SimpleNamespace(enabled=False, game=Path(game), config=str(config),
-                           render_config=str(config))
-
-
-def uw_prepare_native(port, data, env, game, config):
-    """v0.3 native ultrawide dispatch (Settings > Display > Aspect ratio).
-
-    bbport.ini aspect_ratio=16:9|21:9|32:9 drives scripts/ultrawide_dispatch.py;
-    a legacy patches.json toggle still applies when the aspect is 16:9/unset.
-    Missing helpers mean 16:9 (never a fatal error for normal launches).
-    """
-    sys.path.insert(0, str(Path(port) / 'scripts'))
-    try:
-        from ultrawide_dispatch import prepare as dispatch_prepare
-    except Exception as error:
-        print(f'Ultrawide: helpers not available ({error}); running 16:9', flush=True)
-        return uw_disabled(game, config)
-    try:
-        return dispatch_prepare(Path(port), Path(data), env, Path(game), str(config))
-    finally:
-        try:
-            sys.path.remove(str(Path(port) / 'scripts'))
-        except ValueError:
-            pass
-
-
-def uw_refresh_native(mode, env, config):
-    try:
-        sys.path.insert(0, str(PORT / 'scripts'))
-        from ultrawide_dispatch import refresh as dispatch_refresh
-        return dispatch_refresh(mode, env, config)
-    except Exception as error:
-        if getattr(mode, 'enabled', False):
-            raise
-        print(f'Ultrawide refresh skipped: {error}', flush=True)
-    finally:
-        try:
-            sys.path.remove(str(PORT / 'scripts'))
-        except ValueError:
-            pass
-
-
-def uw_shaders_native(mode, user_dir, out):
-    try:
-        sys.path.insert(0, str(PORT / 'scripts'))
-        from ultrawide_dispatch import shaders as dispatch_shaders
-        return dispatch_shaders(mode, user_dir, out)
-    except Exception as error:
-        if getattr(mode, 'enabled', False):
-            raise
-        print(f'Ultrawide shaders skipped: {error}', flush=True)
-    finally:
-        try:
-            sys.path.remove(str(PORT / 'scripts'))
-        except ValueError:
-            pass
-
-
-# Short names match the v1.0 external installer hook so its rewrite() can still
-# strip and re-apply cleanly on a v0.3 tree (backward compatibility).
-uw_prepare = uw_prepare_native
-uw_refresh = uw_refresh_native
-uw_shaders = uw_shaders_native
-
-
-# Online play (docs/sacredfire/15-online.md): off unless bbport.ini's online_server (or
-# BB_ONLINE_SERVER) names a private server. Every name the game resolves then answers that
-# server; nothing else is reachable. online_id is the PSN name shown to other players.
+    # Every player loads the theme the server announces (bbport.ini theme= only applies offline).
+    if not env.get('BB_THEME'):
+        theme = season_theme(host, auth_port)
+        if theme:
+            env['BB_THEME'] = theme
+            if theme != 'default':
+                say(f'Season theme from the server: {theme}')
 
 
 def pump(stream):
@@ -407,6 +377,14 @@ def main():
         clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
         if clang64.is_dir():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    # Instruction sets this CPU lacks (MOVBE, BMI1, LZCNT): the ISA rewrite covers them; exit 20
+    # is a set nothing covers.
+    features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              text=True, creationflags=no_console())
+    if features.returncode == 20:
+        print(features.stdout, end='', flush=True)
+        sys.exit(20)
+    missing = parse_cpu_features(features.stdout)
 
     # The output of every launch also goes to last_run.log (an in-game restart appends to it);
     # BB_SAVE_LOG=1 (with frame statistics) writes logs/<time>.log instead.
@@ -451,43 +429,83 @@ def main():
         fail(check.stdout.strip() or 'Game check failed.', 2)
     env['BB_GAME_PROFILE'] = check.stdout.strip() or 'ctr'
     # The game's own title ID and version (the EU edition, CUSA14876 1.00, has its own patches).
-    info = run_python('scripts/game_check.py', '--info', game, capture=True).split()
+    info = run_python('scripts/game_check.py', '--info', game, capture=True).stdout.split()
     title_id, app_version = (info + [TITLE_ID, APP_VERSION][len(info):])[:2]
     say(f'Game profile: {env["BB_GAME_PROFILE"]}')
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
-    # UltraWide v1.0 by tcosi: dispatch the selected aspect-ratio patch (Settings > Display). Made for
-    # CUSA13795; the European edition uses the ported data (scripts/ultrawide_eu.py, v0.4).
-    try:
-        if title_id not in (TITLE_ID, 'CUSA14876'):
-            if uw_aspect(config) in ('21:9', '32:9'):
-                say(f'Ultrawide: made for {TITLE_ID} and CUSA14876; {title_id} runs at 16:9')
-            uw_mode = uw_disabled(game, config)
-        else:
-            uw_mode = uw_prepare(PORT, data, env, game, config)
-    except RuntimeError as error:
-        fail(f'Ultrawide: {error}')
-    game, config = uw_mode.game, uw_mode.config
-
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
-                           '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).strip())
+                           '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).stdout.strip())
     mod_view = game if game.resolve() != original_game else None
     try:
         run_python('scripts/prepare.py', game, '--out', out)
         run_python('scripts/link_libc.py', game, '--out', out)
         run_python('scripts/link_modules.py', game, '--out', out, '--modules',
                    'libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx')
+        # A failed rewrite prints its reason and the game starts without the table.
+        isa_args = []
+        if isa_rewrite_wanted(missing, env):
+            result = run_python('scripts/isa_rewrite.py', out / 'boot-linked.bin', '--out', out,
+                                capture=True, check=False)
+            emit(result.stdout)
+            if result.returncode == 0:
+                isa_args = ['--isa-rewrite', str(out / 'isa-rewrite.bin')]
         # Symbol names for the eboot's host-side imports (shadPS4's aerolib list, fetched once).
         run_python('tools/gen_import_names.py', '--out', out)
         # DLC (optional): the player's add-on packages in dlc\ (BB_DLC_DIR), reported installed.
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
                    '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
+        # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the
+        # game's own shaders, so new tracks and racers do not stop the game to compile them.
+        # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+        recipe_setting = env.get('BB_SHADER_RECIPE', '')
+        recipe = Path(recipe_setting) if recipe_setting not in ('', '0') else PORT / 'shaders' / 'recipe.zip'
+        if recipe_setting != '0' and recipe.is_file():
+            run_python('scripts/gcn_shaders.py', game, '--out', out)
+            env['BB_SHADER_RECIPE'] = str(recipe)
+            env['BB_GCN_SHADERS'] = str(out / 'gcn_shaders.bin')
+        else:
+            env.pop('BB_SHADER_RECIPE', None)
+            env.pop('BB_GCN_SHADERS', None)
+        # Every race track in the online playlist, at the same weight (scripts/online_playlist.py),
+        # always: public rooms draw from the same pool for everyone. The game reads it through an
+        # archive patch; the archives stay as they are. When it cannot be built, the game's own.
+        env.pop('BB_ARCHIVE_PATCHES', None)
+        run_python('scripts/online_playlist.py', game, '--out', out)
+        playlist_patch = out / 'online_playlist.bbpatch'
+        base_patches = {}
+        if playlist_patch.is_file():
+            base_patches[archive_patch.read(playlist_patch)[1]] = playlist_patch
         env.setdefault('BB_NEO', '0')
-        apply_render_res(env, uw_mode.render_config if uw_mode.enabled else config)
+        # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py): the render
+        # path and the patches read its settings (the player's, with the ones it was made for),
+        # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
+        layout_saved = {}
+
+        def apply_layout():
+            for key, value in layout_saved.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
+            layout_saved.clear()
+            layout = widescreen.prepare(game, out, config, env, title_id, app_version, base_patches)
+            if layout:
+                layout_saved.update({key: env.get(key) for key in layout['env']})
+                env.update(layout['env'])
+            archives = widescreen.archive_list(base_patches, layout)
+            if archives:
+                env['BB_ARCHIVE_PATCHES'] = archives
+            else:
+                env.pop('BB_ARCHIVE_PATCHES', None)
+            return (layout['config'], layout['patches_dir']) if layout else (config, None)
+
+        settings, layout_patches = apply_layout()
+        apply_render_res(env, settings)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
         if env.get('BB_CLEAR_SHADER_CACHE', '0') == '1':
@@ -519,31 +537,31 @@ def main():
         command = [str(probe), str(out / 'boot-linked.bin'), '--import-names', str(out / 'import_names.txt'),
                    '--content-profile', str(out / 'content.bin'), '--patches', str(out / 'patches.bin'),
                    '--app0', str(game), '--user', str(user_dir),
-                   '--timeout', env.get('BB_TIMEOUT', '0'), *args]
+                   '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
         while True:
-            uw_refresh(uw_mode, env, config)
-            uw_shaders(uw_mode, user_dir, out)
             if not first:  # the in-game menu may have changed render_res
-                apply_render_res(env, uw_mode.render_config if uw_mode.enabled else config)
+                settings, layout_patches = apply_layout()
+                apply_render_res(env, settings)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
+                       *(['--patches-dir', layout_patches] if layout_patches else []),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
-                       '--settings', uw_mode.render_config if uw_mode.enabled else config)
+                       '--settings', settings)
             # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
             for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
                 env.pop(key, None)
-            plan = render_plan_of(config)
-            if plan and plan.get('output') and not ini_has(config, 'ultrawide_cinematics=0'):
+            plan = render_plan_of(settings)
+            if plan and plan.get('output') and not ini_has(settings, 'ultrawide_cinematics=0'):
                 env['BB_CINEMATIC_16X9'] = '1'
                 env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out,
-                                                capture=True).strip()
+                                                capture=True).stdout.strip()
             # Ultrawide: the title and customization screens fill the width (src/runtime_frontend.c).
             env.pop('BB_FRONTEND_FOV', None)
-            if plan and plan.get('output') and not ini_has(config, 'ultrawide_frontend=0'):
+            if plan and plan.get('output') and not ini_has(settings, 'ultrawide_frontend=0'):
                 env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
-                                                    capture=True).strip()
+                                                    capture=True).stdout.strip()
             # CTR TV in place of the opening video: every start (ctrtv_at_start=1) or once (ctrtv_next=1,
             # the in-game menu's "Watch CTR TV", removed here).
             env.pop('BB_CTRTV', None)
@@ -594,7 +612,7 @@ def main():
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)
-            vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).strip()
+            vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).stdout.strip()
             if vt:
                 env['BB_UNLOCK_ALL_VTABLE'] = vt
             env['BB_UNLOCK_ALL'] = '1' if ini_has(config, 'unlock_all=1') else '0'

@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace BbClobber {
 enum Source : std::uint32_t {
@@ -42,6 +43,21 @@ std::int64_t FirstBadHeader(const std::uint32_t* words, std::uint64_t dwords);
 void NoteSubmit(std::uint64_t seq, const void* guest_dcb, std::uint64_t bytes);
 /// GPU thread: the decoding of submission `seq` starts.
 void NoteDecoding(std::uint64_t seq);
+
+/// The guard against the clobber (the cause, seen on 2026-10-16 in a Windows log: "port write
+/// into it: EOS fence ... while decoding submission S" with the clobbered submission S+2). The
+/// game keeps its fence labels inside the two command buffers it alternates between, and may
+/// start building frame S+2 into S's buffer while the port is still decoding S, which writes
+/// S's labels: a label then lands on one of S+2's packet headers.
+///
+/// NoteDecodingCopy: the copy SubmitGfx made of submission `seq`'s dcb, kept alive here until
+/// the next one. StaleLabel: before the port writes a fence label: true when the label lies in
+/// that dcb and the game has already rewritten its slot (the guest dword matches neither the
+/// copy taken at submit nor a label the port wrote there since), so the write must be skipped:
+/// the game has moved on from that frame, and the slot is now one of its new commands.
+void NoteDecodingCopy(std::uint64_t seq, const void* guest_dcb,
+                      std::shared_ptr<const std::uint32_t> copy, std::uint64_t dwords);
+bool StaleLabel(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, Source source);
 /// A write of `bytes` bytes to guest address `address` the port is about to make (`value`: the
 /// first 8 bytes of what it writes). Reported when it lands inside a submitted command buffer.
 void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, Source source);

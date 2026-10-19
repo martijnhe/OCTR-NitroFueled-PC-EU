@@ -35,7 +35,7 @@ root=$PWD
 # The libraries' store paths (RUNPATH entries and their closures come along).
 {
     echo '['
-    for elf in out/sacredfire out/gpu/libbbgpu.so; do
+    for elf in out/sacredfire out/gpu/libbbgpu.so out/ctr-launcher; do
         readelf -d "$elf" | sed -n 's/.*\[\(.*\)\]/\1/p' | tr ':' '\n'
     done | grep -o '^/nix/store/[^/]*' | sort -u | grep -v -- '-nix-shell$' | sed 's/.*/  "&"/'
     echo ']'

@@ -32,11 +32,23 @@ MSYS2 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64'))
 CLANG_BIN = MSYS2 / 'clang64' / 'bin'
 NAME = 'CTR-NitroFueled-PC-portable'
 LAUNCHER = 'CTR-NitroFueled-PC.exe'
+# Its name in the package (the build keeps the ASCII name above for the toolchain). An update
+# unzipped over an older release leaves CTR-NitroFueled-PC.exe there: the new launcher turns it
+# into a copy of itself and renames the desktop shortcut (launcher.cpp, MigrateOldLauncher).
+PACKAGED_LAUNCHER = 'Crash\u2122 Team Racing Nitro-Fueled.exe'
 # The Python that runs run.py and scripts/ (python.org's "embeddable package": no installer, no
 # registry, no PATH). Pinned by version and SHA-256.
 PYTHON_VERSION = '3.14.8'
 PYTHON_URL = f'https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip'
 PYTHON_SHA256 = 'a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310'
+# iced-x86: run.py scans the linked image for Haswell-only instructions on CPUs without MOVBE,
+# BMI1 or LZCNT (docs/sacredfire/15-isa-rewrite.md). The cp38-abi3 wheel is a zip and loads on
+# the bundled 3.14 without pip. Pinned by version and SHA-256.
+ICED_X86_VERSION = '1.21.0'
+ICED_X86_URL = ('https://files.pythonhosted.org/packages/04/9e/'
+                'ab21c70472b605bbcaca5a181cfda56b0750b061f4a946192888142ec37c/'
+                f'iced_x86-{ICED_X86_VERSION}-cp38-abi3-win_amd64.whl')
+ICED_X86_SHA256 = '04e04a8cc49ca7d89448fb78e3bab4ae364cf1fc888c996540a791c9999077c1'
 # Windows' own DLLs: never bundled.
 SYSTEM_DLLS = {'kernel32', 'user32', 'gdi32', 'advapi32', 'shell32', 'ole32', 'oleaut32', 'ws2_32',
                'msvcrt', 'ntdll', 'bcrypt', 'bcryptprimitives', 'crypt32', 'secur32', 'winmm',
@@ -120,16 +132,25 @@ def third_party(dlls, python=None, dlss=False):
                   '           SQLite and the Microsoft C runtime redistributables)',
                   '  home:    https://www.python.org/',
                   f'  source:  https://www.python.org/downloads/release/python-{PYTHON_VERSION.replace(".", "")}/', '']
+        lines += [f'iced-x86 {ICED_X86_VERSION}, in python\\Lib\\site-packages\\ (run.py\'s ISA',
+                  '  rewrite table for CPUs without MOVBE/BMI1/LZCNT, docs/sacredfire/15-isa-rewrite.md)',
+                  '  license: MIT (https://github.com/icedland/iced/blob/master/LICENSE.txt)',
+                  '  home:    https://github.com/icedland/iced',
+                  f'  source:  https://pypi.org/project/iced-x86/{ICED_X86_VERSION}/#files', '']
     if dlss:
         lines += DLSS_THIRD_PARTY
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
               'https://github.com/FireBurn/FSR-Vulkan).', '']
-    lines += ['fsr4_shaders\\ holds the FSR 4 v07 INT8 model and shader bundle built by the',
-              'Q2RTX project from AMD-published FSR 4 source (MIT, Copyright (c) 2025 Advanced',
-              'Micro Devices, Inc.; see fsr4_shaders\\LICENSE-FSR4-v07.txt), run through',
-              'https://github.com/FireBurn/FSR-Vulkan (MIT).', '']
-    lines += ['The launcher (CTR-NitroFueled-PC.exe) and sacredfire.exe include Dear ImGui (MIT,',
+    if (ROOT / 'fsr4_shaders').is_dir():
+        lines += ['fsr4_shaders\\ holds the FSR 4 v07 INT8 model and shader bundle built by the',
+                  'Q2RTX project from AMD-published FSR 4 source (MIT, Copyright (c) 2025 Advanced',
+                  'Micro Devices, Inc.; see fsr4_shaders\\LICENSE-FSR4-v07.txt), run through',
+                  'https://github.com/FireBurn/FSR-Vulkan (MIT).', '']
+    lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
+    lines += ['art\\ctr-menu.ttf: the Lilita One font by Juan Montoreano (SIL Open Font License 1.1,',
+              'art\\ctr-menu-font-license.txt). art\\ctr-hero.png and art\\ctr-logo.png: game artwork',
+              'from SteamGridDB, the property of its owners (art\\README.txt).', '']
     lines += ['The game files are not included and are not covered by any of these licenses.',
               'Not affiliated with Sony, Activision or Beenox.', '']
     return '\r\n'.join(lines)
@@ -153,8 +174,30 @@ def bundle_python(folder, cache):
         z.extractall(target)
     pth = next(target.glob('python3*._pth'))
     zipped = next(target.glob('python3*.zip')).name
-    pth.write_bytes(f'{zipped}\r\n.\r\n..\\scripts\r\n..\\tools\r\n'.encode())
+    pth.write_bytes(f'{zipped}\r\n.\r\n..\\scripts\r\n..\\tools\r\nLib\\site-packages\r\n'.encode())
     return f'Python {PYTHON_VERSION} (python.org embeddable package)'
+
+
+def bundle_iced_x86(folder, cache):
+    """python/Lib/site-packages in the package: iced-x86, which run.py needs to build the ISA
+    rewrite table on CPUs without MOVBE/BMI1/LZCNT (docs/sacredfire/15-isa-rewrite.md). A wheel
+    is a zip, so no pip is needed; the cp38-abi3 extension loads on the bundled Python."""
+    wheel = cache / Path(ICED_X86_URL).name
+    if not wheel.is_file():
+        cache.mkdir(parents=True, exist_ok=True)
+        print(f'Downloading {ICED_X86_URL}')
+        with urllib.request.urlopen(ICED_X86_URL, timeout=120) as response:
+            wheel.write_bytes(response.read())
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if digest != ICED_X86_SHA256:
+        wheel.unlink()
+        sys.exit(f'{wheel.name}: SHA-256 {digest}, expected {ICED_X86_SHA256}')
+    target = folder / 'python' / 'Lib' / 'site-packages'
+    prefix = f'iced_x86-{ICED_X86_VERSION}.dist-info'
+    with zipfile.ZipFile(wheel) as z:
+        for name in z.namelist():
+            if name.split('/')[0] in ('iced_x86', prefix):
+                z.extract(name, target)
 
 
 def write_text(path, text):
@@ -199,30 +242,31 @@ def main():
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
-    shutil.copy2(launcher, folder)
+    shutil.copy2(launcher, folder / PACKAGED_LAUNCHER)
     python = bundle_python(folder, a.dist / 'pycache')
+    bundle_iced_x86(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
-    # v0.3 native ultrawide data (manifests, baseline, shaders): needed by run.py.
-    for data in list((ROOT / 'scripts').glob('ultrawide_*_data')):
-        if data.is_dir():
-            # Prepared game views (view*/, several GB) and the EU work folder are per player.
-            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns('view', 'view-building-*', 'eu'))
-    # v0.4 FSR4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
+    shutil.copytree(ROOT / 'scripts' / 'widescreen_data',
+                    folder / 'scripts' / 'widescreen_data', dirs_exist_ok=True)
+    # FSR 4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
     if (ROOT / 'fsr4_shaders').is_dir():
         shutil.copytree(ROOT / 'fsr4_shaders', folder / 'fsr4_shaders', dirs_exist_ok=True)
+    shutil.copytree(ROOT / 'assets', folder / 'assets')  # button icons (scripts/buttons.py)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
     for patch in (ROOT / 'patches').glob('*.xml'):
         shutil.copy2(patch, folder / 'patches')
-    shutil.copytree(ROOT / 'assets', folder / 'assets')  # button icons (scripts/buttons.py)
+    # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
+    if (ROOT / 'shaders' / 'recipe.zip').is_file():
+        (folder / 'shaders').mkdir()
+        shutil.copy2(ROOT / 'shaders' / 'recipe.zip', folder / 'shaders')
     steamgrid_dir = PORTABLE.parent / 'steamgrid'
     if steamgrid_dir.is_dir():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
-    for xml in (ROOT / 'patches').glob('*.xml'):
-        shutil.copy2(xml, folder / 'patches')
+    # The launcher's artwork and menu font (art\README.txt says where each comes from).
+    shutil.copytree(ROOT / 'art', folder / 'art', dirs_exist_ok=True)
     if (ROOT / 'out' / 'aerolib.inl').is_file():
         shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in

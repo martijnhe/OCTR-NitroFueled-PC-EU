@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <atomic>
+#include <cstdio>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -84,9 +86,16 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     return feature_flags;
 }
 
+/// bbport: noted for the GPU breadcrumbs (a device loss names a destroyed image still in use).
+static void NoteImageDestroyed(vk::Image image, const vk::ImageCreateInfo& ci, u64 size_bytes) {
+    Vulkan::Breadcrumbs::NoteDestroyed("image", Vulkan::Breadcrumbs::HandleId(image), 0, size_bytes,
+                                       ci.extent.width, ci.extent.height, u32(ci.format));
+}
+
 UniqueImage::~UniqueImage() {
     if (image) {
         BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
+        NoteImageDestroyed(image, image_ci, size_bytes);
         vmaDestroyImage(allocator, image, allocation);
     }
 }
@@ -94,6 +103,7 @@ UniqueImage::~UniqueImage() {
 void UniqueImage::Destroy() {
     if (image) {
         BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
+        NoteImageDestroyed(image, image_ci, size_bytes);
         vmaDestroyImage(allocator, image, allocation);
         image = vk::Image{};
         allocation = {};
@@ -131,11 +141,41 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        // bbport: over the process's VRAM budget (other programs hold VRAM too, or the texture
+        // collector has not caught up): allocate anyway and let the driver page or fall back to
+        // system memory, slower for a while instead of the game stopping (code 23).
+        static std::atomic_flag noted = ATOMIC_FLAG_INIT;
+        if (!noted.test_and_set()) {
+            std::fprintf(stderr, "VRAM: over the budget, image of %ux%u allocated anyway\n",
+                         image_ci.extent.width, image_ci.extent.height);
+        }
+        VmaAllocationCreateInfo over_budget = alloc_ci;
+        over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget, &unsafe_image,
+                                &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // SacredFire: VRAM itself is full (a 4 GB card, or other programs): system memory
+            // where the driver allows it for this image, slow but not the game stopping.
+            static std::atomic_flag noted_host = ATOMIC_FLAG_INIT;
+            if (!noted_host.test_and_set()) {
+                std::fprintf(stderr, "VRAM: full, image of %ux%u put in system memory\n",
+                             image_ci.extent.width, image_ci.extent.height);
+            }
+            VmaAllocationCreateInfo host = over_budget;
+            host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            host.flags &= ~VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+            result = vmaCreateImage(allocator, &image_ci_unsafe, &host, &unsafe_image,
+                                    &allocation, &alloc_info);
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
     BbStats::vk_image_bytes.fetch_add(size_bytes, std::memory_order_relaxed);
+    Vulkan::Breadcrumbs::NoteImageCreated(Vulkan::Breadcrumbs::HandleId(image), image_ci.extent.width,
+                                          image_ci.extent.height, u32(image_ci.format), size_bytes);
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,

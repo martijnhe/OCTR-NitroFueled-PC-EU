@@ -9,11 +9,12 @@
 let
   lib = pkgs.lib;
   root = ./..;
-  assetDirs = [ "scripts" "patches" "launcher" "assets" ];
+  assetDirs = [ "scripts" "patches" "launcher" "assets" "shaders" ];
   # Only what the package needs (the tree also holds builds, profiles and captures).
   wanted = [
     "run.sh" "run.py" "out" "out/sacredfire" "out/bb-gpu-capabilities" "out/gpu" "out/gpu/libbbgpu.so"
-    "out/VERSION" "tools" "tools/gen_import_names.py" "tools/merge_update.py"
+    "out/VERSION" "out/ctr-launcher" "tools" "tools/gen_import_names.py" "tools/merge_update.py"
+    "art" "art/ctr-menu.ttf" "art/ctr-menu-font-license.txt"
   ] ++ assetDirs;
   src = builtins.path {
     name = "bbport-src";
@@ -126,15 +127,31 @@ pkgs.stdenv.mkDerivation {
     cp run.sh run.py $d/   # run.py: scripts/online_config.py reuses its online setup
     cp out/VERSION $d/VERSION   # the build's source revision (build.sh); run.sh and the launcher show it
     cp -r scripts patches launcher assets $d/
+    # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
+    if [ -d shaders ]; then cp -r shaders $d/; fi
     # run.sh generates the eboot's import names with it (shadPS4's aerolib list, fetched once).
     install -Dm755 tools/gen_import_names.py $d/tools/gen_import_names.py
     install -Dm755 tools/merge_update.py $d/tools/merge_update.py   # the launcher's game setup
     install -m755 out/sacredfire $d/bin/sacredfire
     install -m755 out/bb-gpu-capabilities $d/bin/bb-gpu-capabilities
+    install -m755 out/ctr-launcher $d/bin/ctr-launcher   # the launcher (launcher/linux)
+    # Its fonts: DejaVu Sans for text and its symbols (icons, the PlayStation shapes), and the
+    # CTR menu font from art/ for the header and the Play button.
+    mkdir -p $d/fonts $d/art
+    cp ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans-Bold.ttf $d/fonts/
+    cp art/ctr-menu.ttf art/ctr-menu-font-license.txt $d/art/
     install -Dm755 out/gpu/libbbgpu.so $d/bin/gpu/libbbgpu.so
     # Their debug info names the build environment's headers (the full GCC, Vulkan headers): Nix
     # took those for dependencies, ~300 MB. Symbols stay (crash reports).
-    ${pkgs.binutils-unwrapped}/bin/strip --strip-debug $d/bin/sacredfire $d/bin/bb-gpu-capabilities
+    ${pkgs.binutils-unwrapped}/bin/strip --strip-debug $d/bin/sacredfire $d/bin/bb-gpu-capabilities $d/bin/ctr-launcher
+    # Menu entry and icon: nix-appimage takes the .desktop whose Exec is the main program and its
+    # 256x256 icon as the AppImage's own (.DirIcon), which AppImage managers (Gear Lever,
+    # AppImageLauncher) need to integrate it.
+    install -Dm644 launcher/io.github.sacredfire.Launcher.png \
+      $out/share/icons/hicolor/256x256/apps/io.github.sacredfire.Launcher.png
+    mkdir -p $out/share/applications
+    sed -e 's|@LAUNCHER@|sacredfire|' -e 's|@ICON@|io.github.sacredfire.Launcher|' \
+      launcher/io.github.sacredfire.Launcher.desktop.in > $out/share/applications/io.github.sacredfire.Launcher.desktop
     runHook postInstall
   '';
   postFixup = ''

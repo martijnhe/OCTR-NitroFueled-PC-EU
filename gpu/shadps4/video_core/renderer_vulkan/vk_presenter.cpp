@@ -591,9 +591,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
+    // SacredFire: a frame not presented (minimised window, swapchain not presentable) still
+    // completes its flip only once the GPU has drawn it, as a present would. Completed at once,
+    // it let the game run ahead of the GPU and reuse command and constant memory still in use
+    // (late fences, garbage buffers: device lost, code 23, a few minutes after minimising).
+    // Never called under submit_mutex: the draw thread needs it to submit the frame.
+    const auto skip_frame = [&] {
+        if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+            draw_scheduler.WaitSubmitted(frame->ready_tick);
+            draw_scheduler.GetWorkSemaphore()->Wait(frame->ready_tick);
+        }
+        free_frame();
+    };
+
     // bbport: nothing to present to while the window is minimised (a 0x0 surface, issue #31).
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
-        free_frame();
+        skip_frame();
         return;
     }
     // Recreate the swapchain if the window was resized (or was minimised at the last try).
@@ -602,10 +615,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // fullscreen in game corrupted the heap on NVIDIA (0xc0000374).
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
         !swapchain.IsPresentable()) {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.IsPresentable()) {
-            free_frame();
+        bool presentable;
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+            presentable = swapchain.IsPresentable();
+        }
+        if (!presentable) {
+            skip_frame();
             return;
         }
     }
@@ -658,12 +675,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     frame->fg_ready = false;
 
     if (!swapchain.AcquireNextImage()) {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.AcquireNextImage()) {
+        bool acquired;
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+            acquired = swapchain.AcquireNextImage();
+        }
+        if (!acquired) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
+            skip_frame();
             return;
         }
     }

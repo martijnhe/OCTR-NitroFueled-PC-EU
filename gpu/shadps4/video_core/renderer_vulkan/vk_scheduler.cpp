@@ -243,14 +243,30 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         .pStencilAttachment = db.has_stencil ? &stencil_attachment : nullptr,
     };
 
+    // bbport: a breadcrumb for the start of the pass (its loads and clears write the targets).
+    const Breadcrumbs::Crumb crumb{
+        .kind = Breadcrumbs::Kind::Transfer,
+        .name = "render pass start",
+        .count = {render_state.width, render_state.height, 0},
+        .dst = render_state.num_color_attachments
+                   ? Breadcrumbs::HandleId(render_state.color_attachments[0].image_view)
+                   : Breadcrumbs::HandleId(db.image_view),
+    };
     if (workers.empty()) {
+        const u32 id = Breadcrumbs::Enabled() ? Breadcrumbs::Note(crumb_stream, crumb) : 0;
+        if (id) {
+            Breadcrumbs::Mark(current_cmdbuf, crumb_stream, id, false);
+        }
         current_cmdbuf.beginRendering(rendering_info);
+        if (id) {
+            Breadcrumbs::Mark(current_cmdbuf, crumb_stream, id, true);
+        }
         CarryResume(true);
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
-            stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
+    RecordCrumb(crumb, [info = rendering_info, color_attachments, depth_attachment,
+                        stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
             info.pDepthAttachment = &depth_attachment;
@@ -970,10 +986,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
-        vk::PipelineStageFlagBits::eAllCommands,
-        vk::PipelineStageFlagBits::eColorAttachmentOutput,
-    };
+    // bbport (upstream #5231): every wait covers all stages. The presenter's second wait (the
+    // game's frame) held only colour output, yet the frame is read before it, by the blit
+    // (transfer) and the layout transitions; and a third or fourth wait read past this array.
+    std::array<vk::PipelineStageFlags, std::tuple_size_v<decltype(info.wait_semas)>> wait_stage_masks;
+    wait_stage_masks.fill(vk::PipelineStageFlagBits::eAllCommands);
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
         .waitSemaphoreValueCount = info.num_wait_semas,
@@ -1051,9 +1068,10 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
         }
         recorded_segments.fetch_add(num_cmdbufs, std::memory_order_relaxed);
         recorded_submissions.fetch_add(1, std::memory_order_relaxed);
+        // bbport (upstream #5231): every wait covers all stages (see SubmitExecution).
         static constexpr std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
             vk::PipelineStageFlagBits::eAllCommands,
-            vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            vk::PipelineStageFlagBits::eAllCommands,
             vk::PipelineStageFlagBits::eAllCommands,
             vk::PipelineStageFlagBits::eAllCommands,
         };

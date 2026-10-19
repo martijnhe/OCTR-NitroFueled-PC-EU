@@ -38,6 +38,8 @@ Which version brought what: *[Versions of this edition](#versions-of-this-editio
 | **60 FPS** | The community 60 FPS patch, now also for the EU edition. | menu *60 FPS unlock* / `patch_60fps=1` |
 | **No motion blur** | Motion blur off, also for the EU edition. | menu *Disable motion blur* / `patch_no_motion_blur=1` |
 | **Ultrawide** | On a monitor wider than 16:9 (2560x1080, 3440x1440, ...) the game draws at the monitor's own size; the HUD spreads to the edges. The first start asks *Ultrawide? Yes / No* (with *Ask me every time*). | menu *Ultrawide* / `ultrawide=1`, `ultrawide_ask` |
+| **Launcher (GetLostIn's)** | GetLostIn's launcher (v0.4: Play with a summary, Settings, Controls with a live controller test, players and button mapping, Achievements, Patches, Saves, DLC, Tools) brought to Linux and the Steam Deck on SDL3, usable with a controller. *Open the launcher at start* switches it on or off for the AppImage and the Steam shortcut, in the launcher and in the in-game menu (Insert or L3+R3, General). `--launcher` always opens it; `BB_GTK_LAUNCHER=1` opens the older GTK launcher. | launcher *Settings → Launcher* / menu *General* / `launcher_at_start=1` |
+| **Corrected 21:9 and 32:9 screens** | Menus, backgrounds and a centered HUD made for 21:9 and 32:9, by tcosi (the European edition through GetLostIn's port), for the 1.21 update of both editions. Choose the aspect ratio, then the screen size: 3440x1440 or 2560x1080 for 21:9; 5120x1440, 3840x1080, 2560x720 or 7680x2160 for 32:9. Offline only for now (with online on, the game starts at 16:9); no FSR or DLSS with these layouts. The game files are not changed (about 9 MB of archive patches are prepared once). See [docs/sacredfire/18-widescreen-layouts.md](docs/sacredfire/18-widescreen-layouts.md). | launchers *Settings → Display → Aspect ratio*, menu *Picture → Aspect ratio* / `widescreen_layout=21x9`, `widescreen_output=3440x1440` |
 | **16:9 videos and cutscenes in ultrawide** | The intro videos are shown at 16:9 with black bars instead of stretched. Story cutscenes get the field of view of a 16:9 screen, so the shot fills the width without showing off-stage and their subtitles stay whole (Linux / Steam Deck; on Windows they are shown at 16:9 with black bars). Gameplay stays ultrawide. The camera fly-over before a race (the track's name over the track) stays ultrawide. Turn it off to keep them wide. | on by default; menu *Ultrawide: videos and cutscenes at 16:9* / `ultrawide_cinematics=0` |
 | **Title and customization screens in ultrawide** | The title screen and the kart customization screen before a race are 3D sets with a backdrop made for 16:9: their camera gets the field of view of a 16:9 screen, so the backdrop fills the width and the menus keep their ultrawide layout. The videos inside menus (track previews, hints) stay ultrawide too. | on by default; menu *Ultrawide: title and customization screens fill the width* / `ultrawide_frontend=0` |
 | **Internal resolution** | 480p to native 4K (1440p is the PS4 Pro's own), now also on Linux and the Steam Deck. | menu *Internal resolution* / `render_res=1440` |
@@ -174,14 +176,19 @@ forms (the update's version, the Grand Prix, and the names, sizes and checksums 
 
 The notes below are from the upstream project (Windows packaging, releases, credits).
 
-**Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**
+**Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
+Linux, with online play on a community server.**
 
-This is a Windows fork of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native
-Linux port of the game by T3CHNOLOG1C. The game's own x86-64 code runs directly on the CPU, a
-small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 translates
-the PS4 GPU work to Vulkan. This fork adds the Windows layer (loader, memory, TLS, exceptions,
-files, timers) from Supermedo's Windows port of bbport, plus the fixes SacredFire needed on top
-of it: see [packaging/windows/README.md](packaging/windows/README.md).
+This is the online fork of [GetLostIn's CTR-NitroFueled-PC](https://github.com/GetLostIn/CTR-NitroFueled-PC),
+the Windows build of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native Linux
+port of the game by T3CHNOLOG1C. The game's own x86-64 code runs directly on the CPU, a small
+runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 translates the PS4
+GPU work to Vulkan. The Windows layer (loader, memory, TLS, exceptions, files, timers) comes from
+Supermedo's Windows port of bbport: see [packaging/windows/README.md](packaging/windows/README.md).
+
+On top of that, this fork adds **online play** (see [Online](#online) below): public races,
+private rooms, groups, friends and the Pit Stop through the RyuNET server, with your own
+nickname, Discord account linking and Discord invites.
 
 > **No game files are included.** You need your own dump of the game and its 1.21 update.
 > Both builds of the 1.21 update work: the one for firmware 5.05 (the reference) and the one for
@@ -196,9 +203,22 @@ the in-game menu, and the game's DLC from your own packages (optional). Internal
 480p to native 4K, with AMD FSR 1 or temporal upscaling (AMD FSR 3.1, or NVIDIA DLSS on RTX
 cards; experimental). Tested on
 Windows 11 24H2 with an NVIDIA RTX 3070 and an Intel i5-9500: 110-130 FPS uncapped in races with
-the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). Shaders seen for the first
-time cause short stalls; they are cached and load at start from the next session on, or compile
-in the background with the experimental switch.
+the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). From v0.5.3 the first
+start prepares the game's shaders for your GPU from your own dump (a few seconds, once:
+[shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
+compile them; the few the recipe lacks are compiled when first seen and cached.
+
+| Release | What it brought |
+|---|---|
+| [v0.5.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.4) | Every race track in public matchmaking, at the same chance (Koala Carnival and the later Grand Prix tracks included); regional relays for the online tunnel; corrected 21:9 and 32:9 menus and centered HUD (tcosi; USA and EU 1.21, offline); CPUs without MOVBE/BMI1/LZCNT (Sandy and Ivy Bridge) can play; achievements with in-game notices and a launcher page; the in-game menu in Spanish, General tab first; a badly extracted game is reported instead of a code 3 (contributions from GetLostIn's repository by MetaHeart and Naif Alqurashi). Code 23 is not fixed and can still happen. |
+| [v0.5.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.3) | The European edition (CUSA14876, with or without its 1.21 update), online with the USA one; ultrawide screens; the first start prepares the game's shaders for your GPU (far fewer stalls in the first races); one more cause of the code 23 GPU hang removed (a stale GPU idle signal; code 23 itself is not fixed and can still happen); shadPS4 crash fixes; Bluetooth controllers no longer drop from rumble; the launcher checks for updates and installs them keeping your files; the Linux launcher gets the Windows options (volume, player per controller, window settings, more languages, patches) |
+| [v0.5.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.2) | Two causes of the code 23 GPU hang mitigated (garbage buffer descriptors, a minimised window) and more detail in crash logs; Linux launcher close to the Windows one: controls, DLC, friends, internal resolution, Discord account link, status and invites (also from Steam), AppImage icon, Steam shortcut that survives updates |
+| [v0.5.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.1) (pre-release) | Fix for the code 3 crash at start; the game no longer stops when VRAM runs short; GPU hangs (code 23) report their cause in the log; a server tunnel for players who cannot reach each other directly; redesigned launcher, now named *Crash™ Team Racing Nitro-Fueled*, in nine languages, with the NAT type on its Play page; Linux launcher: FPS limit, Unlock Everything, in-game settings kept |
+| [v0.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5) | Your own online nickname, linked to your Discord account and recoverable on any PC; Discord invites that join a private room directly; Discord presence; game volume (0-200%); keyboard as a split-screen player; optional "Unlock Everything" patch; Pit Stop items from the server or from your save; players on the same network can join each other; fixes for error code 3 and for some causes of code 23; first Linux AppImage of this fork |
+| [v0.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.4) | Private matches and groups; the in-game friends list |
+| [v0.3 online](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.3) | First online build: matchmaking, lobbies and the Pit Stop on the RyuNET server; Online section in the launcher (server and nickname); hostnames for the server; bundled Python 3.14 |
+
+Earlier releases, from [GetLostIn's repository](https://github.com/GetLostIn/CTR-NitroFueled-PC):
 
 | Release | What it brought |
 |---|---|
@@ -209,11 +229,55 @@ in the background with the experimental switch.
 
 ### Quick start (Windows)
 
-**Easiest: the portable build.** Download `CTR-NitroFueled-PC-portable-windows.zip` from
-[Releases](https://github.com/GetLostIn/CTR-NitroFueled-PC/releases), unzip it anywhere and open
-**`CTR-NitroFueled-PC.exe`**, the launcher: choose your `CUSA13795` (base game) and
+**Easiest: the portable build.** Download `CTR-NitroFueled-PC-portable-<version>-windows.zip`
+from [Releases](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases), unzip it anywhere and
+open **`Crash™ Team Racing Nitro-Fueled.exe`** (`CTR-NitroFueled-PC.exe` before v0.5.1), the launcher: choose your `CUSA13795` (base game) and
 `CUSA13795-patch` (update 1.21) folders, press *Prepare the game* once (it merges them with hard
 links, no extra disk space) and then *Play*. Python is bundled; you only need a Vulkan 1.3 GPU.
+
+**Updating:** unzip the new version over your folder to keep your settings, saves and nickname
+key, or unzip it into a new folder and copy `user\`, `bbport.ini`, `launcher.ini` and
+`ryunet_online.key` across.
+
+**Linux and Steam Deck:** Download the AppImage from the same Releases page (see [AppImage](#appimage-steam-deck) below). The v0.5 asset is `SacredFire-x86_64.AppImage`; automated releases use `SacredFire-<version>-x86_64.AppImage`. Data, saves and the nickname key live in `~/.local/share/sacredfire`.
+
+### Online
+
+Online is on by default and connects to the community server **octr.ryu7w7.xyz**
+([RyuNET](https://github.com/Ryu7w7/ryunet-demonware-ctr), a Demonware server written for this
+game). From the game's own menus you can:
+
+- race in **public matches** with other players, alone or with your **group**;
+- create **private rooms** and invite your friends;
+- see your **friends list** in the game;
+- buy items in the **Pit Stop**: with the items bought on the server, or with the ones already
+  unlocked in your own save (launcher: Online tab).
+
+**Your nickname.** Each player needs their own nickname (3 to 16 letters, digits, `_` or `-`).
+Shared default names (RyuPC, Player, Jugador...) are refused. The first installation that plays
+with a nickname keeps it, through the key in `ryunet_online.key` (copied to
+`%APPDATA%\CTR-NitroFueled-PC`): **never share that file.**
+
+**Discord** (Windows launcher, Online tab):
+
+- **Link with Discord** ties your nickname to your Discord account. *Recover with Discord* gets
+  it back on any PC or after reinstalling. Linked nicknames never expire; unlinked ones that
+  nobody uses for 60 days become free again.
+- **Presence and invites:** with Discord open, your profile shows what you are playing, and an
+  invite sent from Discord drops the friend who accepts it straight into your private room.
+
+**Playing offline:** turn online off in the launcher's Online tab, or set `BB_ONLINE=0`. The
+server address can be changed there too, to play on your own RyuNET server.
+
+**Connection problems:** the game connects players directly to each other (UDP port 3074), as
+on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) cannot reach some
+other players. If a match keeps failing with the same people, enabling UPnP on your router or
+forwarding UDP 3074 to your PC helps.
+
+**Supporting the server:** the server and its domain are paid for by Ryu7w7. If you want to help
+keep them running, you can donate on [Ko-fi](https://ko-fi.com/ryu7w7). Donations are voluntary
+and give nothing in the game: online play is the same for everyone. They pay for the server, not
+for the game or the port.
 
 **Picture** (launcher: Settings > Display; in game: Insert):
 
@@ -242,7 +306,8 @@ content is in the game). Spanish and English.
 ### Which game dumps work
 
 The launcher needs the game as **folders of decrypted files** from **CUSA13795** (the USA
-edition): the base game (v01.00) and the 1.21 update. The folder names do not matter. When you
+edition) or, from v0.5.3, **CUSA14876** (the European edition): the base game (v01.00) and the
+1.21 update. The launcher tells which edition you chose and shows its patches and languages. The folder names do not matter. When you
 choose a folder, the launcher says in green or red what it found.
 
 | Your dump | What it looks like | Works? |
@@ -251,12 +316,13 @@ choose a folder, the launcher says in green or red what it found.
 | Extracted with **PS4 PKG Tool** | `Image0\` (eboot.bin, sce_module, the game data) and `Sc0\` (param.sfo and the rest of sce_sys) | Yes, from v0.3: choose the folder that holds `Image0` and `Sc0` and press *Prepare the game*. With v0.2.1, first copy **everything** in `Image0` to that folder and everything in `Sc0` to a new `sce_sys` folder in it |
 | Any other tool | Works if the files end up in one of the two layouts above | Yes |
 | A `.pkg` file that was not extracted | | No: extract it first. Only the DLC tab takes `.pkg` files |
-| Another region or edition (EU CUSA14876, JP…) | | No: each one has a different executable |
+| The European edition (CUSA14876) | | Yes, from v0.5.3, also online with the USA edition |
+| Another region or edition (JP…) | | No: each one has a different executable |
 | Encrypted files (straight from a disc or an official package) | `eboot.bin could not be read as a decrypted PS4 executable` | No: dump the game again |
 
 Both builds of the 1.21 update work (for firmware 5.05 and for 6.72+). If something fails, the
 launcher's log and `user\last_run.log` say which file is missing; attach `last_run.log` when you
-[open an issue](https://github.com/GetLostIn/CTR-NitroFueled-PC/issues).
+[open an issue](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/issues).
 
 **Or build it yourself:**
 
@@ -268,6 +334,14 @@ launcher's log and `user\last_run.log` say which file is missing; attach `last_r
    `python tools/merge_update.py <CUSA13795> <CUSA13795-patch> <CUSA13795-1.21>`.
 4. Run: `set BB_GAME_DIR=<CUSA13795-1.21>` and `C:\msys64\clang64\bin\python.exe run.py`.
    In the game, **Insert** (or L3+R3) opens the port's menu.
+
+For local builds, GitHub Actions builds, and tagged releases, follow the [desktop build guide](docs/MANUAL_BUILDS.md).
+
+CPUs without MOVBE, BMI1 or LZCNT (Sandy Bridge, Ivy Bridge) also need `iced-x86` for the Python
+that runs `run.py`, which the port uses to rewrite those instructions at start
+([15-isa-rewrite.md](docs/sacredfire/15-isa-rewrite.md), issue #31). MSYS2's Python cannot install
+the wheel: use a python.org Python 3 (`pip install iced-x86`) or the portable ZIP from Releases,
+which bundles it.
 
 ### Credits
 
@@ -289,6 +363,9 @@ This fork stands on the work of:
   and GeForce RTX are trademarks and/or registered trademarks of NVIDIA Corporation. The GPL
   program contains no NVIDIA code: it loads the separate bridge DLL when present.
 - Windows port of SacredFire: [GetLostIn](https://github.com/GetLostIn), with Claude (Anthropic).
+- Online (this fork) and the RyuNET server: [Ryu7w7](https://github.com/Ryu7w7), with Claude (Anthropic).
+- **[leomoon](https://github.com/leomoon)**: Linux crash diagnostics.
+- **Camiloop**: the "Unlock Everything" patch.
 
 Licensed under the GNU GPL v2 or later, as SacredFire, bbport and shadPS4. The rest of this
 README is SacredFire's own (Linux, Steam Deck).
@@ -346,9 +423,11 @@ full play-through has not been verified, and the Steam Deck (RADV) is the only t
   the base game, replacing files (eboot.bin and sce_sys too), or use `tools/merge_update.py`
   (it also reads PS4 PKG Tool's Image0 + Sc0 layout; see "Which game dumps work" above). The launcher and `run.sh` check
   the executable image and say what is missing (`BB_SKIP_GAME_CHECK=1` skips the check).
-- To build: GCC, CMake, Ninja, Python 3, glslang, SDL3, Vulkan headers and the libraries in
-  `shell.nix` (with [Nix](https://nixos.org), `shell.nix` provides them). On Arch:
-  `tools/deps.sh` fetches the header-only libraries the distribution lacks.
+- To build: GCC, CMake, Ninja, Python 3 (for CPUs without MOVBE, BMI1 or LZCNT,
+  `pip install iced-x86`: [15-isa-rewrite.md](docs/sacredfire/15-isa-rewrite.md)), glslang, SDL3,
+  Vulkan headers and the libraries in `shell.nix` (with [Nix](https://nixos.org), `shell.nix`
+  provides them). On Arch: `tools/deps.sh` fetches the header-only libraries the distribution
+  lacks.
 
 ## Build and run
 
@@ -387,6 +466,14 @@ The keyboard works next to a gamepad: WASD left stick, arrow keys right stick, S
 LShift Circle, E Square, Q Triangle, 1/3 L1/R1, R/F L2/R2, Z/C L3/R3, Enter Options, IJKL
 d-pad. The launcher's *Keyboard* page rebinds them (`key.<input>=` lines in `bbport.ini`;
 `pad.<input>=` rebinds gamepad buttons).
+
+**Achievements** (v0.4). The game's trophies unlock as on a PS4: each one is kept in
+`user\trophies\<TITLE_ID>\unlocked.txt` with its date, shows a notice over the game, and the
+platinum comes once all the others are. The launcher's *Achievements* tab shows them with their
+pictures (from `sce_sys\trophy\trophy00.trp`), progress, dates and a reset (with a backup). Names,
+descriptions and grades are encrypted in the game with the PS4's trophy key, which this port does
+not include: with your own key (the same shadPS4 uses; paste it, or import it from shadPS4's
+`keys.json`) they are decrypted as shadPS4 does and kept in `trophies.tsv`.
 
 **PS4 Pro mode** (`BB_NEO=1`, the launcher's switch): the game sees a PS4 Pro (7-CPU mode,
 5568 MiB of direct memory) and takes its Pro rendering path; with the 1080p patch it renders

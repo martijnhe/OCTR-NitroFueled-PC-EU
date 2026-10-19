@@ -188,6 +188,37 @@ class RenderResTests(unittest.TestCase):
         self.assertEqual(plan({**dlss('quality'), 'temporal': 'fsr3'})['label'], '1440p')
 
 
+class ThemeTests(unittest.TestCase):
+    """Season events: the hidden-object mode read from the online config replaced by a constant."""
+
+    def elf(self):
+        code = bytes.fromhex(patches.THEME_SIGNATURE.replace(' ', '')) + b'\0' * 4
+        return tiny_elf(b'\0' * 0x1b + code + b'\0' * 16, vaddr=0xfb6000)
+
+    def test_normal_season_writes_nothing(self):
+        with patch.dict('os.environ', {'BB_THEME': ''}):
+            self.assertEqual(patches.theme_patches({}), [])
+            self.assertEqual(patches.theme_patches({'theme': 'default'}), [])
+            self.assertEqual(patches.theme_patches({'theme': 'pumpkin'}), [])
+
+    def test_mode_from_server_or_ini(self):
+        elf = self.elf()
+        segments = eboot_segments(elf)
+        want = lambda mode: [(0xfb601b, bytes.fromhex(f'4c89efbe{mode:02x}0000000f1f440000'))]
+        with patch.dict('os.environ', {'BB_THEME': ''}):
+            self.assertEqual(compile_external(patches.theme_patches({'theme': 'golden'}), segments, elf), want(2))
+        # Online, the server's season wins over bbport.ini.
+        with patch.dict('os.environ', {'BB_THEME': 'halloween'}):
+            self.assertEqual(compile_external(patches.theme_patches({'theme': 'golden'}), segments, elf), want(1))
+        with patch.dict('os.environ', {'BB_THEME': 'default'}):
+            self.assertEqual(patches.theme_patches({'theme': 'golden'}), [])
+
+    def test_replacement_keeps_the_call(self):
+        # 13 bytes replaced, so the call to setMode (e8, the signature's last byte) stays in place.
+        self.assertEqual(len(bytes.fromhex('4c89efbe010000000f1f440000')), 13)
+        self.assertEqual(len(bytes.fromhex(patches.THEME_SIGNATURE.replace(' ', ''))), 14)
+
+
 class GamePatchTests(unittest.TestCase):
     """The bundled CTR patches, chosen through bbport.ini patch_* keys (the in-game menu)."""
 

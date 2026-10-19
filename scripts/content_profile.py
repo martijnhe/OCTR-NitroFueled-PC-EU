@@ -37,28 +37,47 @@ def pkg_param(path):
     raise ValueError('no param.sfo')
 
 
+def is_candidate(path):
+    """A .pkg file or an extracted folder: what the dlc folder is scanned for."""
+    path = Path(path)
+    return (path.is_file() and path.suffix.lower() == '.pkg') or path.is_dir()
+
+
+def describe_addon(path, title_id):
+    """(label, title, problem) of one package or extracted folder; problem is '' for an add-on of
+    title_id. The launchers list the dlc folder with it."""
+    path = Path(path)
+    try:
+        if path.is_file():
+            info = pkg_param(path)
+        elif (path / 'sce_sys' / 'param.sfo').is_file():
+            info = sfo((path / 'sce_sys' / 'param.sfo').read_bytes())
+        else:
+            return '', path.name, 'the folder has no sce_sys/param.sfo'
+    except (OSError, ValueError, struct.error, IndexError) as error:
+        return '', path.name, str(error)
+    content = info.get('CONTENT_ID', '')
+    label = content.rsplit('-', 1)[-1] if '-' in content else ''
+    if info.get('TITLE_ID') != title_id or info.get('CATEGORY') != 'ac' or len(label) != 16:
+        return label, info.get('TITLE', path.name), f'not an add-on of {title_id} ({content or "no CONTENT_ID"})'
+    return label, info.get('TITLE', label) or label, ''
+
+
 def find_addons(dlc_dir, title_id):
     """[(label, title, source)] of this game's add-ons in dlc_dir, by label (first one wins)."""
     found = {}
     if not dlc_dir or not Path(dlc_dir).is_dir():
         return []
     for path in sorted(Path(dlc_dir).iterdir()):
-        try:
-            if path.is_file() and path.suffix.lower() == '.pkg':
-                info = pkg_param(path)
-            elif (path / 'sce_sys' / 'param.sfo').is_file():
-                info = sfo((path / 'sce_sys' / 'param.sfo').read_bytes())
-            else:
-                continue
-        except (OSError, ValueError, struct.error, IndexError) as error:
-            print(f'DLC: skipped {path.name}: {error}')
+        if not is_candidate(path):
             continue
-        content = info.get('CONTENT_ID', '')
-        label = content.rsplit('-', 1)[-1] if '-' in content else ''
-        if info.get('TITLE_ID') != title_id or info.get('CATEGORY') != 'ac' or len(label) != 16:
-            print(f'DLC: skipped {path.name}: not an add-on of {title_id} ({content or "no CONTENT_ID"})')
+        label, title, problem = describe_addon(path, title_id)
+        if problem:
+            if path.is_dir() and problem == 'the folder has no sce_sys/param.sfo':
+                continue  # any other folder, as before
+            print(f'DLC: skipped {path.name}: {problem}')
             continue
-        found.setdefault(label, (label, info.get('TITLE', label), path.name))
+        found.setdefault(label, (label, title, path.name))
     return list(found.values())[:MAX_ADDONS]
 
 

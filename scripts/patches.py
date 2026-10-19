@@ -148,6 +148,33 @@ def render_patches(settings):
     return [(f'render/{plan["label"]}',None,meta)]
 
 
+# Season events: the Grand Prix "hidden object" events still in the game (LooseData/
+# OctaneHiddenObjectGameplayData.igz in update2.pak): ghosts (the Spooky Grand Prix) or golden Wumpa
+# fruit that escape from crates, to be caught during races. The online config the official server
+# sent (NetConfig, CNetworkConfig._hiddenObjectMode) chose one; ours sends none, so the event is off.
+# On each level load the hidden-object manager (0xfb5f50 in eboot.elf) reads that mode from the
+# config ([[config+0x130]+0x18]) and calls its setMode (0xfb7710); the patch hands setMode a
+# constant instead: mov rdi,r13; mov esi,<mode>; 5-byte nop, in place of the 13-byte read.
+# EOctaneHiddenObjectGameplayModes: eOOGM_None 0, eOOGM_SpookyGhost 1, eOOGM_GoldenWumpa 2 (the
+# game itself swaps golden Wumpa for ghosts on Twilight Tour). BB_THEME (run.py: the season the
+# online server announces) or bbport.ini theme= picks it.
+THEME_VALUES={'default':0,'halloween':1,'golden':2}
+THEME_SIGNATURE='49 8b 87 30 01 00 00 4c 89 ef 8b 70 18 e8'
+
+
+def theme_patches(settings):
+    """The built-in patch element for the season event (none for the normal season)."""
+    theme=(os.environ.get('BB_THEME') or (settings or {}).get('theme') or 'default').strip().lower()
+    value=THEME_VALUES.get(theme,0)
+    if not value:
+        return []
+    meta=ET.Element('Metadata',Name=f'Season event {theme}',AppVer=APP_VERSION,AppElf='eboot.bin')
+    ET.SubElement(ET.SubElement(meta,'PatchList'),'Line',Type='bytes',Address='0x013b601b',
+                  Value=f'4c89efbe{value:02x}0000000f1f440000',Signature=THEME_SIGNATURE,
+                  SignatureOffset='0x0')
+    return [(f'theme/{theme}',None,meta)]
+
+
 def read_settings(path):
     """bbport.ini as a dict (key=value lines; # comments)."""
     settings={}
@@ -393,6 +420,21 @@ def external_patches(directory, app_version=APP_VERSION, title_id=TITLE_ID):
     return found
 
 
+def all_external_patches(directories, app_version=APP_VERSION, title_id=TITLE_ID):
+    """external_patches of several folders (the bundled patches/, then the player's own: the Linux
+    package's is read-only). A later folder's file replaces the patches of a file of the same name."""
+    by_file,seen={},set()
+    for directory in directories:
+        folder=Path(directory).resolve()
+        if folder in seen: continue  # the same folder named twice (a checkout's data folder)
+        seen.add(folder)
+        for key,path,meta in external_patches(directory,app_version,title_id):
+            if path.name in by_file and by_file[path.name][0]!=path.parent:
+                by_file[path.name]=(path.parent,[])
+            by_file.setdefault(path.name,(path.parent,[]))[1].append((key,path,meta))
+    return [patch for name in sorted(by_file) for patch in by_file[name][1]]
+
+
 def external_selection(found, config, ini=None):
     """Selected patches: patches.json {"enabled": [...], "disabled": [...]} overrides each file's
     isEnabled; bbport.ini patch_* keys (GAME_PATCH_KEYS, the in-game menu) add to it."""
@@ -417,7 +459,7 @@ def external_selection(found, config, ini=None):
 def compile_external(selected, segments, elf=None):
     """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
     eboot.elf bytes) is needed for lines with a Signature."""
-    writes=[]
+    writes,claims=[],[]
     for key,_,meta in selected:
         try:
             ours=[]
@@ -435,6 +477,14 @@ def compile_external(selected, segments, elf=None):
         except ValueError as error:
             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
             continue
+        # Two patches writing the same bytes: the later one's bytes win, and neither works as
+        # made (a widescreen layout and a patch of the same code, scripts/widescreen.py).
+        for offset,data in ours:
+            for start,end,other in claims:
+                if other!=key and offset<end and start<offset+len(data):
+                    print(f'Patches: {key} and {other} both write {offset+EBOOT_BASE:#010x}: the later one wins',file=sys.stderr)
+                    break
+        claims+=[(offset,offset+len(data),key) for offset,data in ours]
         writes+=ours
         print(f'Patches: external {key} ({len(ours)} writes)')
     return writes
@@ -451,7 +501,9 @@ def write_blob(out, writes):
 def main():
     root=Path(__file__).resolve().parent.parent
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--patches-dir',type=Path,default=root/'patches',help='patch XML files (shadPS4 format)')
+    p.add_argument('--patches-dir',type=Path,action='append',
+                   help='patch XML files (shadPS4 format); repeatable, a later folder\'s file replaces one of the same name '
+                        '(default: patches/ in the checkout)')
     p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled patches')
     p.add_argument('--app-version',default=APP_VERSION)
     p.add_argument('--title-id',default=TITLE_ID,help='the game (patch files naming other ids are skipped)')
@@ -485,9 +537,10 @@ def main():
         return
     elf=(a.out/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
-    found=external_patches(a.patches_dir,a.app_version,a.title_id)
+    found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
-    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings),
+    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
+                            +theme_patches(settings),
                             segments,elf)
     write_blob(a.out,writes)
     print(f'Patches: {len(writes)} writes from {len(found)} available patches')

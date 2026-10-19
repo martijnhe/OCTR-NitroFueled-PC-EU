@@ -16,17 +16,45 @@ class Instance;
 
 namespace Vulkan::Breadcrumbs {
 
-enum class Kind : u8 { Pass, Draw, DrawIndexed, DrawIndirect, Dispatch, DispatchIndirect };
+enum class Kind : u8 {
+    Pass,
+    Draw,
+    DrawIndexed,
+    DrawIndirect,
+    Dispatch,
+    DispatchIndirect,
+    Transfer,
+    /// A pipeline barrier: size = image transitions, dst/src/hash[0]/hash[1] = the first four
+    /// images, count = first image's old and new layout, 1 with a memory barrier.
+    Barrier,
+};
 
 struct Crumb {
     Kind kind = Kind::Pass;
-    const char* name = nullptr; ///< our passes: a string literal
+    const char* name = nullptr; ///< our passes and transfers: a string literal
     u64 hash[2]{};              ///< guest shaders: vertex and pixel, or compute
     u64 program[2]{};           ///< their code in guest memory
-    u64 address = 0;            ///< indirect arguments
-    u32 count[3]{};             ///< indices or vertices and instances, or groups
+    u64 address = 0;            ///< indirect arguments; transfers: the guest address written
+    u32 count[3]{};             ///< indices or vertices and instances, or groups; transfers:
+                                ///< width, height and vk::Format of the image
     u32 args_slot = ~0u;        ///< indirect dispatches: where the GPU copies its arguments
+    /// Transfers: the Vulkan handles written and read (images or buffers), the bytes, and the
+    /// GPU address of a buffer written (0 when it has none).
+    u64 dst = 0, src = 0, size = 0, dst_gpu = 0;
 };
+
+/// A Vulkan handle as a number, for Crumb::dst/src and NoteDestroyed.
+template <typename Handle>
+[[nodiscard]] inline u64 HandleId(Handle handle) noexcept {
+    return u64(reinterpret_cast<uintptr_t>(static_cast<typename Handle::CType>(handle)));
+}
+
+/// An image or buffer destroyed (`what` a string literal): on device lost, a command that still
+/// used it is named, and so is a fault address inside a freed buffer.
+void NoteDestroyed(const char* what, u64 handle, u64 gpu_address, u64 size, u32 width = 0,
+                   u32 height = 0, u32 format = 0);
+/// A live image, so the report can describe the images of a barrier.
+void NoteImageCreated(u64 handle, u32 width, u32 height, u32 format, u64 size);
 
 /// A stream for a new scheduler (`name` a string literal); the first call creates the buffer.
 u32 NewStream(const Instance& instance, const char* name);

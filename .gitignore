@@ -7,6 +7,12 @@ pgo/
 *.png
 !/assets/**/*.png
 !/site/**/*.png
+!/art/ctr-hero.png
+!/art/ctr-logo.png
+!/art/ctr-menu-background.png
+!/launcher/io.github.sacredfire.Launcher.png
+# The Steam artwork the Windows package ships (SteamGridDB, like art/).
+!/packaging/windows/steamgrid/*.png
 last_run.log
 dist/
 packaging/runtime-paths.nix
@@ -48,5 +54,6 @@ gpu/shim/bbport_gnm_table.inc
 # Written by the online runtime while it runs: the server address and session state.
 /host_overrides.json
 /sessions/
+/widescreen/
 /CUSA13795*/
 *.pkg

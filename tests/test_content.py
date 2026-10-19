@@ -48,6 +48,13 @@ class ProfileTests(unittest.TestCase):
             with patch.dict('os.environ',{'BB_DLC':'0'}):
                 content_profile.prepare(p,p/'out',dlc_dir=dlc)
             self.assertEqual(len((p/'out/content.bin').read_bytes()),32)
+            # What the launchers list for each item of the dlc folder.
+            self.assertEqual(content_profile.describe_addon(dlc/'a.pkg','CUSA13795'),('CTRDELUXEPACK001','Deluxe',''))
+            self.assertEqual(content_profile.describe_addon(dlc/'kart','CUSA13795')[0],'CTRCODEKART00001')
+            self.assertIn('not an add-on',content_profile.describe_addon(dlc/'other.pkg','CUSA13795')[2])
+            self.assertEqual(content_profile.describe_addon(dlc/'broken.pkg','CUSA13795')[2],'not a PS4 package')
+            (dlc/'empty').mkdir()
+            self.assertIn('param.sfo',content_profile.describe_addon(dlc/'empty','CUSA13795')[2])
 
     def test_invalid_sfo_parameter_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

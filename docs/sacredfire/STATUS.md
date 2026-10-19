@@ -164,9 +164,7 @@ with the desktop apps closed.
 - Draft release v0.1 on GitHub with `dist/SacredFire-x86_64.AppImage` (841 MB) attached;
   the repository stays private until the user publishes it. Tags 0.1 to 0.5-pre3 are bbport's,
   so SacredFire releases use a `v` prefix.
-- `.github/workflows/tests.yml` runs the Python tests, shell syntax and compile checks on every
-  push; `.github/ISSUE_TEMPLATE/` has the bug report form; `CONTRIBUTING.md` states the
-  no-game-files rule and how changes are made.
+- `.github/workflows/release.yml` runs the Python tests, shell syntax and compile checks on main pushes and pull requests, and builds releases on `v*` tags; `.github/ISSUE_TEMPLATE/` has the bug report form; `CONTRIBUTING.md` states the no-game-files rule and how changes are made.
 - Game patches credited to illusion and TroyWarez (illusionyy/PS-Game-Patch) in the patch
   file, the settings table, the patch compiler, run.sh, the launcher, the README and here.
 - A first start without network no longer aborts (import names fall back to the compiled table).
@@ -221,3 +219,15 @@ with the desktop apps closed.
   `packaging/appimage.sh` refuses an uncommitted or unbuilt tree and writes
   `dist/SacredFire-x86_64.AppImage.{sha256,build.txt}` (version, commit, nixpkgs). Release steps
   are in CONTRIBUTING.md.
+
+## Older CPUs: MOVBE/BMI1/LZCNT (2026-10-15)
+
+- Sandy Bridge and Ivy Bridge CPUs (issue #31: i5-3570, i7-3770) lack the Haswell instructions the
+  image uses (MOVBE 391 sites, BMI1 3528, LZCNT 324) and the game stopped at the first one. The ISA
+  rewrite (15-isa-rewrite.md, the design of gow3_pc's G3PROBE5) scans the linked image with iced-x86
+  at launch and rewrites the sites at load: 4243 sites, 0 unsupported. The portable ZIP bundles
+  iced-x86 (MIT) through `packaging/windows/make_portable.py`; source runs need `pip install
+  iced-x86` in the Python that runs `run.py`.
+- `--cpu-features` names the missing sets before the game starts; fatal sets (SSE4.2, POPCNT, AVX)
+  still stop the launch. Tested on an i7-3770 / RX 580: the table applies with 0 skipped and the
+  game boots to the start screen.

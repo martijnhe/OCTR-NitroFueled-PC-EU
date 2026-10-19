@@ -1,5 +1,5 @@
 @echo off
-rem CTR Nitro-Fueled PC sin el launcher (CTR-NitroFueled-PC.exe hace lo mismo con ventana).
+rem CTR Nitro-Fueled PC sin el launcher (el launcher, "Crash Team Racing Nitro-Fueled.exe", hace lo mismo con ventana).
 rem El juego mergeado va en .\CUSA13795-1.21 (o define BB_GAME_DIR).
 rem Menu del port dentro del juego: tecla Insert o L3+R3 en el mando.
 setlocal

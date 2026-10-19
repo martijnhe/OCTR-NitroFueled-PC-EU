@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include <numeric>
 
 #include "common/alignment.h"
@@ -71,6 +73,18 @@ UniqueBuffer::~UniqueBuffer() {
 }
 
 void UniqueBuffer::Destroy() {
+    // bbport: noted for the GPU breadcrumbs (a device loss names a destroyed buffer still in use,
+    // or one that held the faulting address).
+    if (buffer) {
+        u64 size = 0;
+        if (allocation) {
+            VmaAllocationInfo info{};
+            vmaGetAllocationInfo(allocator, allocation, &info);
+            size = info.size;
+        }
+        Vulkan::Breadcrumbs::NoteDestroyed("buffer", Vulkan::Breadcrumbs::HandleId(buffer),
+                                           bda_addr, size);
+    }
     if (allocation) {
         vmaDestroyBuffer(allocator, buffer, allocation);
     } else if (buffer) {
@@ -101,6 +115,18 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         VkBuffer unsafe_buffer{};
         VkResult result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                           &allocation, out_alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // bbport: over the VRAM budget, as for images (UniqueImage::Create): allocate anyway.
+            static std::atomic_flag noted = ATOMIC_FLAG_INIT;
+            if (!noted.test_and_set()) {
+                std::fprintf(stderr, "VRAM: over the budget, buffer of %llu MiB allocated anyway\n",
+                             (unsigned long long)(buffer_ci.size >> 20));
+            }
+            VmaAllocationCreateInfo over_budget = alloc_ci;
+            over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &over_budget, &unsafe_buffer,
+                                     &allocation, out_alloc_info);
+        }
         ASSERT_MSG(result == VK_SUCCESS, "Failed allocating buffer with error {}",
                    vk::to_string(vk::Result{result}));
         buffer = vk::Buffer{unsafe_buffer};

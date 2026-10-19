@@ -97,6 +97,8 @@ fi
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/runtime*.c)
+# isa_emulate runs inside guest code: no XMM/YMM.
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -c src/isa_emulate.c -o out/isa_emulate.o
 # Third-party decoders: compiled once, without this project's -Werror policy.
 atrac9=(third_party/LibAtrac9/C/src/*.c)
 if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/libatrac9.a -name '*.c') ]]; then
@@ -104,8 +106,30 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
 echo "Built $PWD/out/sacredfire"
+# The launcher (launcher/linux: GetLostIn's Windows launcher v0.4 on SDL3, for Linux and the Steam
+# Deck): Dear ImGui with its SDL3 and SDL_Renderer backends, compiled once into out/launcher/.
+CXX=${CXX:-$(command -v c++ || command -v g++ || true)}
+if [[ -z $CXX ]]; then echo 'Install a C++ compiler or set CXX.' >&2; exit 1; fi
+mkdir -p out/launcher
+launcher_flags=(-std=c++20 -O2 -Igpu/third_party/imgui -Igpu/third_party/imgui/backends "${includes[@]}")
+launcher_objects=()
+for source in gpu/third_party/imgui/imgui{,_draw,_tables,_widgets}.cpp \
+              gpu/third_party/imgui/backends/imgui_impl_sdl3.cpp gpu/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp; do
+    object=out/launcher/$(basename "${source%.cpp}").o
+    if [[ ! -f $object || $source -nt $object ]]; then "$CXX" "${launcher_flags[@]}" -w -c "$source" -o "$object"; fi
+    launcher_objects+=("$object")
+done
+for source in launcher/linux/launcher.cpp launcher/linux/gamepads.cpp; do
+    object=out/launcher/$(basename "${source%.cpp}").o
+    if [[ ! -f $object || $source -nt $object || launcher/linux/gamepads.h -nt $object || src/ctr_trophies.h -nt $object ]]; then
+        "$CXX" "${launcher_flags[@]}" -Wall -Wextra -Werror -c "$source" -o "$object"
+    fi
+    launcher_objects+=("$object")
+done
+"$CXX" "${launcher_objects[@]}" "${libraries[@]}" -ldl -pthread -o out/ctr-launcher
+echo "Built $PWD/out/ctr-launcher"
 # out/VERSION: the source revision this build came from (the nearest v* tag, else the commit;
 # "-dirty" when tracked files differ from it). run.sh prints it, the launcher shows it and the
 # package carries it, so a published binary can be matched to its source. The FSR-Vulkan patch
@@ -132,4 +156,6 @@ if [[ ${1:-} == --test ]]; then
     out/content-test --addons
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -I. -Isrc tests/test_eventflag.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/eventflag-test
     out/eventflag-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_tunnel.c src/runtime_net_tunnel.c -o out/net-tunnel-test
+    out/net-tunnel-test
 fi

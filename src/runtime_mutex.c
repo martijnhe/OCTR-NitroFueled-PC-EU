@@ -11,11 +11,21 @@
 #define COND_MAGIC  UINT32_C(0x434f4e44)
 
 typedef struct { int type; } GuestAttr;
+/* The game's libc takes a mutex handle for libkernel's struct pthread_mutex: right after creating
+ * a heap's mutex (0x2c4ebed, 0x2c4ee91, 0x2c50aa2 in the linked image) it sets that struct's
+ * m_flags itself, or dword [handle+0x20],0x100. ps4_view gives such writes room inside this
+ * object. With a 16-byte object the write landed in the next heap block, usually winpthread's own
+ * object for the native mutex, whose function table pointer then gained 0x100: the first malloc
+ * crashed in pthread_mutex_trylock, or the heap was never created (code 3 at start, about one
+ * start in two on Windows). */
 typedef struct {
     uint32_t magic;
     uint32_t destroyed;
+    unsigned char ps4_view[0x100 - 8];
     pthread_mutex_t native;
 } GuestMutex;
+_Static_assert(offsetof(GuestMutex, ps4_view) <= 0x20 && offsetof(GuestMutex, native) >= 0x100,
+               "libkernel's pthread_mutex fields the libc writes must fall in ps4_view");
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;

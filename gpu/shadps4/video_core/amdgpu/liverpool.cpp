@@ -444,6 +444,11 @@ void SignalEop(const PM4CmdEventWriteEop& eop, u64 seq) {
         [seq](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
             EopDelayTest().Apply();
+            // issue #2: the game already rebuilt this label's slot for a later frame.
+            if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), data, num_bytes,
+                                      BbClobber::Eop)) {
+                return;
+            }
             BbFreeCheck::Check(reinterpret_cast<u64>(address), num_bytes, &data, BbFreeCheck::Eop,
                                seq);
             BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
@@ -593,6 +598,10 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 void WriteEosLabel(void* address, u64 value, u32 num_bytes) {
     auto* memory = Core::Memory::Instance();
     EosDelayTest().Apply(); // BB_EOS_DELAY_TEST (experiment, see LabelDelayTest)
+    // issue #2: the game already rebuilt this label's slot for a later frame.
+    if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), value, num_bytes, BbClobber::Eos)) {
+        return;
+    }
     BbFreeCheck::Check(reinterpret_cast<u64>(address), num_bytes, &value, BbFreeCheck::Eos);
     BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
     BbWriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, BbWriteLog::Fence);
@@ -757,7 +766,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
-            while ((cblock.de_count - cblock.ce_count) >= diff) {
+            // bbport: upstream #5406: ce - de, guarded against unsigned underflow.
+            while (cblock.ce_count >= cblock.de_count && (cblock.ce_count - cblock.de_count) >= diff) {
                 YIELD_CE();
             }
             break;
@@ -772,6 +782,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                 YIELD_CE();
                 RESUME_CE(task);
             }
+            task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
             break;
         }
         default:
@@ -1108,6 +1119,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     // walked them right after the memcpy).
     if (copy && dcb_depth == 0) {
         BbClobber::NoteDecoding(seq);
+        BbClobber::NoteDecodingCopy(seq, copy->guest_dcb,
+                                    std::shared_ptr<const u32>(copy, copy->data.data()),
+                                    copy->dcb_dwords);
         copy->bad_at_decode = BbClobber::FirstBadHeader(dcb.data(), dcb.size());
         if (copy->bad_at_decode != copy->bad_at_submit) {
             const double ms = std::chrono::duration<double, std::milli>(
@@ -1742,6 +1756,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     YIELD_GFX();
                     RESUME_GFX(task);
                 }
+                task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
                 break;
             }
             case PM4ItOpcode::IncrementDeCounter: {
@@ -1749,7 +1764,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
-                while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
+                // bbport: upstream #5406: no CE task, nothing to wait for.
+                while (cblock.ce_count <= cblock.de_count && ce_task.handle && !ce_task.handle.done()) {
                     RESUME_GFX(ce_task);
                 }
                 break;
@@ -1907,6 +1923,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 YIELD_ASC(vqid);
                 RESUME_ASC(task, vqid);
             }
+            task.handle.destroy(); // bbport: upstream #5258, the finished frame was leaked
             break;
         }
         case PM4ItOpcode::DmaData: {

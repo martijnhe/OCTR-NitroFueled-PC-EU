@@ -37,7 +37,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         if (value == "en") v.menu_language = MenuLanguage::English;
         else if (value == "ru") v.menu_language = MenuLanguage::Russian;
         else if (value == "nl") v.menu_language = MenuLanguage::Dutch;
-        else std::printf("Settings: unknown menu_language '%s' (expected en, ru or nl)\n", value.c_str());
+        else if (value == "es") v.menu_language = MenuLanguage::Spanish;
+        else std::printf("Settings: unknown menu_language '%s' (expected en, ru, nl or es)\n", value.c_str());
     } else if (key == "upscaler") {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (value == UpscalerName(u)) {
@@ -161,10 +162,25 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.output_res = r;
             }
         }
-    } else if (key == "aspect_ratio") {
-        if (value == "21:9" || value == "21x9") v.aspect_ratio = 1;
-        else if (value == "32:9" || value == "32x9") v.aspect_ratio = 2;
-        else v.aspect_ratio = 0;
+        // v0.3 kept the ultrawide size here; it becomes the layout's size.
+        for (int o = 0; o < WidescreenOutputCount && !v.widescreen_seen; ++o) {
+            if (value == WidescreenOutputs[o]) v.widescreen_output = o;
+        }
+    } else if (key == "launcher_at_start") {
+        v.launcher_at_start = i != 0;
+    } else if (key == "widescreen_layout") {
+        v.widescreen_seen = true;
+        v.widescreen_layout = 0;
+        for (int l = 0; l < WidescreenLayoutCount; ++l) {
+            if (value == WidescreenLayouts[l]) v.widescreen_layout = l;
+        }
+    } else if (key == "widescreen_output") {
+        for (int o = 0; o < WidescreenOutputCount; ++o) {
+            if (value == WidescreenOutputs[o]) v.widescreen_output = o;
+        }
+    } else if (key == "aspect_ratio" && !v.widescreen_seen) {
+        // v0.3's single selector (aspect_ratio=21:9|32:9 with output_res=WxH): the same choice.
+        v.widescreen_layout = value == "21:9" || value == "21x9" ? 1 : value == "32:9" || value == "32x9" ? 2 : 0;
     } else {
         for (int e = 0; e < EffectCount; ++e) {
             if (key == Effects[e].key) {
@@ -220,6 +236,7 @@ const char* MenuText(const char* english, const char* russian) {
     switch (Get().menu_language.load()) {
     case MenuLanguage::Russian: return russian;
     case MenuLanguage::Dutch: return DutchText(english);
+    case MenuLanguage::Spanish: return Spanish(english);
     default: return english;
     }
 }
@@ -246,6 +263,7 @@ void Load() {
         };
         v.menu_language = starts('r', 'u')   ? MenuLanguage::Russian
                           : starts('n', 'l') ? MenuLanguage::Dutch
+                          : starts('e', 's') ? MenuLanguage::Spanish
                                              : MenuLanguage::English;
     }
     if (FILE* file = std::fopen(Path(), "r")) {
@@ -261,6 +279,14 @@ void Load() {
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
+    }
+    // v0.4: the launcher's language (BB_MENU_LANGUAGE) wins over the saved one: the launcher is
+    // where the player picks it.
+    if (const char* lang = std::getenv("BB_MENU_LANGUAGE"); lang && *lang) {
+        if (!std::strncmp(lang, "es", 2)) v.menu_language = MenuLanguage::Spanish;
+        else if (!std::strncmp(lang, "ru", 2)) v.menu_language = MenuLanguage::Russian;
+        else if (!std::strncmp(lang, "nl", 2)) v.menu_language = MenuLanguage::Dutch;
+        else if (!std::strncmp(lang, "en", 2)) v.menu_language = MenuLanguage::English;
     }
     // SacredFire: bbport's temporal upscalers and object motion vectors read the scene of the game
     // bbport was built for (its render targets, constants and vertex streams), not this one; they
@@ -331,14 +357,22 @@ void Load() {
     v.startup_dlss_quality = v.dlss_quality;
     v.startup_dlss_output = v.dlss_output;
     v.startup_output_res = v.output_res;
-    v.startup_aspect_ratio = v.aspect_ratio;
+    {
+        // A size outside the layout's own range: the layout's first one (scripts/widescreen.py too).
+        const int layout = std::clamp(v.widescreen_layout.load(), 0, WidescreenLayoutCount - 1);
+        if (v.widescreen_output < WidescreenFirst[layout] || v.widescreen_output >= WidescreenEnd[layout]) {
+            v.widescreen_output = WidescreenFirst[layout];
+        }
+    }
+    v.startup_widescreen_layout = v.widescreen_layout;
+    v.startup_widescreen_output = v.widescreen_output;
     v.startup_live_resolution = v.live_resolution;
 }
 
 bool RenderSizeNeedsRestart() {
     const auto& v = Get();
     // As scripts/patches.py render_plan: a DLSS quality mode decides, else render_res.
-    // v0.3: the ultrawide aspect also needs a restart (archives + executable).
+    // A widescreen layout also needs a restart (archive patches and executable at start).
     const auto key = [](int temporal, int quality, int output, int render_res) {
         return temporal == TemporalDlss && quality > 0 ? 100 + quality * 2 + output : render_res;
     };
@@ -353,7 +387,8 @@ bool RenderSizeNeedsRestart() {
     return key(v.temporal, v.dlss_quality, v.dlss_output, v.render_res) !=
            key(v.startup_temporal, v.startup_dlss_quality, v.startup_dlss_output,
                v.startup_render_res) ||
-           v.aspect_ratio != v.startup_aspect_ratio;
+           v.widescreen_layout != v.startup_widescreen_layout ||
+           (v.widescreen_layout != 0 && v.widescreen_output != v.startup_widescreen_output);
 }
 
 bool UltrawideAvailable() {
@@ -425,6 +460,7 @@ void Save() {
     }
     put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru"
                          : v.menu_language == MenuLanguage::Dutch ? "nl"
+                         : v.menu_language == MenuLanguage::Spanish ? "es"
                                                                   : "en");
     put("upscaler", UpscalerName(v.upscaler));
     put("preset", std::to_string(v.preset.load()));
@@ -480,9 +516,13 @@ void Save() {
     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                           std::to_string(OutputHeights[v.output_res]));
     {
-        const int aspect = std::clamp(v.aspect_ratio.load(), 0, 2);
-        put("aspect_ratio", aspect == 1 ? "21:9" : aspect == 2 ? "32:9" : "16:9");
+        const int layout = std::clamp(v.widescreen_layout.load(), 0, WidescreenLayoutCount - 1);
+        put("widescreen_layout", WidescreenLayouts[layout]);
+        if (layout != 0) {
+            put("widescreen_output", WidescreenOutputs[std::clamp(v.widescreen_output.load(), 0, WidescreenOutputCount - 1)]);
+        }
     }
+    put("launcher_at_start", flag(v.launcher_at_start));
     // Read by run.sh at start.
     put("live_resolution", v.live_resolution < 0 ? "auto" : flag(v.live_resolution != 0));
     if (v.menu_x >= 0.0f && v.menu_y >= 0.0f) {

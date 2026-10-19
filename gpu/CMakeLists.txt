@@ -229,14 +229,24 @@ endif()
 # SacredFire: the game executable is sacredfire.exe (out/sacredfire on Linux).
 if (WIN32)
     enable_language(RC)
+    # The resource scripts embed these files; CMake does not scan .rc includes, so without this
+    # a changed icon or manifest kept the old one in the executables.
+    set(BB_WIN_RES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/windows)
+    set_source_files_properties(${BB_WIN_RES}/sacredfire.rc PROPERTIES
+        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/sacredfire.manifest")
+    set_source_files_properties(${BB_WIN_RES}/launcher.rc PROPERTIES
+        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/launcher.manifest")
     file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
     file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
     add_library(atrac9 STATIC ${BB_ATRAC9})
     target_compile_options(atrac9 PRIVATE -w)
     set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
-    add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/vulkan_smoke.c
+    add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
+        ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/sacredfire.rc)
     set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    # isa_emulate runs inside guest code: no XMM/YMM.
+    set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
     # Newer clang (MSYS2) warns about write-only counters kept for diagnostics.
     target_compile_options(sacredfire PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror
         -Wno-unknown-warning-option -Wno-unused-but-set-global>)
@@ -250,15 +260,22 @@ if (WIN32)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
     add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
-        ../launcher/windows/discord_link.cpp
+        ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp ../launcher/windows/port_update.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
     target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends)
     target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
     target_link_options(ctr-launcher PRIVATE -static -municode -s)
-    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
+    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi windowscodecs ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
     set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
+    # The updater: versions, the release answer, protected files and a rolled-back install.
+    add_executable(port-update-test EXCLUDE_FROM_ALL ../tests/test_port_update.cpp ../launcher/windows/port_update.cpp)
+    target_compile_options(port-update-test PRIVATE -UNDEBUG -Wall -Wextra)
+    target_include_directories(port-update-test PRIVATE ../launcher/windows)
+    target_compile_definitions(port-update-test PRIVATE UNICODE _UNICODE)
+    target_link_options(port-update-test PRIVATE -static)
+    target_link_libraries(port-update-test PRIVATE winhttp bcrypt)
     # Discord presence and invites against a fake Discord pipe; never touches the real one.
     add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp
         ../launcher/windows/discord_presence.cpp)
@@ -271,6 +288,12 @@ if (WIN32)
     target_include_directories(discord-link-test PRIVATE ../launcher/windows)
     target_link_options(discord-link-test PRIVATE -static)
     target_link_libraries(discord-link-test PRIVATE ws2_32 bcrypt shell32)
+    # The launcher's NAT type test: reply parsing and classification.
+    add_executable(nat-check-test EXCLUDE_FROM_ALL ../tests/test_nat_check.cpp ../launcher/windows/nat_check.cpp)
+    target_compile_options(nat-check-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_include_directories(nat-check-test PRIVATE ../launcher/windows)
+    target_link_options(nat-check-test PRIVATE -static)
+    target_link_libraries(nat-check-test PRIVATE ws2_32 bcrypt)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.

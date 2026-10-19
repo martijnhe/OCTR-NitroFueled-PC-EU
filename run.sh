@@ -66,8 +66,10 @@ export BB_GAME_DIR=$game  # the in-game menu lists the CTR TV episodes in its ar
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
+# The edition's title ID and version (the EU edition has its own patches); the USA 1.21 update when
+# param.sfo cannot be read, as run.py.
 read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
-title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}  # game_check.py had no answer
+title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
@@ -86,14 +88,50 @@ fi
 # DLC (optional): the player's add-on packages in dlc/ (BB_DLC_DIR), reported installed (as run.py).
 "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
     --dlc-dir "${BB_DLC_DIR:-$data/dlc}"
+# The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
+# own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
+# BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+recipe=${BB_SHADER_RECIPE:-shaders/recipe.zip}
+if [[ ${BB_SHADER_RECIPE:-} != 0 && -f $recipe ]]; then
+    "$PYTHON" scripts/gcn_shaders.py "$game" --out "$out"
+    BB_SHADER_RECIPE=$(realpath "$recipe")
+    BB_GCN_SHADERS=$(realpath "$out")/gcn_shaders.bin
+    export BB_SHADER_RECIPE BB_GCN_SHADERS
+else
+    unset BB_SHADER_RECIPE BB_GCN_SHADERS
+fi
+# Every race track in the online playlist, at the same weight, always (as run.py): the game reads
+# it through an archive patch. When it cannot be built, the game keeps its own.
+unset BB_ARCHIVE_PATCHES
+"$PYTHON" scripts/online_playlist.py "$game" --out "$out"
+base_patches=()
+if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online_playlist.bbpatch"); fi
+# A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py), as run.py: the
+# render path and the patches read its settings, and it adds its archive patches (the playlist's
+# kept in them), executable patch and HUD scale.
+settings=$BB_CONFIG layout_patches=()
+while IFS='=' read -r key value; do
+    case $key in
+        settings) settings=$value ;;
+        patches_dir) if [[ -n $value ]]; then layout_patches=(--patches-dir "$value"); fi ;;
+        archive_patches) if [[ -n $value ]]; then export BB_ARCHIVE_PATCHES=$value; fi ;;
+        env.*) export "${key#env.}=$value" ;;
+    esac
+done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CONFIG" \
+             --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
-# keys) or patches.json; BB_PATCHES_DIR adds a folder of further shadPS4-format XML files.
+# keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
+# in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
-    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$BB_CONFIG"
+"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
+    "${layout_patches[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
+    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$settings"
 patch_args=(--patches "$out/patches.bin")
+# bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
+# above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
+read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$settings") || true
 # unlock_all (default off; bbport.ini unlock_all=1 starts it on, the in-game menu switches it at
 # any time): the runtime sets the build setups' _unlockAll flag (src/runtime_unlock.c), found by
 # the CBuildData vtable of this executable.
@@ -101,9 +139,6 @@ unset BB_UNLOCK_ALL_VTABLE BB_UNLOCK_ALL
 vt=$("$PYTHON" scripts/patches.py --print-unlock-vtable --out "$out" || true)
 if [[ -n $vt ]]; then export BB_UNLOCK_ALL_VTABLE=$vt; fi
 if [[ -f $BB_CONFIG ]] && grep -qx 'unlock_all=1' "$BB_CONFIG"; then export BB_UNLOCK_ALL=1; else export BB_UNLOCK_ALL=0; fi
-# bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
-# above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
-read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$BB_CONFIG") || true
 if [[ -n ${plan_pro:-} ]]; then
     export BB_NEO=$plan_pro
     if [[ $plan_heap == 1 && ${BB_DMEM_MB:-0} -lt 7168 ]]; then export BB_DMEM_MB=7168; fi
@@ -112,7 +147,7 @@ fi
 # Ultrawide: videos and cutscenes at 16:9 with black bars (src/runtime_cinematic.c) unless
 # bbport.ini has ultrawide_cinematics=0.
 unset BB_CINEMATIC_16X9 BB_CUTSCENE
-if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$BB_CONFIG" 2>/dev/null; then
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$settings" 2>/dev/null; then
     export BB_CINEMATIC_16X9=1
     BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
     export BB_CUTSCENE
@@ -120,7 +155,7 @@ fi
 # Ultrawide: the title and customization screens with a 16:9 field of view, so their backdrop
 # fills the width (src/runtime_frontend.c), unless bbport.ini has ultrawide_frontend=0.
 unset BB_FRONTEND_FOV
-if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$BB_CONFIG" 2>/dev/null; then
+if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$settings" 2>/dev/null; then
     BB_FRONTEND_FOV=$("$PYTHON" scripts/patches.py --print-frontend --out "$out" || true)
     export BB_FRONTEND_FOV
 fi

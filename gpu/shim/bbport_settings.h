@@ -19,7 +19,7 @@ inline bool IsFsr4(int upscaler) {
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
-enum class MenuLanguage { English, Russian, Dutch };
+enum class MenuLanguage { English, Russian, Dutch, Spanish };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -85,11 +85,22 @@ inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatch
 inline constexpr int RenderResHeights[] = {480, 720, 1080, 1440, 1620, 2160};
 inline constexpr int RenderResCount = 6;
 /// Live output resolutions: the upscaler's output and the UI host targets.
-/// v0.3: 16:9 modes plus the ultrawide outputs (Settings > Display > Aspect ratio).
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 2560, 3440, 5120};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 1080, 1440, 1440};
-inline constexpr int OutputCount = 7;
+inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
+inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
+inline constexpr int OutputCount = 4;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
+/// Corrected 21:9 and 32:9 layouts by tcosi (scripts/widescreen.py; bbport.ini widescreen_layout
+/// and widescreen_output, applied at start): the aspect ratio, then the screen size, as in the
+/// launchers' Settings > Display > Aspect ratio. A layout's sizes are its range of
+/// WidescreenOutputs, the first one its default.
+inline constexpr const char* WidescreenLayouts[] = {"off", "21x9", "32x9"};
+inline constexpr const char* WidescreenLayoutLabels[] = {"16:9", "21:9", "32:9"};
+inline constexpr int WidescreenLayoutCount = 3;
+inline constexpr const char* WidescreenOutputs[] = {"3440x1440", "2560x1080", "5120x1440",
+                                                    "3840x1080", "2560x720",  "7680x2160"};
+inline constexpr int WidescreenOutputCount = 6;
+inline constexpr int WidescreenFirst[] = {0, 0, 2}; ///< per layout: its first size
+inline constexpr int WidescreenEnd[] = {0, 2, 6};   ///< per layout: one past its last size
 
 /// SacredFire: controller ports for split screen (bbport.ini port.1..4: SDL GUID or part of the
 /// gamepad name; the runtime re-reads the file when the menu saves it).
@@ -206,9 +217,14 @@ struct Values {
     bool legacy_fsr3 = false;
     std::atomic<float> fsr3_sharpness{0.3f}; ///< FSR 3's RCAS, 0 off .. 1
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
-    /// v0.3 native ultrawide aspect (bbport.ini aspect_ratio): 0=16:9, 1=21:9, 2=32:9.
-    /// Applied at start by run.py (needs a restart); upscaling is off while ultrawide.
-    std::atomic<int> aspect_ratio{0};
+    /// widescreen_layout (index into WidescreenLayouts, 0 = 16:9) and widescreen_output (index
+    /// into WidescreenOutputs, within the layout's range). Applied at start (restart).
+    std::atomic<int> widescreen_layout{0};
+    /// launcher_at_start: the AppImage / Steam shortcut opens the launcher first (Linux and the
+    /// Steam Deck; launcher/sacredfire_launcher.py reads it). Takes effect at the next start.
+    std::atomic<bool> launcher_at_start{false};
+    std::atomic<int> widescreen_output{0};
+    bool widescreen_seen = false; ///< while loading: widescreen_layout= was read (not the old aspect_ratio=)
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
     std::atomic<int> live_resolution{0};
@@ -228,7 +244,7 @@ struct Values {
     int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
-    int startup_aspect_ratio = 0;
+    int startup_widescreen_layout = 0, startup_widescreen_output = 0;
     int startup_live_resolution = 0;
 };
 
@@ -247,6 +263,10 @@ std::mutex& OnlineMutex();
 bool NicknameOk(const char* name);
 /// Localized overlay text; the Language selector itself stays in English.
 const char* MenuText(const char* english, const char* russian);
+/// v0.4: the Spanish of an English menu text (bbport_menu_es.cpp); the English one if missing.
+const char* Spanish(const char* english);
+/// An English-only label in the menu's language (Spanish when chosen, else English).
+inline const char* Label(const char* english) { return MenuText(english, english); }
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();

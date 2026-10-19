@@ -72,7 +72,9 @@ public:
     bool IsVkHostMarkersEnabled() { static const auto value = Flag("BB_VK_MARKERS", false); return value; }
     bool IsVkValidationCoreEnabled() { return true; }
     bool IsVkValidationEnabled() { static const auto value = Flag("BB_VK_VALIDATION", false); return value; }
-    bool IsVkValidationGpuEnabled() { return false; }
+    /// BB_VK_VALIDATION_GPU=1 with BB_VK_VALIDATION=1: GPU-assisted validation (shaders checked
+    /// for out-of-bounds accesses; very slow, for hunting GPU faults).
+    bool IsVkValidationGpuEnabled() { static const auto value = Flag("BB_VK_VALIDATION_GPU", false); return value; }
     bool IsVkValidationSyncEnabled() { static const auto value = Flag("BB_VK_VALIDATION_SYNC", false); return value; }
 };
 #define EmulatorSettings (*EmulatorSettingsImpl::GetInstance())

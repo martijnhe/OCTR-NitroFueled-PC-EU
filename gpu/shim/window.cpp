@@ -343,6 +343,12 @@ bool WindowSDL::PollEvents() {
         }
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            // SacredFire: the game ends with code 0 after this; the log says why (a player
+            // closing the window or Alt+F4, or the system asking every program to quit).
+            std::printf("Window: closed (%s); the game ends\n",
+                        event.type == SDL_EVENT_QUIT ? "quit requested: Alt+F4, sign-out or shutdown"
+                                                     : "the window's close button");
+            std::fflush(stdout);
             is_open = false;
             break;
         default:

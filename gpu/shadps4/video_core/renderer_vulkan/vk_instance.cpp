@@ -243,7 +243,8 @@ bool Instance::CreateDevice() {
 #ifdef VK_VALVE_shader_mixed_float_dot_product
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
 #endif
-        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
+        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT,
+        vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -301,6 +302,9 @@ bool Instance::CreateDevice() {
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
     // bbport: GPU breadcrumbs (vk_breadcrumbs.h).
     buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+    // bbport: after a device loss the driver says what failed (Breadcrumbs::ReportDeviceLost).
+    device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
+                   add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -642,6 +646,9 @@ bool Instance::CreateDevice() {
             .shaderFloat8 = true,
             .shaderFloat8CooperativeMatrix = true,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+        },
     };
 
     if (!custom_border_color) {
@@ -708,6 +715,9 @@ bool Instance::CreateDevice() {
         device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
     }
 
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
+    }
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));

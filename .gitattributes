@@ -5,3 +5,5 @@
 *.sh text eol=lf
 run.py text eol=lf
 *.patch text eol=lf
+# Layout payload checksums cover exact bytes on every checkout platform.
+scripts/widescreen_data/** text eol=lf

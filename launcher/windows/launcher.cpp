@@ -11,18 +11,24 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <windowsx.h>
 #include <d3d11.h>
+#include <dwmapi.h>
+#include <wincodec.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <tlhelp32.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <cmath>
+#include <cwctype>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -43,7 +49,10 @@
 #include "imgui_impl_win32.h"
 
 #include "discord_link.h"
+#include "nat_check.h"
+#include "port_update.h"
 #include "discord_presence.h"
+#include "launcher_locales.h"
 
 namespace fs = std::filesystem;
 
@@ -60,6 +69,19 @@ constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
 constexpr std::uintmax_t kCompleteGameMinBytes = 10ull << 30;
+
+struct LauncherArtwork {
+    ID3D11ShaderResourceView* texture = nullptr;
+    UINT width = 0;
+    UINT height = 0;
+};
+LauncherArtwork g_hero_art;
+LauncherArtwork g_logo_art;
+LauncherArtwork g_menu_background;
+ImFont* g_ctr_font = nullptr;
+RECT g_titlebar_drag{};
+float g_ui_scale = 1.0f;
+extern ID3D11Device* g_device;
 
 // ---------------------------------------------------------------------------------------------
 // Text helpers
@@ -119,12 +141,74 @@ const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
+// The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
+// cards, colours and heading font; its icon-font glyphs are left out (this launcher has none).
+const ImVec4 kText{0.92f, 0.93f, 0.96f, 1.0f};
+const ImVec4 kBlue{0.30f, 0.64f, 1.0f, 1.0f};
+const ImVec4 kCard{0.118f, 0.133f, 0.188f, 1.0f};
+const ImVec4 kFrame{0.149f, 0.169f, 0.231f, 1.0f};
+const ImVec4 kBorder{0.173f, 0.192f, 0.259f, 1.0f};
+#define ICON_INFO ""
+#define ICON_CHECK ""
+#define ICON_FOLDER ""
+#define ICON_UNDO ""
+#define ICON_STAR ""
+ImFont* g_font_heading = nullptr;
+ImU32 Col(const ImVec4& c, float alpha = 1.0f) { return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, c.w * alpha)); }
+/// A rounded panel that grows with its content.
+void BeginCard(const char* id) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+    ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f * g_ui_scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * g_ui_scale, 12.0f * g_ui_scale));
+    ImGui::BeginChild(id, ImVec2(0, 0),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders);
+}
+void EndCard() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
 
 // ---------------------------------------------------------------------------------------------
 // Language: Spanish or English, chosen in the launcher (default: Windows' language).
 
-bool g_spanish = true;
-const char* T(const char* es, const char* en) { return g_spanish ? es : en; }
+bool g_spanish = false;
+std::string g_language = "auto";
+std::string g_active_locale = "en";
+
+std::string DetectWindowsLocale() {
+    wchar_t name[LOCALE_NAME_MAX_LENGTH]{};
+    if (!GetUserDefaultLocaleName(name, LOCALE_NAME_MAX_LENGTH)) return "en";
+    std::wstring locale(name);
+    std::transform(locale.begin(), locale.end(), locale.begin(), [](wchar_t c) { return wchar_t(towlower(c)); });
+    if (locale.rfind(L"pt", 0) == 0) return "pt_BR";
+    if (locale.rfind(L"es", 0) == 0) return "es";
+    if (locale.rfind(L"fr", 0) == 0) return "fr";
+    if (locale.rfind(L"de", 0) == 0) return "de";
+    if (locale.rfind(L"it", 0) == 0) return "it";
+    if (locale.rfind(L"ja", 0) == 0) return "ja";
+    if (locale.rfind(L"zh", 0) == 0) return "zh_CN";
+    if (locale.rfind(L"ru", 0) == 0) return "ru";
+    return "en";
+}
+
+void ApplyLauncherLanguage() {
+    g_active_locale = g_language == "auto" ? DetectWindowsLocale() : g_language;
+    g_spanish = g_active_locale == "es";
+}
+
+const char* T(const char* es, const char* en) {
+    if (g_active_locale == "es") return es;
+    if (g_active_locale == "en") return en;
+    const auto& all = GeneratedLocales();
+    const auto language = all.find(g_active_locale);
+    if (language != all.end()) {
+        const auto value = language->second.find(en);
+        if (value != language->second.end()) return value->second.c_str();
+    }
+    return en;
+}
 
 // ---------------------------------------------------------------------------------------------
 // key=value files, edited in place: comments, order and unknown keys are kept.
@@ -534,6 +618,16 @@ constexpr Choice kGameLanguages[] = {
     {"Francés", "French", "2"},
     {"Portugués (Brasil)", "Portuguese (Brazil)", "17"},
 };
+// The European build (CUSA14876) has English, Spain's Spanish (3), French, German (4), Italian (5)
+// and Arabic (21): the .lng texts in its archives.
+constexpr Choice kGameLanguagesEU[] = {
+    {"Inglés", "English", "1"},
+    {"Español (España)", "Spanish (Spain)", "3"},
+    {"Francés", "French", "2"},
+    {"Alemán", "German", "4"},
+    {"Italiano", "Italian", "5"},
+    {"Árabe", "Arabic", "21"},
+};
 constexpr Choice kPresentModes[] = {
     {"Mailbox (recomendado)", "Mailbox (recommended)", "Mailbox"},
     {"FIFO (VSync)", "FIFO (VSync)", "Fifo"},
@@ -564,6 +658,7 @@ struct Backup {
 
 struct PatchInfo {
     std::string key, name, author, note, version;
+    std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
     const char* ini_key = nullptr;
 };
@@ -578,6 +673,7 @@ enum class Job { None, Merge, Check, Play };
 
 struct App {
     HWND hwnd = nullptr;
+    int active_page = 0;
     fs::path root, bin;
     std::string version;
     std::optional<Python> python;
@@ -651,8 +747,6 @@ std::wstring GameTitle() {
 }
 
 std::string EffectiveRenderRes();
-std::string GameAspect();
-bool UltrawideCacheWarm();
 
 fs::path LauncherIni() { return g_app.root / L"launcher.ini"; }
 fs::path GameIni() { return g_app.root / L"bbport.ini"; }
@@ -662,7 +756,7 @@ void SaveLauncher() {
     a.launcher.Set("game_dir", PathText(a.game_dir));
     a.launcher.Set("base_dir", PathText(a.base_dir));
     a.launcher.Set("update_dir", PathText(a.update_dir));
-    a.launcher.Set("ui_language", g_spanish ? "es" : "en");
+    a.launcher.Set("ui_language", g_language);
     if (!a.launcher.Save(LauncherIni(), "# CTR-NitroFueled-PC launcher")) {
         a.notice = T("No se pudo guardar launcher.ini.", "Could not save launcher.ini.");
     }
@@ -1011,7 +1105,9 @@ bool NickTaken() {
 }
 
 /// The lobby this player hosts (their party or private room), from the server's
-/// /ryunet/party, refreshed in the background every 20 s while it is asked for.
+/// /ryunet/party, refreshed in the background every 5 s while it is asked for: Discord's
+/// "1 of 8" follows players joining and leaving. Only changes reach Discord (DiscordPresence
+/// sends nothing for an unchanged activity), within its 5 updates per 20 s.
 struct PartyPoll {
     std::mutex mutex;
     std::string id;  // "server|nick" of the last answer
@@ -1026,7 +1122,7 @@ PartyPoll g_party;
 bool PartyInfo(const std::string& server, const std::string& nick, int& players, int& max) {
     const std::string id = server + "|" + nick;
     std::scoped_lock lock{g_party.mutex};
-    if ((g_party.id != id || GetTickCount64() - g_party.at >= 20000) && !g_party.in_flight) {
+    if ((g_party.id != id || GetTickCount64() - g_party.at >= 5000) && !g_party.in_flight) {
         g_party.in_flight = true;
         std::thread([server, nick, id] {
             const std::string body = HttpGet(server, L"/ryunet/party?name=" + Widen(nick));
@@ -1045,6 +1141,60 @@ bool PartyInfo(const std::string& server, const std::string& nick, int& players,
     players = g_party.players;
     max = g_party.max;
     return true;
+}
+
+/// The NAT type test (nat_check.h), on a worker thread: once per server while the launcher is
+/// open (the Play page's status line starts it), again with the Online tab's button.
+struct NatState {
+    std::mutex mutex;
+    bool running = false, done = false;
+    std::string server;  // what the last test asked
+    NatCheck::Result result;
+};
+NatState g_nat;
+
+void StartNatCheck(const std::string& server) {
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        if (g_nat.running) return;
+        g_nat.running = true;
+        g_nat.server = server;
+    }
+    std::thread([server] {
+        const NatCheck::Result r = NatCheck::Check(server);
+        std::scoped_lock lock{g_nat.mutex};
+        g_nat.result = r;
+        g_nat.running = false;
+        g_nat.done = true;
+    }).detach();
+}
+
+/// Short label and colour for the Play page ("NAT: type 2 (moderate)"); starts the first test
+/// for this server.
+std::string NatLabel(const std::string& server, ImVec4& color) {
+    bool running, done;
+    std::string checked;
+    NatCheck::Result r;
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        running = g_nat.running;
+        done = g_nat.done;
+        checked = g_nat.server;
+        r = g_nat.result;
+    }
+    if (!running && (!done || checked != server)) {
+        StartNatCheck(server);
+        running = true;
+    }
+    color = kGrey;
+    if (running) return std::string("NAT: ") + T("comprobando...", "checking...");
+    switch (r.type) {
+    case NatCheck::Type::Open: color = kGreen; return T("NAT: tipo 1 (abierto)", "NAT: type 1 (open)");
+    case NatCheck::Type::Moderate: color = kGreen; return T("NAT: tipo 2 (moderado)", "NAT: type 2 (moderate)");
+    case NatCheck::Type::Strict: color = kYellow; return T("NAT: tipo 3 (estricto)", "NAT: type 3 (strict)");
+    case NatCheck::Type::Unknown: break;
+    }
+    return T("NAT: desconocido", "NAT: unknown");
 }
 
 /// A server setting that can travel inside a Discord join secret (and be trusted coming out
@@ -1167,15 +1317,39 @@ void StartMerge(std::vector<fs::path> sources) {
     });
 }
 
-const char* DefaultGameLanguage() { return g_spanish ? "20" : "1"; }
+/// The European edition is chosen (its languages differ from the Americas build's).
+bool IsEuGame() { return GameTitle() == L"CUSA14876"; }
 
-/// The game language to start with: the saved one when the build has it, else the default (older
-/// launchers saved codes this build lacks, such as 3 for Spain's Spanish).
+/// The game language of the launcher's own language, where the chosen edition has it.
+const char* DefaultGameLanguage() {
+    const bool eu = IsEuGame();
+    if (g_active_locale == "es") return eu ? "3" : "20";
+    if (g_active_locale == "fr") return "2";
+    if (eu && g_active_locale == "de") return "4";
+    if (eu && g_active_locale == "it") return "5";
+    if (!eu && g_active_locale == "pt_BR") return "17";
+    return "1";
+}
+
+/// The game language to start with: the saved one when the chosen edition has it, else its
+/// counterpart there (Spanish: Latin American in the Americas build, Spain's in the European one),
+/// else the default.
 std::string GameLanguage() {
     const std::string saved = g_app.launcher.Get("language");
-    for (const auto& c : kGameLanguages)
-        if (saved == c.value) return saved;
-    if (saved == "3") return "20"; // Spanish: the Latin American one this build has
+    const bool eu = IsEuGame();
+    auto has = [&](const std::string& code) {
+        if (eu) {
+            for (const auto& c : kGameLanguagesEU)
+                if (code == c.value) return true;
+        } else {
+            for (const auto& c : kGameLanguages)
+                if (code == c.value) return true;
+        }
+        return false;
+    };
+    if (has(saved)) return saved;
+    if (saved == "3" && !eu) return "20";
+    if (saved == "20" && eu) return "3";
     return DefaultGameLanguage();
 }
 
@@ -1183,20 +1357,13 @@ void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
 
+bool UpdateBusy();
+
 void StartGame() {
     App& a = g_app;
-    if (!a.python || a.game_running) return;
+    if (!a.python || a.game_running || UpdateBusy()) return;
     SaveGameIni();
     SaveLauncher();
-    // Friendly pre-check (run.py refuses the same way): no cold-cache ultrawide
-    // launch that could only end in an error code.
-    if (GameAspect() != "16:9" && !UltrawideCacheWarm()) {
-        a.notice = T("Primero juega una vez en 16:9 hasta el menú y ciérralo normal; "
-                     "entonces se desbloquea el ultra-panorámico.",
-                     "First play once in 16:9 up to the menu and close normally; "
-                     "ultrawide unlocks then.");
-        return;
-    }
     JoinWorker();
     {
         std::scoped_lock lock{a.mutex};
@@ -1209,6 +1376,7 @@ void StartGame() {
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
+    SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
     SetEnv(L"BB_DLC", a.launcher.Flag("dlc", true) ? "1" : "0");
     SetEnv(L"BB_DLC_DISABLED", a.launcher.Get("dlc_disabled"));
@@ -1902,7 +2070,18 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
     {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
+    // The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+    {"CrashTeamRacingEU.xml/60 FPS Unlock", "patch_60fps"},
+    {"CrashTeamRacingEU.xml/Disable Motion Blur", "patch_no_motion_blur"},
+    {"CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
 };
+
+/// "USA" or "EU" for a CTR title ID, "" otherwise.
+const char* RegionOf(const std::string& title) {
+    if (title == "CUSA13795") return "USA";
+    if (title == "CUSA14876") return "EU";
+    return "";
+}
 
 std::string XmlUnescape(std::string s) {
     const std::pair<const char*, const char*> entities[] = {
@@ -1948,11 +2127,16 @@ std::vector<PatchInfo> LoadPatches() {
         const std::string xml = ReadText(file);
         // Files naming other games are skipped; a file without <ID> applies to any.
         bool any_id = false, ours = false;
+        std::string file_title;
         for (size_t at = 0; (at = xml.find("<ID>", at)) != std::string::npos; at += 4) {
             const size_t close = xml.find("</ID>", at);
             if (close == std::string::npos) break;
             any_id = true;
-            if (IsCtrTitle(Trim(xml.substr(at + 4, close - at - 4)))) ours = true;
+            const std::string id = Trim(xml.substr(at + 4, close - at - 4));
+            if (IsCtrTitle(id)) {
+                ours = true;
+                if (file_title.empty()) file_title = id;
+            }
         }
         if (any_id && !ours) continue;
         for (size_t at = 0; (at = xml.find("<Metadata", at)) != std::string::npos; ++at) {
@@ -1971,6 +2155,7 @@ std::vector<PatchInfo> LoadPatches() {
             p.author = get("Author");
             p.note = get("Note");
             p.version = get("PatchVer");
+            p.title = file_title;
             std::string on = get("isEnabled");
             std::transform(on.begin(), on.end(), on.begin(), [](unsigned char c) { return char(std::tolower(c)); });
             p.default_on = on == "true";
@@ -2090,6 +2275,45 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
 
 bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
+
+bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
+    const bool pressed = ImGui::InvisibleButton("##primary_play", size);
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 actual_size = ImGui::GetItemRectSize();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    const float press_offset = active ? 2.0f : 0.0f;
+    const float y0 = a.y + 2.0f + press_offset;
+    const float y1 = a.y + actual_size.y - 2.0f + press_offset;
+    const float cy = (y0 + y1) * 0.5f;
+    const float inset = 11.0f;
+    ImVec2 shape[] = {
+        {a.x + inset, y0}, {a.x + actual_size.x - 22.0f, y0}, {a.x + actual_size.x - 5.0f, cy},
+        {a.x + actual_size.x - 22.0f, y1}, {a.x + inset, y1}, {a.x + inset + 13.0f, cy},
+    };
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    if (!active) {
+        ImVec2 shadow[6];
+        for (int i = 0; i < 6; ++i) shadow[i] = ImVec2(shape[i].x, shape[i].y + 4.0f);
+        d->AddConvexPolyFilled(shadow, 6, IM_COL32(0, 29, 76, disabled ? 90 : 185));
+    }
+    const ImU32 fill = disabled ? IM_COL32(140, 190, 210, 190)
+                                : hovered ? IM_COL32(250, 255, 255, 255) : IM_COL32(224, 247, 255, 255);
+    d->AddConvexPolyFilled(shape, 6, fill);
+    d->AddPolyline(shape, 6, disabled ? IM_COL32(177, 215, 230, 170) : IM_COL32(255, 255, 255, 255),
+                   ImDrawFlags_Closed, hovered ? 2.4f : 1.8f);
+    d->AddLine({a.x + 24.0f, y0 + 5.0f}, {a.x + actual_size.x - 28.0f, y0 + 5.0f},
+               disabled ? IM_COL32(255, 255, 255, 70) : IM_COL32(255, 255, 255, 170), 1.0f);
+    DrawMenuIcon(d, 0, {a.x + 39.0f, cy}, disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(5, 63, 109, 255), 1.0f);
+    ImFont* font = ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize();
+    const ImVec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label);
+    const ImVec2 text_pos{a.x + (actual_size.x - text_size.x) * 0.5f, cy - text_size.y * 0.5f};
+    d->AddText(font, font_size, text_pos,
+               disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(4, 49, 86, 255), label);
+    return pressed;
+}
 
 void PlayTab() {
     App& a = g_app;
@@ -2139,6 +2363,19 @@ void PlayTab() {
                     ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
                                        T("Servidor", "Server"), srv.c_str(),
                                        T("Apodo", "Nick"), nick.c_str());
+                }
+                {
+                    ImVec4 nat_color;
+                    const std::string nat = NatLabel(Trim(srv), nat_color);
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "  |  ");
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextColored(nat_color, "%s", nat.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", T("Si otros jugadores pueden conectarse directamente contigo. Más detalles en la "
+                                                  "pestaña Online. Tu IP no se muestra.",
+                                                  "Whether other players can connect to you directly. Details in the Online "
+                                                  "tab. Your IP is not shown."));
                 }
                 if (const char* problem = NickProblem(CurrentNick()))
                     ImGui::TextColored(kYellow, "%s %s", problem, T("Se te pedirá al pulsar Jugar.", "You will be asked when you press Play."));
@@ -2228,17 +2465,16 @@ void PlayTab() {
     ImGui::Spacing();
     const float play_height = ImGui::GetFontSize() * 3.0f;
     if (a.game_running) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.16f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.50f, 0.14f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.68f, 0.20f, 0.28f, 1.0f));
         if (ImGui::Button(T("Cerrar el juego", "Stop the game"), ImVec2(-FLT_MIN, play_height))) StopGame();
-        ImGui::PopStyleColor();
+        ImGui::PopStyleColor(2);
     } else {
         ImGui::BeginDisabled(!ready || busy || !a.python);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.45f, 0.20f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.58f, 0.26f, 1.0f));
-        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
-        if (ImGui::Button(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height))) PressPlay();
+        ImGui::PushFont(g_ctr_font, ImGui::GetStyle().FontSizeBase * 1.5f);
+        if (PrimaryPlayButton(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height),
+                              !ready || busy || !a.python)) PressPlay();
         ImGui::PopFont();
-        ImGui::PopStyleColor(2);
         ImGui::EndDisabled();
     }
 
@@ -2319,44 +2555,6 @@ std::string GameTemporal() {
     return game.Flag("fsr1", true) ? "fsr1" : "off";
 }
 
-/// v0.3 native ultrawide (by tcosi): bbport.ini aspect_ratio, Settings > Display.
-/// 16:9 off; 21:9 needs a 2560x1080/3440x1440 output; 32:9 needs 5120x1440.
-std::string GameAspect() {
-    const std::string v = g_app.game.Get("aspect_ratio", "16:9");
-    if (v == "21:9" || v == "21x9") return "21:9";
-    if (v == "32:9" || v == "32x9") return "32:9";
-    return "16:9";
-}
-
-bool IsUltrawideKey(const std::string& key) {
-    return key == "CTR-UltraWide21x9-v1.0.xml/21:9 UltraWide" ||
-           key == "CTR-SuperUltraWide32x9-v1.0.xml/32:9 Super UltraWide";
-}
-
-/// v0.3: the ultrawide options unlock only with a warm HUD shader cache
-/// (user/cache/CUSA13795 from a normal 16:9 launch to the menu), mirroring
-/// scripts/ultrawide_*_shader.py require_warm_cache. Otherwise every new player
-/// would hit the launch-time refusal on their first ultrawide try.
-bool UltrawideCacheWarm() {
-    const fs::path cache = g_app.root / L"user" / L"cache" / L"CUSA13795";
-    std::error_code ec;
-    auto present = [&](const wchar_t* name) {
-        std::error_code e2;
-        return fs::is_regular_file(cache / name, e2) && fs::file_size(cache / name, e2) > 0;
-    };
-    if (!present(L"profile.bin") || !present(L"0x00000000d4aaf527_0.spv") ||
-        !present(L"0x0000000008948e32_0.spv")) {
-        return false;
-    }
-    bool meta = false, key = false;
-    for (fs::directory_iterator it(cache, ec), end; !ec && it != end; it.increment(ec)) {
-        const auto ext = it->path().extension();
-        if (ext == L".meta") meta = true;
-        if (ext == L".key") key = true;
-    }
-    return meta && key;
-}
-
 /// A combo over a bbport.ini key; true when the player picked another value (already set).
 template <size_t N>
 bool GameChoiceCombo(const char* label, const char* key, const Choice (&choices)[N], const char* fallback,
@@ -2406,6 +2604,53 @@ void RenderResCombo() {
                  "PCs (the picture is output at 1080p)."));
 }
 
+// The corrected 21:9 and 32:9 layouts (scripts/widescreen.py, by tcosi): menus, backgrounds and a
+// centered HUD. bbport.ini widescreen_layout / widescreen_output; the in-game ultrawide (the
+// monitor's size without those corrections) is turned off while one is on.
+void WidescreenSettings() {
+    App& a = g_app;
+    std::string mode = a.game.Get("widescreen_layout", "off");
+    static constexpr Choice layouts[] = {{"16:9", "16:9", "off"}, {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
+    if (mode != "21x9" && mode != "32x9") mode = "off";
+    const char* preview = "16:9";
+    for (const auto& c : layouts) if (mode == c.value) preview = T(c.es, c.en);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+    if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
+        for (const auto& c : layouts) {
+            if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
+                mode = c.value;
+                a.game.Set("widescreen_layout", mode);
+                if (mode != "off") {
+                    a.game.Set("ultrawide", "0");
+                    const std::string output = a.game.Get("widescreen_output");
+                    const bool wide = output == "3440x1440" || output == "2560x1080";
+                    if (wide != (mode == "21x9") || output.empty())
+                        a.game.Set("widescreen_output", mode == "21x9" ? "3440x1440" : "5120x1440");
+                }
+                SaveGameIni();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (mode == "off") return;
+    static constexpr Choice wide[] = {{"3440 x 1440", "3440 x 1440", "3440x1440"},
+                                      {"2560 x 1080", "2560 x 1080", "2560x1080"}};
+    static constexpr Choice super[] = {{"5120 x 1440", "5120 x 1440", "5120x1440"},
+                                       {"3840 x 1080", "3840 x 1080", "3840x1080"},
+                                       {"2560 x 720", "2560 x 720", "2560x720"},
+                                       {"7680 x 2160", "7680 x 2160", "7680x2160"}};
+    const char* label = T("Tamaño de pantalla", "Screen size");
+    if (mode == "21x9") {
+        if (GameChoiceCombo(label, "widescreen_output", wide, "3440x1440", 16.0f)) SaveGameIni();
+    } else {
+        if (GameChoiceCombo(label, "widescreen_output", super, "5120x1440", 16.0f)) SaveGameIni();
+    }
+    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. Solo sin conexión y con la actualización 1.21, USA o Europa "
+        "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
+        "Corrected menus, backgrounds and a centered HUD. Offline only, with the 1.21 update, USA or Europe "
+        "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
+}
+
 void SettingsTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Se aplican al pulsar Jugar. El menú del juego (Insert o L3+R3) cambia los mismos ajustes.",
@@ -2438,16 +2683,7 @@ void SettingsTab() {
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
 
     ImGui::SeparatorText(T("Pantalla", "Display"));
-    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
-               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
-               "Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
-               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
-               "Needs a restart."));
     const std::string temporal = GameTemporal();
-    const std::string aspect_now = GameAspect();
-    const bool uw_on = aspect_now != "16:9";
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
     RenderResCombo();
@@ -2456,24 +2692,25 @@ void SettingsTab() {
         ImGui::SameLine();
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
+    WidescreenSettings();
+    GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
+             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
+               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
+               "Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
+               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+               "Needs a restart."));
     {
         // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time.
-        // v0.3: off while ultrawide is on (run.py forces it).
         static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
                                                {"AMD FSR 1", "AMD FSR 1", "fsr1"},
                                                {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
                                                {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"},
                                                {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
-        ImGui::BeginDisabled(uw_on);
         if (GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal, temporal.c_str(), 16.0f)) {
             a.game.Erase("fsr1");
             a.game.Erase("fsr3");
             SaveGameIni();
-        }
-        ImGui::EndDisabled();
-        if (uw_on) {
-            ImGui::SameLine();
-            ImGui::TextColored(kGrey, "%s", T("(desactivado con ultra-panorámico)", "(off with ultrawide)"));
         }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3, FSR 4 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
@@ -2667,15 +2904,23 @@ void SettingsTab() {
     ImGui::SeparatorText(T("Consola", "Console"));
     if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
-    HelpMarker(T("Los idiomas que trae esta versión del juego (CUSA13795, América): inglés, español latinoamericano, "
-                 "francés y portugués de Brasil. Sus archivos no tienen textos de otros idiomas: el español de España, "
-                 "el alemán, el italiano y los demás vienen solo en las versiones de otras regiones. Se aplica al "
-                 "pulsar Jugar.",
-                 "The languages this build of the game has (CUSA13795, the Americas): English, Latin American "
-                 "Spanish, French and Brazilian Portuguese. Its files hold no text in other languages: Spain's "
-                 "Spanish, German, Italian and the rest come only in other regions' builds. Applied when you press "
-                 "Play."));
+    if (IsEuGame()) {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguagesEU, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión europea (CUSA14876): inglés, español de España, francés, alemán, "
+                     "italiano y árabe. La lista cambia sola según la versión del juego que elijas. Se aplica al "
+                     "pulsar Jugar.",
+                     "The languages of the European edition (CUSA14876): English, Spain's Spanish, French, German, "
+                     "Italian and Arabic. The list follows the edition of the game you choose. Applied when you "
+                     "press Play."));
+    } else {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión de América (CUSA13795): inglés, español latinoamericano, francés "
+                     "y portugués de Brasil. La lista cambia sola según la versión del juego que elijas (la europea "
+                     "trae español de España, alemán, italiano y árabe). Se aplica al pulsar Jugar.",
+                     "The languages of the Americas edition (CUSA13795): English, Latin American Spanish, French and "
+                     "Brazilian Portuguese. The list follows the edition of the game you choose (the European one has "
+                     "Spain's Spanish, German, Italian and Arabic). Applied when you press Play."));
+    }
 
     ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
     LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
@@ -2937,6 +3182,61 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
+void NatTypeSection(const std::string& server) {
+    bool running, done;
+    NatCheck::Result result;
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        running = g_nat.running;
+        done = g_nat.done;
+        result = g_nat.result;
+    }
+    ImGui::BeginDisabled(running);
+    if (ImGui::Button(T("Comprobar tipo de NAT", "Check NAT type"))) StartNatCheck(server);
+    ImGui::EndDisabled();
+    HelpMarker(T("Comprueba si otros jugadores pueden conectarse directamente a tu PC. Pregunta a tu servidor RyuNET "
+                 "y a un servidor STUN público (Cloudflare) con qué dirección te ven y las compara aquí: tu IP no se "
+                 "muestra ni se guarda.",
+                 "Checks whether other players can connect to your PC directly. It asks your RyuNET server and a "
+                 "public STUN server (Cloudflare) which address they see you from and compares them here: your IP "
+                 "is neither shown nor saved."));
+    ImGui::SameLine();
+    if (running) {
+        ImGui::TextColored(kGrey, "%s", T("Comprobando...", "Checking..."));
+        return;
+    }
+    if (!done) return;
+    switch (result.type) {
+    case NatCheck::Type::Open:
+        ImGui::TextColored(kGreen, "%s", T("NAT tipo 1 (abierto): sin router de por medio.",
+                                           "NAT type 1 (open): no router in between."));
+        break;
+    case NatCheck::Type::Moderate:
+        ImGui::TextColored(kGreen, "%s", T("NAT tipo 2 (moderado): los demás jugadores pueden conectarse contigo.",
+                                           "NAT type 2 (moderate): other players can connect to you."));
+        break;
+    case NatCheck::Type::Strict:
+        ImGui::TextColored(kYellow, "%s", T("NAT tipo 3 (estricto): tu router cambia de puerto según con quién hables.",
+                                            "NAT type 3 (strict): your router changes ports for each destination."));
+        ImGui::TextWrapped("%s", T("Con otros jugadores de NAT estricto la conexión directa suele fallar y el juego pasa "
+                                   "por el túnel del servidor. Ayuda activar UPnP en el router o abrir el puerto UDP 3074 "
+                                   "hacia este PC.",
+                                   "Direct connections with other strict-NAT players often fail and the game goes "
+                                   "through the server's tunnel. Turning on UPnP in the router or forwarding UDP port "
+                                   "3074 to this PC helps."));
+        break;
+    case NatCheck::Type::Unknown:
+        ImGui::TextColored(kGrey, "%s",
+                           result.error == "server" ? T("El servidor no respondió (¿está bien escrito? ¿UDP 3074 bloqueado?).",
+                                                        "The server did not answer (is it spelled right? UDP 3074 blocked?).")
+                           : result.error == "dns" ? T("No se encontró el servidor.", "The server was not found.")
+                           : result.error == "stun" ? T("No se pudo comparar (el servidor STUN no respondió).",
+                                                        "Could not compare (the STUN server did not answer).")
+                                                    : T("No se pudo comprobar.", "Could not check."));
+        break;
+    }
+}
+
 void OnlineTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
@@ -2979,6 +3279,7 @@ void OnlineTab() {
         }
         HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
                      "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
+        NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
         ImGui::EndDisabled();
     }
 
@@ -3105,14 +3406,21 @@ void PatchesTab() {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kGrey, "%s", T("Se aplican al iniciar el juego (o con \"Apply and restart\" del menú del juego).",
                                       "Applied when the game starts (or with the in-game menu's \"Apply and restart\")."));
-    ImGui::TextColored(kGrey, "%s", T("El ultra-panorámico 21:9/32:9 está en Ajustes > Pantalla > Aspecto / salida.",
-                                      "Ultrawide 21:9/32:9 is in Settings > Display > Aspect / output."));
     ImGui::PopTextWrapPos();
     const bool neo = a.launcher.Flag("neo", false);
     if (a.patches.empty()) {
         ImGui::TextColored(kYellow, "%s", T("No hay parches en la carpeta patches.", "No patches in the patches folder."));
     }
+    // Only the patches of the detected edition (the other's are for another executable).
+    const std::string game_title = Narrow(GameTitle());
+    ImGui::TextColored(kGreen, "%s",
+                       Format(T("Tu juego: versión %s (%s). Se muestran sus parches.",
+                                "Your game: %s edition (%s). Its patches are shown."),
+                              RegionOf(game_title), game_title).c_str());
     for (const auto& p : a.patches) {
+        if (!p.title.empty() && p.title != game_title) continue;
+        // The online key patch follows the Online tab's switch (run.py turns it on).
+        if (p.key.find("Online: custom Demonware key") != std::string::npos) continue;
         ImGui::PushID(p.key.c_str());
         bool on;
         if (p.ini_key) {
@@ -3123,17 +3431,16 @@ void PatchesTab() {
             on = listed_on || (p.default_on && !listed_off);
         }
         const bool needs_neo = p.ini_key && std::strcmp(p.ini_key, "patch_pro_1080p") == 0;
-        // v0.3 native: ultrawide lives in Settings > Display > Aspect ratio (aspect_ratio),
-        // not here. Old patches.json toggles still work until an aspect is picked.
-        const bool is_ultrawide = IsUltrawideKey(p.key);
-        if (needs_neo || is_ultrawide) {  // replaced by Settings
+        if (needs_neo) {  // replaced by Settings > Internal resolution
             ImGui::PopID();
             continue;
         }
         // render_res decides the 1080p Pro patch (Settings > Internal resolution).
         if (needs_neo) on = EffectiveRenderRes() == "1080" && neo;
         ImGui::BeginDisabled(needs_neo);
-        if (ImGui::Checkbox(p.name.c_str(), &on)) {
+        const char* region = RegionOf(p.title);
+        const std::string label = *region ? p.name + " [" + region + "]" : p.name;
+        if (ImGui::Checkbox(label.c_str(), &on)) {
             if (p.ini_key) {
                 a.game.Set(p.ini_key, on ? "1" : "0");
                 SaveGameIni();
@@ -4272,6 +4579,38 @@ struct SteamShortcut {
     return out;
 }
 
+/// The launcher's name: the packaged executable, the desktop shortcut, Steam's entry and the
+/// window all use it. Releases before v0.5.1 shipped CTR-NitroFueled-PC.exe and a desktop
+/// shortcut named "CTR Nitro-Fueled".
+constexpr const wchar_t* kLauncherName = L"Crash\u2122 Team Racing Nitro-Fueled";
+constexpr const wchar_t* kOldLauncherExe = L"CTR-NitroFueled-PC.exe";
+constexpr const wchar_t* kOldShortcut = L"CTR Nitro-Fueled.lnk";
+
+/// Where a .lnk points (empty when it cannot be read).
+fs::path ShortcutTarget(const fs::path& link) {
+    fs::path target;
+    IShellLinkW* psl = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl)))
+        return target;
+    IPersistFile* ppf = nullptr;
+    if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
+        wchar_t path[MAX_PATH] = {};
+        if (SUCCEEDED(ppf->Load(link.c_str(), STGM_READ)) &&
+            SUCCEEDED(psl->GetPath(path, MAX_PATH, nullptr, SLGP_RAWPATH)))
+            target = path;
+        ppf->Release();
+    }
+    psl->Release();
+    return target;
+}
+
+/// This executable, whatever it is called.
+fs::path LauncherExe() {
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return fs::path(std::wstring(path, n));
+}
+
 bool CreateDesktopShortcut(std::string& out_error) {
     App& a = g_app;
     wchar_t desktop[MAX_PATH];
@@ -4279,13 +4618,21 @@ bool CreateDesktopShortcut(std::string& out_error) {
         out_error = T("No se pudo obtener la ruta del Escritorio.", "Could not get Desktop path.");
         return false;
     }
-    fs::path link_path = fs::path(desktop) / L"CTR Nitro-Fueled.lnk";
-    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
+    const fs::path target_exe = LauncherExe();
     std::error_code ec;
-    if (!fs::is_regular_file(target_exe, ec)) {
-        wchar_t mod_path[MAX_PATH];
-        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
-        target_exe = mod_path;
+    // A shortcut of that name may already open something else (another copy of the game, an
+    // emulator): never replace it, use the "(PC)" name then.
+    const auto ours = [&](const fs::path& link) {
+        if (!fs::is_regular_file(link, ec)) return true;
+        const fs::path t = ShortcutTarget(link);
+        return t.parent_path() == a.root || t == target_exe;
+    };
+    fs::path link_path = fs::path(desktop) / (std::wstring(kLauncherName) + L".lnk");
+    if (!ours(link_path)) link_path = fs::path(desktop) / (std::wstring(kLauncherName) + L" (PC).lnk");
+    if (!ours(link_path)) {
+        out_error = T("Ya hay accesos directos con ese nombre que abren otra cosa: no se ha cambiado nada.",
+                      "Shortcuts with that name already open something else: nothing was changed.");
+        return false;
     }
 
     IShellLinkW* psl = nullptr;
@@ -4297,14 +4644,8 @@ bool CreateDesktopShortcut(std::string& out_error) {
     psl->SetPath(target_exe.c_str());
     psl->SetArguments(L"--launch");
     psl->SetWorkingDirectory(a.root.c_str());
-    psl->SetDescription(L"Crash Team Racing Nitro-Fueled PC");
-
-    fs::path icon = a.root / L"packaging" / L"windows" / L"icons" / L"ctr.ico";
-    if (fs::is_regular_file(icon, ec)) {
-        psl->SetIconLocation(icon.c_str(), 0);
-    } else {
-        psl->SetIconLocation(target_exe.c_str(), 0);
-    }
+    psl->SetDescription(kLauncherName);
+    psl->SetIconLocation(target_exe.c_str(), 0);  // the icon in the executable
 
     IPersistFile* ppf = nullptr;
     hr = psl->QueryInterface(IID_IPersistFile, (void**)&ppf);
@@ -4317,7 +4658,33 @@ bool CreateDesktopShortcut(std::string& out_error) {
         out_error = T("No se pudo guardar el acceso directo en el Escritorio.", "Could not save shortcut to Desktop.");
         return false;
     }
+    // The shortcut of releases before v0.5.1, when it opened this folder's launcher.
+    const fs::path old_link = fs::path(desktop) / kOldShortcut;
+    if (fs::is_regular_file(old_link, ec) && ShortcutTarget(old_link).parent_path() == a.root) fs::remove(old_link, ec);
     return true;
+}
+
+/// Releases before v0.5.1 called the launcher CTR-NitroFueled-PC.exe. An update unzipped over
+/// one keeps that file and its shortcuts: the old executable becomes a copy of this one, so a
+/// Steam entry or any other shortcut naming it opens this launcher, and the desktop shortcut
+/// made by the old launcher is made again with the new name.
+void MigrateOldLauncher() {
+    App& a = g_app;
+    std::error_code ec;
+    const fs::path self = LauncherExe();
+    const fs::path old_exe = a.root / kOldLauncherExe;
+    if (self.filename() == kOldLauncherExe) return;
+    if (fs::is_regular_file(old_exe, ec) &&
+        (fs::file_size(old_exe, ec) != fs::file_size(self, ec) || ReadText(old_exe) != ReadText(self)))
+        fs::copy_file(self, old_exe, fs::copy_options::overwrite_existing, ec);
+    // The desktop shortcut too when the old executable is already gone (deleted by hand).
+    wchar_t desktop[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop))) return;
+    const fs::path old_link = fs::path(desktop) / kOldShortcut;
+    if (fs::is_regular_file(old_link, ec) && ShortcutTarget(old_link).parent_path() == a.root) {
+        std::string error;
+        CreateDesktopShortcut(error);
+    }
 }
 
 [[maybe_unused]] bool AddToSteam(std::string& out_msg) {
@@ -4358,22 +4725,16 @@ bool CreateDesktopShortcut(std::string& out_error) {
     }
 
     fs::path assets_dir;
-    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid",
-                                  fs::path(L"C:\\Users\\RyuPC\\Downloads\\steamgrid")}) {
+    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid"}) {
         if (fs::is_directory(candidate, ec)) {
             assets_dir = candidate;
             break;
         }
     }
 
-    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
-    if (!fs::is_regular_file(target_exe, ec)) {
-        wchar_t mod_path[MAX_PATH];
-        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
-        target_exe = mod_path;
-    }
+    const fs::path target_exe = LauncherExe();
 
-    const std::string app_name = "Crash Team Racing Nitro-Fueled";
+    const std::string app_name = Narrow(kLauncherName);
     const std::string exe_str = "\"" + PathText(target_exe) + "\"";
     const std::string start_dir_str = "\"" + PathText(a.root) + "\"";
 
@@ -4431,7 +4792,8 @@ bool CreateDesktopShortcut(std::string& out_error) {
 
         bool found = false;
         for (auto& sc : shortcuts) {
-            if (sc.app_name == app_name || sc.exe.find("CTR-NitroFueled-PC.exe") != std::string::npos) {
+            if (sc.app_name == app_name || sc.exe.find(PathText(kOldLauncherExe)) != std::string::npos ||
+                sc.exe.find(PathText(target_exe.filename())) != std::string::npos) {
                 sc.appid = appid;
                 sc.app_name = app_name;
                 sc.exe = exe_str;
@@ -4476,8 +4838,851 @@ bool CreateDesktopShortcut(std::string& out_error) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Updates (port_update.cpp): the latest published release's Windows ZIP, downloaded into
+// update\, checked (size, SHA-256), unpacked with the bundled Python and copied over the port.
+// Settings, the online key, friends, saves, backups, DLC, logs and the player's own patches are
+// never in the package and never written; replaced files go to update\rollback\ first.
+
+struct UpdateState {
+    // Dismissed: a newer release the player chose not to install now (Tools offers it again).
+    enum Stage { Idle, Checking, UpToDate, Available, Dismissed, Downloading, Unpacking, Installing, Done, Failed };
+    std::mutex mutex;
+    std::atomic<int> stage{Idle};
+    PortUpdate::Release release;  // under mutex
+    std::string error;            // under mutex
+    PortUpdate::Progress progress;
+    std::thread worker;
+    std::atomic<bool> auto_install{false};  // install as soon as the check finds a newer release
+    bool restart_sent = false;
+};
+UpdateState g_update;
+
+bool UpdateBusy() {
+    const int s = g_update.stage;
+    return s == UpdateState::Checking || s == UpdateState::Downloading || s == UpdateState::Unpacking ||
+           s == UpdateState::Installing || s == UpdateState::Done;
+}
+
+fs::path UpdateDir() { return g_app.root / L"update"; }
+
+void UpdateFail(const std::string& error) {
+    {
+        std::scoped_lock lock{g_update.mutex};
+        g_update.error = error;
+    }
+    g_update.stage = UpdateState::Failed;
+}
+
+void StartUpdateInstall();
+
+/// Asks GitHub for the latest release; with auto_install a newer one is installed at once.
+void StartUpdateCheck(bool auto_install) {
+    if (UpdateBusy()) return;
+    if (g_update.worker.joinable()) g_update.worker.join();
+    g_update.stage = UpdateState::Checking;
+    g_update.auto_install = auto_install;
+    const std::string current = g_app.version;
+    g_update.worker = std::thread([current, auto_install] {
+        std::string error;
+        const std::string url = std::string("https://api.github.com/repos/") + PortUpdate::kRepo + "/releases/latest";
+        const auto body = PortUpdate::FetchText(Widen(url), &error);
+        if (!body) {
+            UpdateFail(std::string(T("No se pudo consultar GitHub: ", "Could not ask GitHub: ")) + error);
+            return;
+        }
+        const auto release = PortUpdate::ParseRelease(*body);
+        if (!release) {
+            UpdateFail(T("GitHub no devolvió una versión para Windows.", "GitHub returned no Windows release."));
+            return;
+        }
+        {
+            std::scoped_lock lock{g_update.mutex};
+            g_update.release = *release;
+            g_update.error.clear();
+        }
+        const auto have = PortUpdate::ParseVersion(current);
+        const auto latest = PortUpdate::ParseVersion(release->tag);
+        if (!have.valid || !PortUpdate::IsNewer(have, latest)) {
+            g_update.stage = UpdateState::UpToDate;
+            return;
+        }
+        g_update.stage = UpdateState::Available;  // PollUpdate starts an automatic install
+    });
+}
+
+void StartUpdateInstall() {
+    App& a = g_app;
+    if (g_update.stage != UpdateState::Available && g_update.stage != UpdateState::Dismissed &&
+        g_update.stage != UpdateState::Failed)
+        return;
+    if (a.game_running) {
+        a.notice = T("Cierra el juego para actualizar.", "Close the game to update.");
+        return;
+    }
+    if (!a.python) {
+        UpdateFail(T("Falta Python para descomprimir la actualización.", "Python is missing to unpack the update."));
+        return;
+    }
+    PortUpdate::Release release;
+    {
+        std::scoped_lock lock{g_update.mutex};
+        release = g_update.release;
+        g_update.error.clear();
+    }
+    if (release.asset_url.empty()) return;
+    if (g_update.worker.joinable()) g_update.worker.join();
+    g_update.progress.cancel = false;
+    g_update.stage = UpdateState::Downloading;
+    const fs::path root = a.root;
+    const Python python = *a.python;
+    g_update.worker = std::thread([release, root, python] {
+        const fs::path dir = root / L"update";
+        const fs::path zip = dir / Widen(release.asset_name);
+        const fs::path staging = dir / L"staging";
+        std::error_code ec;
+        fs::remove_all(staging, ec);
+        std::string error = PortUpdate::Download(Widen(release.asset_url), zip, release.size, release.sha256,
+                                                 g_update.progress);
+        if (!error.empty()) {
+            UpdateFail(std::string(T("La descarga falló: ", "The download failed: ")) + error);
+            return;
+        }
+        g_update.stage = UpdateState::Unpacking;
+        const std::wstring cmd = Quote(python.exe) + L" " + python.args + L"-I -X utf8 -c " +
+                                 Quote(L"import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])") +
+                                 L" " + Quote(zip.wstring()) + L" " + Quote(staging.wstring());
+        const Captured r = RunCaptured(python.exe, cmd, dir, 600000);
+        const fs::path package = staging / PortUpdate::kPackageFolder;
+        const std::string unpacked_version = Trim(ReadText(package / L"bin" / L"VERSION"));
+        if (!r.started || r.code != 0 || !fs::is_regular_file(package / L"bin" / L"sacredfire.exe", ec) ||
+            !PortUpdate::ParseVersion(unpacked_version).valid) {
+            fs::remove_all(staging, ec);
+            UpdateFail(std::string(T("No se pudo descomprimir la actualización. ", "Could not unpack the update. ")) +
+                       Trim(r.output).substr(0, 300));
+            return;
+        }
+        if (g_app.game_running) {
+            UpdateFail(T("Cierra el juego para actualizar.", "Close the game to update."));
+            return;
+        }
+        g_update.stage = UpdateState::Installing;
+        error = PortUpdate::Install(package, root, dir / L"rollback");
+        fs::remove_all(staging, ec);
+        if (!error.empty()) {
+            UpdateFail(std::string(T("No se pudo instalar (todo quedó como estaba): ",
+                                     "Could not install (everything was put back): ")) + error);
+            return;
+        }
+        fs::remove(zip, ec);
+        g_update.stage = UpdateState::Done;
+    });
+}
+
+/// Every frame: an automatic update starts once the check found one; a finished install
+/// restarts the launcher in its new version.
+void PollUpdate() {
+    App& a = g_app;
+    if (g_update.auto_install && g_update.stage != UpdateState::Checking) {
+        g_update.auto_install = false;
+        if (g_update.stage == UpdateState::Available && !a.game_running) StartUpdateInstall();
+    }
+    if (g_update.stage == UpdateState::Done && !g_update.restart_sent) {
+        g_update.restart_sent = true;
+        SaveLauncher();
+        wchar_t self[MAX_PATH * 4]{};
+        GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
+        fs::path exe = self;
+        // The packaged launcher's name, if the running one is an older name next to it.
+        std::error_code ec;
+        const fs::path packaged = a.root / (std::wstring(kLauncherName) + L".exe");
+        if (fs::is_regular_file(packaged, ec)) exe = packaged;
+        std::wstring cmd = Quote(exe.wstring()) + L" --updated";
+        STARTUPINFOW si{sizeof si};
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, a.root.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            PostQuitMessage(0);
+        } else {
+            a.notice = T("Actualizado. Cierra y vuelve a abrir el launcher.", "Updated. Close and open the launcher again.");
+        }
+    }
+}
+
+/// At start: the previous update's leftovers (the old launcher in rollback\ may still be running
+/// for a moment, so this retries in the background).
+void CleanupUpdate() {
+    const fs::path dir = UpdateDir();
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return;
+    std::thread([dir] {
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            std::error_code e;
+            fs::remove_all(dir / L"rollback", e);
+            fs::remove_all(dir / L"staging", e);
+            if (!fs::exists(dir / L"rollback", e) && !fs::exists(dir / L"staging", e)) break;
+            Sleep(500);
+        }
+        std::error_code e;
+        fs::remove(dir, e);  // only when empty (a download in progress keeps it)
+    }).detach();
+}
+
+/// The update line under the header: a newer version, the progress, or what went wrong.
+void UpdateBanner() {
+    const int stage = g_update.stage;
+    if (stage == UpdateState::Idle || stage == UpdateState::Checking || stage == UpdateState::UpToDate ||
+        stage == UpdateState::Dismissed)
+        return;
+    PortUpdate::Release release;
+    std::string error;
+    {
+        std::scoped_lock lock{g_update.mutex};
+        release = g_update.release;
+        error = g_update.error;
+    }
+    if (stage == UpdateState::Available) {
+        ImGui::TextColored(kGreen, "%s", Format(T("Hay una versión nueva: %s (tienes %s).", "A new version is out: %s (you have %s)."),
+                                                release.tag, g_app.version).c_str());
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g_app.game_running);
+        if (ImGui::SmallButton(T("Actualizar ahora", "Update now"))) StartUpdateInstall();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Novedades", "What's new"))) OpenInShell(Widen(release.page_url));
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Ahora no", "Not now"))) g_update.stage = UpdateState::Dismissed;
+    } else if (stage == UpdateState::Downloading) {
+        const double total = double(std::max<std::uint64_t>(1, g_update.progress.total));
+        const float fraction = float(double(g_update.progress.done) / total);
+        ImGui::TextColored(kGrey, "%s", Format(T("Descargando %s...", "Downloading %s..."), release.tag).c_str());
+        ImGui::SameLine();
+        char text[64];
+        std::snprintf(text, sizeof text, "%.0f / %.0f MB", double(g_update.progress.done) / 1e6, total / 1e6);
+        ImGui::ProgressBar(fraction, ImVec2(ImGui::GetFontSize() * 14.0f, 0.0f), text);
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Cancelar", "Cancel"))) g_update.progress.cancel = true;
+    } else if (stage == UpdateState::Unpacking || stage == UpdateState::Installing) {
+        ImGui::TextColored(kGrey, "%s", stage == UpdateState::Unpacking ? T("Descomprimiendo la actualización...", "Unpacking the update...")
+                                                                       : T("Instalando la actualización...", "Installing the update..."));
+    } else if (stage == UpdateState::Done) {
+        ImGui::TextColored(kGreen, "%s", T("Actualizado: reiniciando el launcher...", "Updated: restarting the launcher..."));
+    } else if (stage == UpdateState::Failed) {
+        ImGui::TextColored(kYellow, "%s", error.c_str());
+        ImGui::SameLine();
+        if (!release.asset_url.empty() && ImGui::SmallButton(T("Reintentar", "Retry"))) StartUpdateInstall();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("OK")) g_update.stage = UpdateState::Idle;
+    }
+}
+
+void UpdateSection() {
+    App& a = g_app;
+    ImGui::SeparatorText(T("Actualizaciones", "Updates"));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kGrey, "%s",
+                       T("Descarga la última versión publicada en GitHub y la instala encima. Tus ajustes, amigos, apodo, "
+                         "parches propios, partidas, copias, DLC y registros se mantienen: la actualización solo cambia "
+                         "los archivos del port. Si algo falla, todo vuelve a como estaba.",
+                         "Downloads the latest release published on GitHub and installs it over this one. Your settings, "
+                         "friends, nickname, own patches, saves, backups, DLC and logs are kept: the update only changes "
+                         "the port's files. If anything fails, everything is put back."));
+    ImGui::PopTextWrapPos();
+    ImGui::Text("%s %s", T("Versión instalada:", "Installed version:"), a.version.c_str());
+    const int stage = g_update.stage;
+    ImGui::BeginDisabled(UpdateBusy());
+    if (ImGui::Button(T("Comprobar actualizaciones", "Check for updates"))) StartUpdateCheck(false);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (stage == UpdateState::Available || stage == UpdateState::Dismissed) {
+        PortUpdate::Release release;
+        {
+            std::scoped_lock lock{g_update.mutex};
+            release = g_update.release;
+        }
+        ImGui::TextColored(kGreen, "%s", Format(T("Versión nueva: %s", "New version: %s"), release.tag).c_str());
+        ImGui::TextUnformatted(T("¿Quieres actualizar ahora?", "Do you want to update now?"));
+        ImGui::BeginDisabled(a.game_running);
+        if (ImGui::Button(T("Actualizar ahora", "Update now"))) StartUpdateInstall();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (stage == UpdateState::Available && ImGui::Button(T("Ahora no", "Not now")))
+            g_update.stage = UpdateState::Dismissed;
+        ImGui::SameLine();
+        if (ImGui::Button(T("Novedades", "What's new"))) OpenInShell(Widen(release.page_url));
+        if (a.game_running)
+            ImGui::TextColored(kGrey, "%s", T("Cierra el juego para actualizar.", "Close the game to update."));
+    } else if (stage == UpdateState::Checking) {
+        ImGui::TextColored(kGrey, "%s", T("Consultando GitHub...", "Asking GitHub..."));
+    } else if (stage == UpdateState::UpToDate) {
+        std::string tag;
+        {
+            std::scoped_lock lock{g_update.mutex};
+            tag = g_update.release.tag;
+        }
+        ImGui::TextColored(kGreen, "%s", Format(T("Estás al día (última versión: %s).", "You are up to date (latest: %s)."), tag).c_str());
+    } else if (stage != UpdateState::Idle) {
+        ImGui::TextColored(kGrey, "%s", T("Mira el aviso de arriba.", "See the notice at the top."));
+    }
+    LauncherFlag("update_check", T("Buscar actualizaciones al abrir el launcher", "Check for updates when the launcher opens"), true,
+                 T("Una consulta pequeña a GitHub al abrir. No descarga nada sin tu permiso, salvo que actives la opción de abajo.",
+                   "A small request to GitHub at start. Nothing is downloaded without your say, unless the option below is on."));
+    LauncherFlag("update_auto", T("Instalar las actualizaciones automáticamente", "Install updates automatically"), false,
+                 T("Al abrir el launcher, si hay una versión nueva se descarga e instala sola y el launcher se reinicia. "
+                   "Nunca mientras juegas. Si abres el juego directo (acceso directo o Steam), no se actualiza.",
+                   "When the launcher opens and a new version is out, it is downloaded and installed and the launcher "
+                   "restarts. Never while you play. Starting straight into the game (shortcut, Steam) does not update."));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Achievements tab (v0.4): the game's trophies (sce_sys/trophy/trophy00.trp), with the ones
+// unlocked while playing (<user>/trophies/<TITLE_ID>/unlocked.txt, written by the runtime:
+// src/runtime_services.c). Icons are plain PNGs in the TRP. Names, descriptions and grades are
+// in its ESFM files, AES-encrypted with the console's trophy key, which is not part of this
+// port: with the player's own key (the one shadPS4 uses: entered here or imported from
+// shadPS4's keys.json) they are decrypted as shadPS4 does (src/core/file_format/trp.cpp) and
+// written to trophies.tsv, which the runtime reads for its in-game notice and the platinum.
+
+ID3D11ShaderResourceView* MakeTexture(const uint32_t* bgra, int width, int height);  // after g_device
+
+// The 48 trophies' names, grades and what to do (src/ctr_trophies.h, shared with the runtime).
+#include "../../src/ctr_trophies.h"
+#define kCtrTrophies ctr_trophies
+
+
+struct Trophy {
+    int id = 0;
+    char grade = 0;  // 'P' 'G' 'S' 'B', 0 unknown
+    bool hidden = false;
+    std::string name, detail;
+    ID3D11ShaderResourceView* icon = nullptr;
+    uint64_t unlocked = 0;  // unix time, 0 locked
+};
+
+struct TrophySet {
+    fs::path game;              // the game folder it was read from
+    std::string language;       // the game language its names are in
+    std::string title_id, np_comm_id, title_name;
+    std::vector<Trophy> list;
+    ID3D11ShaderResourceView* icon = nullptr;
+    bool names = false;         // names and grades known
+    std::string error, note;
+    fs::file_time_type unlocked_time{};
+    double next_poll = 0.0;
+};
+TrophySet g_trophies;
+bool g_trophies_reload = true;
+int g_trophy_filter = 0;  // 0 all, 1 unlocked, 2 locked
+bool g_trophy_reset_confirm = false;
+char g_trophy_key_input[64] = "";
+
+fs::path TrophyDir(const std::string& title) { return g_app.root / L"user" / L"trophies" / Widen(title); }
+
+void ReleaseTrophies(TrophySet& t) {
+    for (auto& tr : t.list)
+        if (tr.icon) tr.icon->Release();
+    if (t.icon) t.icon->Release();
+    t = TrophySet{};
+}
+
+/// A PNG to a texture, through WIC.
+ID3D11ShaderResourceView* PngTexture(const std::string& png) {
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) return nullptr;
+    ID3D11ShaderResourceView* view = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    UINT w = 0, h = 0;
+    if (SUCCEEDED(wic->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromMemory(reinterpret_cast<BYTE*>(const_cast<char*>(png.data())), DWORD(png.size()))) &&
+        SUCCEEDED(wic->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                        WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(converter->GetSize(&w, &h)) && w && h && w <= 4096 && h <= 4096) {
+        std::vector<uint32_t> pixels(size_t(w) * h);
+        if (SUCCEEDED(converter->CopyPixels(nullptr, w * 4, UINT(pixels.size() * 4), reinterpret_cast<BYTE*>(pixels.data()))))
+            view = MakeTexture(pixels.data(), int(w), int(h));
+    }
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    wic->Release();
+    return view;
+}
+
+/// The 16-byte trophy key from hex ("" when it is not 32 hex digits).
+std::string TrophyKeyBytes(const std::string& hex) {
+    std::string clean;
+    for (char c : hex)
+        if (std::isxdigit(static_cast<unsigned char>(c))) clean += c;
+    if (clean.size() != 32) return {};
+    std::string out;
+    for (size_t i = 0; i < 32; i += 2) out += char(std::stoi(clean.substr(i, 2), nullptr, 16));
+    return out;
+}
+
+/// AES-128-CBC without padding (Windows CNG). encrypt: true to encrypt.
+bool AesCbc(const std::string& key, const unsigned char iv_in[16], const unsigned char* in, size_t size, unsigned char* out,
+            bool encrypt) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_KEY_HANDLE handle = nullptr;
+    bool ok = false;
+    unsigned char iv[16];
+    std::memcpy(iv, iv_in, 16);
+    if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0)) &&
+        BCRYPT_SUCCESS(BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC,
+                                         sizeof(BCRYPT_CHAIN_MODE_CBC), 0)) &&
+        BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(alg, &handle, nullptr, 0, (PUCHAR)key.data(), ULONG(key.size()), 0))) {
+        ULONG done = 0;
+        ok = BCRYPT_SUCCESS(encrypt ? BCryptEncrypt(handle, (PUCHAR)in, ULONG(size), nullptr, iv, 16, out, ULONG(size), &done, 0)
+                                    : BCryptDecrypt(handle, (PUCHAR)in, ULONG(size), nullptr, iv, 16, out, ULONG(size), &done, 0)) &&
+             done == size;
+    }
+    if (handle) BCryptDestroyKey(handle);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    return ok;
+}
+
+/// One ESFM entry decrypted to its XML (shadPS4's DecryptEFSM): the key for the file is the
+/// NP communication ID (16 bytes, zero-padded) encrypted with the trophy key (CBC, zero IV); the
+/// entry is IV (16 bytes) + data, CBC-decrypted with that key and IV.
+std::string DecryptEsfm(const std::string& trophy_key, const std::string& np_comm_id, const std::string& entry) {
+    if (entry.size() <= 32 || (entry.size() - 16) % 16) return {};
+    unsigned char comm[16]{}, zero[16]{}, file_key[16];
+    std::memcpy(comm, np_comm_id.data(), std::min<size_t>(np_comm_id.size(), 16));
+    if (!AesCbc(trophy_key, zero, comm, 16, file_key, true)) return {};
+    std::string xml(entry.size() - 16, '\0');
+    if (!AesCbc(std::string(reinterpret_cast<char*>(file_key), 16), reinterpret_cast<const unsigned char*>(entry.data()),
+                reinterpret_cast<const unsigned char*>(entry.data()) + 16, entry.size() - 16,
+                reinterpret_cast<unsigned char*>(xml.data()), false))
+        return {};
+    const size_t end = xml.rfind('>');
+    if (end == std::string::npos) return {};
+    xml.resize(end + 1);
+    return xml.rfind("<?xml", 0) == 0 || xml.find("<trophyconf") != std::string::npos ? xml : std::string{};
+}
+
+std::string XmlTag(const std::string& xml, const std::string& tag, size_t from = 0, size_t until = std::string::npos) {
+    const size_t a = xml.find("<" + tag + ">", from);
+    if (a == std::string::npos || a >= until) return {};
+    const size_t b = xml.find("</" + tag + ">", a);
+    if (b == std::string::npos || b > until) return {};
+    return XmlUnescape(xml.substr(a + tag.size() + 2, b - a - tag.size() - 2));
+}
+
+/// The trophies in a decrypted TROP*.XML: id -> (grade, hidden, name, detail).
+void ParseTrophyXml(const std::string& xml, TrophySet& t) {
+    t.title_name = XmlTag(xml, "title-name");
+    for (size_t at = 0; (at = xml.find("<trophy ", at)) != std::string::npos;) {
+        const size_t close = xml.find('>', at), end = xml.find("</trophy>", at);
+        if (close == std::string::npos || end == std::string::npos) break;
+        const auto attr = XmlAttributes(xml.substr(at + 8, close - at - 8));
+        auto get = [&](const char* k) {
+            const auto it = attr.find(k);
+            return it == attr.end() ? std::string() : it->second;
+        };
+        const int id = std::atoi(get("id").c_str());
+        for (auto& tr : t.list) {
+            if (tr.id != id) continue;
+            const std::string type = get("ttype");
+            tr.grade = type.empty() ? 0 : type[0];
+            tr.hidden = get("hidden") == "yes";
+            tr.name = XmlTag(xml, "name", close, end);
+            tr.detail = XmlTag(xml, "detail", close, end);
+        }
+        at = end;
+    }
+}
+
+std::string Sanitize(std::string s) {
+    for (char& c : s)
+        if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+    return s;
+}
+
+/// trophies.tsv: "#lang<TAB>code" then id, grade, hidden, name, detail per line.
+bool ReadTrophyTsv(const fs::path& file, const std::string& language, TrophySet& t) {
+    std::stringstream ss(ReadText(file));
+    std::string line;
+    bool right_language = false, any = false;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::vector<std::string> f;
+        std::stringstream ls(line);
+        std::string field;
+        while (std::getline(ls, field, '\t')) f.push_back(field);
+        if (f.size() >= 2 && f[0] == "#lang") right_language = f[1] == language;
+        if (f.size() >= 2 && f[0] == "#title") t.title_name = f[1];
+        if (f.size() < 5 || f[0].empty() || !std::isdigit(static_cast<unsigned char>(f[0][0]))) continue;
+        for (auto& tr : t.list)
+            if (tr.id == std::atoi(f[0].c_str())) {
+                tr.grade = f[1].empty() ? 0 : f[1][0];
+                tr.hidden = f[2] == "1";
+                tr.name = f[3];
+                tr.detail = f[4];
+                any = true;
+            }
+    }
+    return any && right_language;
+}
+
+void WriteTrophyTsv(const TrophySet& t) {
+    std::string out = "#lang\t" + t.language + "\n#title\t" + Sanitize(t.title_name) + "\n";
+    for (const auto& tr : t.list)
+        out += std::to_string(tr.id) + "\t" + std::string(1, tr.grade ? tr.grade : '?') + "\t" + (tr.hidden ? "1" : "0") + "\t" +
+               Sanitize(tr.name) + "\t" + Sanitize(tr.detail) + "\n";
+    std::error_code ec;
+    fs::create_directories(TrophyDir(t.title_id), ec);
+    WriteTextAtomic(TrophyDir(t.title_id) / L"trophies.tsv", out);
+}
+
+void ReadUnlocked(TrophySet& t) {
+    for (auto& tr : t.list) tr.unlocked = 0;
+    std::stringstream ss(ReadText(TrophyDir(t.title_id) / L"unlocked.txt"));
+    std::string line;
+    while (std::getline(ss, line)) {
+        int id = -1;
+        unsigned long long at = 0;
+        if (std::sscanf(line.c_str(), "%d %llu", &id, &at) != 2) continue;
+        for (auto& tr : t.list)
+            if (tr.id == id && !tr.unlocked) tr.unlocked = at ? at : 1;
+    }
+    std::error_code ec;
+    t.unlocked_time = fs::last_write_time(TrophyDir(t.title_id) / L"unlocked.txt", ec);
+}
+
+/// The trophy key the launcher keeps, else shadPS4's (keys.json "ReleaseTrophyKey").
+std::string ShadPs4TrophyKey() {
+    const wchar_t* appdata = _wgetenv(L"APPDATA");
+    if (!appdata) return {};
+    const std::string json = ReadText(fs::path(appdata) / L"shadPS4" / L"keys.json");
+    const size_t at = json.find("\"ReleaseTrophyKey\"");
+    if (at == std::string::npos) return {};
+    const size_t colon = json.find(':', at);
+    if (colon == std::string::npos) return {};
+    size_t i = colon + 1;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i < json.size() && json[i] == '"') {  // a hex string
+        const size_t end = json.find('"', i + 1);
+        return end == std::string::npos ? std::string() : json.substr(i + 1, end - i - 1);
+    }
+    if (i < json.size() && json[i] == '[') {  // a byte array
+        const size_t end = json.find(']', i);
+        std::stringstream ss(json.substr(i + 1, end == std::string::npos ? std::string::npos : end - i - 1));
+        std::string hex, n;
+        char buf[3];
+        while (std::getline(ss, n, ',')) {
+            n = Trim(n);
+            if (n.empty()) continue;
+            std::snprintf(buf, sizeof buf, "%02x", std::atoi(n.c_str()) & 0xff);
+            hex += buf;
+        }
+        return hex;
+    }
+    return {};
+}
+
+void LoadTrophies() {
+    App& a = g_app;
+    ReleaseTrophies(g_trophies);
+    TrophySet& t = g_trophies;
+    t.game = a.game_dir;
+    t.language = GameLanguage();
+    t.title_id = Narrow(GameTitle());
+    const fs::path trp = a.game_dir / L"sce_sys" / L"trophy" / L"trophy00.trp";
+    const std::string data = ReadText(trp);
+    auto be32 = [&](size_t o) {
+        return uint32_t(uint8_t(data[o])) << 24 | uint32_t(uint8_t(data[o + 1])) << 16 | uint32_t(uint8_t(data[o + 2])) << 8 |
+               uint32_t(uint8_t(data[o + 3]));
+    };
+    auto be64 = [&](size_t o) { return uint64_t(be32(o)) << 32 | be32(o + 4); };
+    if (data.size() < 0x60 || be32(0) != 0xDCA24D00) {
+        t.error = a.game_dir.empty() ? T("Elige primero el juego en la pestaña Jugar.", "Choose the game in the Play tab first.")
+                                     : T("Este juego no trae el archivo de trofeos (sce_sys\\trophy\\trophy00.trp).",
+                                         "This game has no trophy file (sce_sys\\trophy\\trophy00.trp).");
+        return;
+    }
+    const uint32_t count = be32(0x10), entry_size = be32(0x14);
+    std::map<std::string, std::string> entries;
+    for (uint32_t i = 0; i < count && i < 1024; ++i) {
+        const size_t e = 0x60 + size_t(i) * entry_size;
+        if (e + 48 > data.size()) break;
+        const std::string name(data.c_str() + e, strnlen(data.c_str() + e, 32));
+        const uint64_t pos = be64(e + 32), size = be64(e + 40);
+        if (pos + size <= data.size()) entries[name] = data.substr(size_t(pos), size_t(size));
+    }
+    for (const auto& [name, bytes] : entries) {
+        int id = -1;
+        if (name.size() == 11 && name.rfind("TROP", 0) == 0 && name.substr(7) == ".PNG" && std::sscanf(name.c_str() + 4, "%3d", &id) == 1) {
+            Trophy tr;
+            tr.id = id;
+            tr.icon = PngTexture(bytes);
+            t.list.push_back(std::move(tr));
+        }
+    }
+    std::sort(t.list.begin(), t.list.end(), [](const Trophy& x, const Trophy& y) { return x.id < y.id; });
+    if (entries.count("ICON0.PNG")) t.icon = PngTexture(entries["ICON0.PNG"]);
+    // The NP communication ID (npbind.dat), needed to decrypt.
+    const std::string npbind = ReadText(a.game_dir / L"sce_sys" / L"npbind.dat");
+    for (size_t i = 0; i + 12 <= npbind.size(); ++i)
+        if (npbind.compare(i, 4, "NPWR") == 0 && npbind[i + 9] == '_') {
+            t.np_comm_id = npbind.substr(i, 12);
+            break;
+        }
+    // Names: trophies.tsv in this language, else decrypt with the key.
+    if (ReadTrophyTsv(TrophyDir(t.title_id) / L"trophies.tsv", t.language, t)) {
+        t.names = true;
+    } else {
+        const std::string key = TrophyKeyBytes(a.launcher.Get("trophy_key"));
+        if (!key.empty() && !t.np_comm_id.empty()) {
+            char localized[32];
+            std::snprintf(localized, sizeof localized, "TROP_%02d.ESFM", std::atoi(t.language.c_str()));
+            const std::string file = entries.count(localized) ? localized : "TROP.ESFM";
+            const std::string xml = entries.count(file) ? DecryptEsfm(key, t.np_comm_id, entries[file]) : std::string{};
+            if (!xml.empty()) {
+                ParseTrophyXml(xml, t);
+                t.names = true;
+                WriteTrophyTsv(t);
+            } else {
+                t.note = T("La clave de trofeos no descifra este juego: revisa que sea la de tu PS4 (32 cifras hexadecimales).",
+                           "The trophy key does not decrypt this game: check it is your PS4's (32 hex digits).");
+            }
+        }
+    }
+    ReadUnlocked(t);
+}
+
+void TrophiesTab() {
+    App& a = g_app;
+    const std::string language = GameLanguage();
+    if (g_trophies_reload || g_trophies.game != a.game_dir || g_trophies.language != language) {
+        g_trophies_reload = false;
+        LoadTrophies();
+    }
+    TrophySet& t = g_trophies;
+    // The game writes unlocked.txt while it runs: re-read it when it changes.
+    if (ImGui::GetTime() > t.next_poll && !t.title_id.empty()) {
+        t.next_poll = ImGui::GetTime() + 1.0;
+        std::error_code ec;
+        const auto time = fs::last_write_time(TrophyDir(t.title_id) / L"unlocked.txt", ec);
+        if (!ec && time != t.unlocked_time) ReadUnlocked(t);
+    }
+    if (!t.error.empty()) {
+        BeginCard("trophy_error");
+        ImGui::TextColored(kYellow, "%s  %s", ICON_INFO, t.error.c_str());
+        EndCard();
+        return;
+    }
+    auto points = [](char g) { return g == 'P' ? 180 : g == 'G' ? 90 : g == 'S' ? 30 : g == 'B' ? 15 : 0; };
+    int unlocked = 0, earned = 0, total_points = 0;
+    int by_grade[4][2]{};  // B S G P: unlocked, total
+    for (const auto& tr : t.list) {
+        unlocked += tr.unlocked != 0;
+        total_points += points(tr.grade);
+        if (tr.unlocked) earned += points(tr.grade);
+        const int g = tr.grade == 'B' ? 0 : tr.grade == 'S' ? 1 : tr.grade == 'G' ? 2 : tr.grade == 'P' ? 3 : -1;
+        if (g >= 0) {
+            by_grade[g][1]++;
+            if (tr.unlocked) by_grade[g][0]++;
+        }
+    }
+    const int total = int(t.list.size());
+    const float progress = total_points ? float(earned) / float(total_points) : total ? float(unlocked) / float(total) : 0.0f;
+    static const ImVec4 grade_colors[] = {ImVec4(0.82f, 0.54f, 0.32f, 1.0f), ImVec4(0.80f, 0.83f, 0.88f, 1.0f),
+                                          ImVec4(1.0f, 0.80f, 0.29f, 1.0f), ImVec4(0.55f, 0.83f, 1.0f, 1.0f)};
+    auto grade_index = [](char g) { return g == 'B' ? 0 : g == 'S' ? 1 : g == 'G' ? 2 : g == 'P' ? 3 : -1; };
+    auto grade_name = [](int g) {
+        static const char* es[] = {"Bronce", "Plata", "Oro", "Platino"};
+        static const char* en[] = {"Bronze", "Silver", "Gold", "Platinum"};
+        return g_spanish ? es[g] : en[g];
+    };
+
+    // Summary.
+    BeginCard("trophy_summary");
+    const float big = 72.0f * g_ui_scale;
+    if (t.icon) {
+        ImGui::Image(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(t.icon))), ImVec2(big * 1.78f, big));
+        ImGui::SameLine(0.0f, 16.0f * g_ui_scale);
+    }
+    ImGui::BeginGroup();
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.25f);
+    ImGui::TextUnformatted(t.title_name.empty() ? "Crash Team Racing Nitro-Fueled" : t.title_name.c_str());
+    if (g_font_heading) ImGui::PopFont();
+    ImGui::Text(T("%d de %d logros  ·  %d %%", "%d of %d trophies  ·  %d %%"), unlocked, total, int(progress * 100.0f + 0.5f));
+    ImGui::ProgressBar(progress, ImVec2(-FLT_MIN, 8.0f * g_ui_scale), "");
+    if (t.names) {
+        for (int g = 3; g >= 0; --g) {
+            if (!by_grade[g][1]) continue;
+            ImGui::TextColored(grade_colors[g], "\xE2\x97\x8F");
+            ImGui::SameLine(0.0f, 4.0f * g_ui_scale);
+            ImGui::Text("%s %d/%d", grade_name(g), by_grade[g][0], by_grade[g][1]);
+            ImGui::SameLine(0.0f, 16.0f * g_ui_scale);
+        }
+        ImGui::NewLine();
+    }
+    ImGui::EndGroup();
+    EndCard();
+
+    // Names: the player's trophy key.
+    if (!t.names) {
+        ImGui::Spacing();
+        BeginCard("trophy_key");
+        ImGui::TextColored(kBlue, "%s", ICON_INFO);
+        ImGui::SameLine();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(T("Los logros se guardan igual al jugar y aquí se ven con su imagen. Sus nombres y descripciones "
+                                 "vienen cifrados en el juego con la clave de trofeos de la PS4, que no se incluye: si la tienes "
+                                 "(es la misma que usa shadPS4), pégala o impórtala para verlos.",
+                                 "Trophies are recorded while you play and shown here with their pictures. Their names and "
+                                 "descriptions are encrypted in the game with the PS4's trophy key, which is not included: if "
+                                 "you have it (the same shadPS4 uses), paste or import it to see them."));
+        ImGui::PopTextWrapPos();
+        if (!t.note.empty()) ImGui::TextColored(kRed, "%s", t.note.c_str());
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
+        ImGui::InputTextWithHint("##trophykey", T("Clave de trofeos (32 cifras hex)", "Trophy key (32 hex digits)"), g_trophy_key_input,
+                                 sizeof g_trophy_key_input, ImGuiInputTextFlags_Password | ImGuiInputTextFlags_CharsHexadecimal);
+        ImGui::SameLine();
+        if (ImGui::Button(T("Guardar", "Save"))) {
+            if (TrophyKeyBytes(g_trophy_key_input).empty()) {
+                a.notice = T("La clave tiene que tener 32 cifras hexadecimales.", "The key must be 32 hex digits.");
+            } else {
+                a.launcher.Set("trophy_key", g_trophy_key_input);
+                SaveLauncher();
+                g_trophies_reload = true;
+            }
+            std::memset(g_trophy_key_input, 0, sizeof g_trophy_key_input);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Importar de shadPS4", "Import from shadPS4"))) {
+            const std::string key = ShadPs4TrophyKey();
+            if (TrophyKeyBytes(key).empty()) {
+                a.notice = T("shadPS4 no tiene una clave de trofeos guardada (keys.json).",
+                             "shadPS4 has no trophy key saved (keys.json).");
+            } else {
+                a.launcher.Set("trophy_key", key);
+                SaveLauncher();
+                g_trophies_reload = true;
+            }
+        }
+        EndCard();
+    }
+
+    // Filter and actions.
+    ImGui::Spacing();
+    ImGui::RadioButton(T("Todos", "All"), &g_trophy_filter, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton(T("Desbloqueados", "Unlocked"), &g_trophy_filter, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton(T("Por conseguir", "Locked"), &g_trophy_filter, 2);
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 13.0f);
+    if (ImGui::Button((std::string(ICON_FOLDER "  ") + T("Carpeta", "Folder")).c_str())) {
+        std::error_code ec;
+        fs::create_directories(TrophyDir(t.title_id), ec);
+        OpenInShell(TrophyDir(t.title_id));
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!unlocked || a.game_running);
+    if (ImGui::Button((std::string(ICON_UNDO "  ") + T("Reiniciar", "Reset")).c_str())) g_trophy_reset_confirm = true;
+    ImGui::EndDisabled();
+
+    // The list.
+    ImGui::Spacing();
+    const float icon = 60.0f * g_ui_scale;
+    if (ImGui::BeginTable("trophies", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("icon", ImGuiTableColumnFlags_WidthFixed, icon);
+        ImGui::TableSetupColumn("text", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 9.0f);
+        // The latest unlocked first, then the rest in the game's order.
+        std::vector<const Trophy*> order;
+        for (const auto& tr : t.list) order.push_back(&tr);
+        std::stable_sort(order.begin(), order.end(), [](const Trophy* x, const Trophy* y) {
+            if (bool(x->unlocked) != bool(y->unlocked)) return bool(x->unlocked);
+            return x->unlocked > y->unlocked;
+        });
+        for (const Trophy* item : order) {
+            const Trophy& tr = *item;
+            if ((g_trophy_filter == 1 && !tr.unlocked) || (g_trophy_filter == 2 && tr.unlocked)) continue;
+            const bool secret = tr.hidden && !tr.unlocked;
+            ImGui::TableNextRow(0, icon + 8.0f * g_ui_scale);
+            ImGui::TableNextColumn();
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (tr.icon && !secret) {
+                dl->AddImageRounded(ImTextureRef(ImTextureID(reinterpret_cast<intptr_t>(tr.icon))), p, ImVec2(p.x + icon, p.y + icon),
+                                    ImVec2(0, 0), ImVec2(1, 1),
+                                    tr.unlocked ? IM_COL32_WHITE : IM_COL32(110, 110, 120, 255), 8.0f * g_ui_scale);
+            } else {
+                dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), Col(kFrame), 8.0f * g_ui_scale);
+                const ImVec2 q = ImGui::CalcTextSize("?");
+                dl->AddText(ImVec2(p.x + (icon - q.x) * 0.5f, p.y + (icon - q.y) * 0.5f), Col(kGrey), "?");
+            }
+            if (!tr.unlocked) dl->AddRect(p, ImVec2(p.x + icon, p.y + icon), Col(kBorder), 8.0f * g_ui_scale);
+            ImGui::Dummy(ImVec2(icon, icon));
+            ImGui::TableNextColumn();
+            if (g_font_heading) ImGui::PushFont(g_font_heading, 0.0f);
+            std::string name = secret ? T("Logro oculto", "Hidden trophy")
+                               : tr.name.empty() ? std::string(T("Logro #", "Trophy #")) + std::to_string(tr.id)
+                                                 : tr.name;
+            ImGui::TextColored(tr.unlocked ? kText : kGrey, "%s", name.c_str());
+            if (g_font_heading) ImGui::PopFont();
+            ImGui::PushTextWrapPos(0.0f);
+            if (secret) ImGui::TextColored(kGrey, "%s", T("Sigue jugando para descubrirlo.", "Keep playing to find it."));
+            else if (!tr.detail.empty()) ImGui::TextColored(kGrey, "%s", tr.detail.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::TableNextColumn();
+            const int g = grade_index(tr.grade);
+            if (g >= 0) {
+                ImGui::TextColored(grade_colors[g], "\xE2\x97\x8F %s", grade_name(g));
+            }
+            if (tr.unlocked > 1) {
+                const std::time_t when = std::time_t(tr.unlocked);
+                std::tm local{};
+                localtime_s(&local, &when);
+                char date[32];
+                std::strftime(date, sizeof date, "%d/%m/%Y %H:%M", &local);
+                ImGui::TextColored(kGreen, "%s %s", ICON_CHECK, date);
+            } else if (tr.unlocked) {
+                ImGui::TextColored(kGreen, "%s %s", ICON_CHECK, T("Conseguido", "Unlocked"));
+            } else {
+                ImGui::TextColored(kGrey, "%s", T("Por conseguir", "Locked"));
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::TextColored(kGrey, "%s", T("Se desbloquean jugando, como en la PS4; el platino llega solo al tener todos los demás.",
+                                      "They unlock as you play, as on a PS4; the platinum comes once all the others are."));
+
+    if (g_trophy_reset_confirm) {
+        ImGui::OpenPopup("trophy_reset");
+        g_trophy_reset_confirm = false;
+    }
+    if (ImGui::BeginPopupModal("trophy_reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextUnformatted(T("¿Volver a bloquear todos los logros? Se guarda una copia por si acaso.",
+                                 "Lock every trophy again? A copy is kept just in case."));
+        if (ImGui::Button(T("Reiniciar", "Reset"))) {
+            std::error_code ec;
+            const fs::path file = TrophyDir(t.title_id) / L"unlocked.txt";
+            fs::path backup = file;
+            backup += L"." + std::to_wstring(std::time(nullptr)) + L".bak";
+            fs::rename(file, backup, ec);
+            if (ec) a.notice = std::string(T("No se pudo reiniciar: ", "Could not reset: ")) + ec.message();
+            ReadUnlocked(t);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
 void ToolsTab() {
     App& a = g_app;
+    UpdateSection();
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
     if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenInShell(a.root / L"last_run.log");
     ImGui::SameLine();
@@ -4518,13 +5723,14 @@ void ToolsTab() {
     ImGui::EndDisabled();
 
     ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
-    if (ImGui::RadioButton("Español", g_spanish)) {
-        g_spanish = true;
-        SaveLauncher();
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("English", !g_spanish)) {
-        g_spanish = false;
+    const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
+                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский"};
+    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru"};
+    int selected_language = 0;
+    for (int i = 0; i < 10; ++i) if (g_language == language_codes[i]) selected_language = i;
+    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 10)) {
+        g_language = language_codes[selected_language];
+        ApplyLauncherLanguage();
         SaveLauncher();
     }
 
@@ -4567,84 +5773,277 @@ void ClearShaderCache() {
                             T(" archivos).", " files).");
 }
 
+void HeroHeader() {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = 270.0f;
+    const ImVec2 end{origin.x + width, origin.y + height};
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (g_hero_art.texture) {
+        const float image_aspect = float(g_hero_art.width) / float(g_hero_art.height);
+        const float view_aspect = width / height;
+        ImVec2 uv0{0.0f, 0.0f}, uv1{1.0f, 1.0f};
+        if (image_aspect < view_aspect) {
+            const float visible = image_aspect / view_aspect;
+            uv0.y = (1.0f - visible) * 0.5f;
+            uv1.y = 1.0f - uv0.y;
+        } else {
+            const float visible = view_aspect / image_aspect;
+            uv0.x = (1.0f - visible) * 0.5f;
+            uv1.x = 1.0f - uv0.x;
+        }
+        draw->AddImage((ImTextureID)(intptr_t)g_hero_art.texture, origin, end, uv0, uv1);
+    } else {
+        draw->AddRectFilled(origin, end, IM_COL32(48, 32, 20, 255));
+    }
+    if (g_logo_art.texture) {
+        const float max_w = std::min(width * 0.34f, 390.0f);
+        const float max_h = height * 0.78f;
+        const float aspect = float(g_logo_art.width) / float(g_logo_art.height);
+        float logo_w = max_w, logo_h = logo_w / aspect;
+        if (logo_h > max_h) { logo_h = max_h; logo_w = logo_h * aspect; }
+        const ImVec2 lo{origin.x + 28.0f, origin.y + (height - logo_h) * 0.5f};
+        const ImVec2 hi{lo.x + logo_w, lo.y + logo_h};
+        draw->AddImage((ImTextureID)(intptr_t)g_logo_art.texture, lo, hi);
+    }
+    draw->AddRectFilled(ImVec2(origin.x, end.y - 4.0f), end, IM_COL32(238, 169, 48, 255));
+    ImGui::Dummy(ImVec2(width, height));
+}
+
+void WindowBar(float width) {
+    const float height = 40.0f;
+    ImGui::SetCursorPos(ImVec2(0, 0));
+    const ImVec2 p = ImGui::GetWindowPos();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height), IM_COL32(7, 72, 145, 255));
+    draw->AddRectFilled(ImVec2(p.x, p.y + height - 1), ImVec2(p.x + width, p.y + height),
+                        IM_COL32(44, 166, 228, 255));
+    const float bw = 42.0f, bh = 30.0f, gap = 3.0f;
+    const float left = width - 3.0f * bw - 2.0f * gap - 8.0f;
+    auto button = [&](const char* id, int kind) {
+        ImGui::SetCursorPos(ImVec2(left + kind * (bw + gap), 5.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.25f, 0.47f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f, 0.40f, 0.66f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.78f, 1));
+        const bool clicked = ImGui::Button(id, ImVec2(bw, bh));
+        ImGui::PopStyleColor(3);
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        const ImVec2 c{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+        const ImU32 ink = IM_COL32(255, 234, 198, 255);
+        if (kind == 0) draw->AddLine(ImVec2(c.x - 5, c.y), ImVec2(c.x + 5, c.y), ink, 1.6f);
+        else if (kind == 1) draw->AddRect(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), ink, 0, 0, 1.4f);
+        else {
+            draw->AddLine(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), ink, 1.6f);
+            draw->AddLine(ImVec2(c.x + 5, c.y - 5), ImVec2(c.x - 5, c.y + 5), ink, 1.6f);
+        }
+        return clicked;
+    };
+    if (button("##minimize", 0)) ShowWindow(g_app.hwnd, SW_MINIMIZE);
+    if (button("##maximize", 1)) ShowWindow(g_app.hwnd, IsZoomed(g_app.hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    if (button("##close", 2)) SendMessageW(g_app.hwnd, WM_CLOSE, 0, 0);
+    RECT client{};
+    GetClientRect(g_app.hwnd, &client);
+    g_titlebar_drag = RECT{0, 0, std::max<LONG>(0, client.right - LONG(3 * bw + 2 * gap + 8)), LONG(height)};
+    ImGui::SetCursorPos(ImVec2(14, height + 10));
+}
+
+bool LoadArtworkFile(const fs::path& path, LauncherArtwork& artwork) {
+    if (!g_device || !fs::is_regular_file(path)) return false;
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID3D11Texture2D* texture = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                                WICDecodeMetadataCacheOnLoad, &decoder);
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter);
+    if (SUCCEEDED(hr)) hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    UINT w = 0, h = 0;
+    if (SUCCEEDED(hr)) hr = converter->GetSize(&w, &h);
+    std::vector<BYTE> pixels(size_t(w) * h * 4);
+    if (SUCCEEDED(hr)) hr = converter->CopyPixels(nullptr, w * 4, UINT(pixels.size()), pixels.data());
+    if (SUCCEEDED(hr)) {
+        D3D11_TEXTURE2D_DESC td{}; td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd{pixels.data(), w * 4, 0};
+        hr = g_device->CreateTexture2D(&td, &sd, &texture);
+    }
+    if (SUCCEEDED(hr)) hr = g_device->CreateShaderResourceView(texture, nullptr, &artwork.texture);
+    if (texture) texture->Release(); if (converter) converter->Release(); if (frame) frame->Release();
+    if (decoder) decoder->Release(); if (factory) factory->Release();
+    if (FAILED(hr)) { artwork = {}; return false; }
+    artwork.width = w; artwork.height = h; return true;
+}
+
+void LoadArtwork() {
+    const fs::path art = g_app.root / L"art";
+    LoadArtworkFile(art / L"ctr-hero.png", g_hero_art);
+    LoadArtworkFile(art / L"ctr-logo.png", g_logo_art);
+    LoadArtworkFile(art / L"ctr-menu-background.png", g_menu_background);
+}
+
+void ReleaseArtwork() {
+    for (auto* a : {&g_hero_art, &g_logo_art, &g_menu_background}) {
+        if (a->texture) a->texture->Release();
+        *a = {};
+    }
+}
+
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
+    const ImU32 navy = IM_COL32(6, 39, 89, 255);
+    auto line = [&](ImVec2 a, ImVec2 b, float t = 2.2f) { d->AddLine(a, b, navy, t * s); d->AddLine(a, b, ink, t * s * 0.58f); };
+    if (id == 0) { // checkered flag / race
+        line({c.x-7*s,c.y+8*s},{c.x-7*s,c.y-8*s},2.5f); d->AddRectFilled({c.x-5*s,c.y-8*s},{c.x+8*s,c.y+1*s},ink,1.5f*s);
+        d->AddRectFilled({c.x-2*s,c.y-8*s},{c.x+1*s,c.y-3.5f*s},navy); d->AddRectFilled({c.x+4*s,c.y-3.5f*s},{c.x+7*s,c.y+1*s},navy);
+    } else if (id == 1) { // gear
+        d->AddCircleFilled(c,7*s,navy,12); d->AddCircleFilled(c,5.5f*s,ink,12); d->AddCircleFilled(c,2*s,navy,12);
+        for (int i=0;i<8;++i) { float a=float(i)*0.785398f; ImVec2 p{c.x+7*s*std::cos(a),c.y+7*s*std::sin(a)}; d->AddCircleFilled(p,1.6f*s,ink,8); }
+    } else if (id == 2) { // wireless
+        d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(navy,0,4*s); d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(ink,0,2.2f*s);
+        d->PathArcTo({c.x,c.y+5*s},5*s,3.85f,5.58f,18); d->PathStroke(ink,0,2*s); d->AddCircleFilled({c.x,c.y+5*s},1.7f*s,ink,10);
+    } else if (id == 3) { // gamepad
+        d->AddRect({c.x-9*s,c.y-5*s},{c.x+9*s,c.y+6*s},navy,5*s,0,3*s); d->AddRect({c.x-8*s,c.y-4*s},{c.x+8*s,c.y+5*s},ink,4*s,0,2*s);
+        line({c.x-5*s,c.y},{c.x-1*s,c.y},2); line({c.x-3*s,c.y-2*s},{c.x-3*s,c.y+2*s},2); d->AddCircleFilled({c.x+4*s,c.y-1*s},1.4f*s,navy); d->AddCircleFilled({c.x+6*s,c.y+2*s},1.4f*s,navy);
+    } else if (id == 4) { // keyboard
+        d->AddRectFilled({c.x-9*s,c.y-6*s},{c.x+9*s,c.y+6*s},navy,2*s); d->AddRectFilled({c.x-7*s,c.y-4*s},{c.x+7*s,c.y+4*s},ink,1*s);
+        for(int r=0;r<2;++r) for(int col=0;col<5;++col) d->AddRectFilled({c.x-6*s+col*2.5f*s,c.y-3*s+r*3*s},{c.x-4.5f*s+col*2.5f*s,c.y-1.8f*s+r*3*s},navy,0.4f*s);
+    } else if (id == 5) { // patch badge
+        const ImVec2 pts[]={{c.x,c.y-9*s},{c.x+8*s,c.y-6*s},{c.x+7*s,c.y+3*s},{c.x,c.y+9*s},{c.x-7*s,c.y+3*s},{c.x-8*s,c.y-6*s}};
+        d->AddConvexPolyFilled(pts,6,navy); const ImVec2 in[]={{c.x,c.y-7*s},{c.x+6*s,c.y-4.5f*s},{c.x+5*s,c.y+2*s},{c.x,c.y+7*s},{c.x-5*s,c.y+2*s},{c.x-6*s,c.y-4.5f*s}}; d->AddConvexPolyFilled(in,6,ink);
+        line({c.x-3*s,c.y},{c.x-0.5f*s,c.y+2.5f*s},2.4f); line({c.x-0.5f*s,c.y+2.5f*s},{c.x+4*s,c.y-3*s},2.4f);
+    } else if (id == 6) { // save card
+        d->AddRectFilled({c.x-7*s,c.y-9*s},{c.x+7*s,c.y+9*s},navy,1*s); d->AddRectFilled({c.x-5.5f*s,c.y-7*s},{c.x+5.5f*s,c.y+7*s},ink,0.8f*s);
+        d->AddRectFilled({c.x-3.5f*s,c.y-6*s},{c.x+3.5f*s,c.y-2*s},navy); d->AddRectFilled({c.x-3.5f*s,c.y+1*s},{c.x+3.5f*s,c.y+5*s},navy,0.6f*s);
+    } else if (id == 7) { // crate
+        d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
+        d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
+    } else { // crossed tools
+        line({c.x-7*s,c.y-7*s},{c.x+7*s,c.y+7*s},3); line({c.x+7*s,c.y-7*s},{c.x-7*s,c.y+7*s},3); d->AddCircleFilled(c,2.5f*s,ink,12);
+    }
+}
+
+bool MenuEntry(int id, const char* label, bool selected, float width) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 size{width, 44.0f};
+    const bool clicked = ImGui::InvisibleButton(label, size);
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 a{start.x, start.y}, b{start.x + size.x, start.y + size.y};
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const double now = ImGui::GetTime();
+    static double selected_since = 0.0;
+    static int last_selected = -1;
+    if (selected && last_selected != id) { last_selected = id; selected_since = now; }
+    const float t = selected ? std::clamp(float((now - selected_since) / 0.26), 0.0f, 1.0f) : 1.0f;
+    const float ease = 1.0f - (1.0f-t)*(1.0f-t);
+    const float slide = selected ? (1.0f-ease) * -13.0f : 0.0f;
+    ImVec2 p0{a.x+slide,a.y+4}, p1{b.x+slide-10,a.y+4}, p2{b.x+slide,a.y+size.y-4}, p3{a.x+slide+10,a.y+size.y-4};
+    const ImU32 shadow=IM_COL32(0,31,79,95), dark=hovered?IM_COL32(7,65,130,218):IM_COL32(6,55,113,178);
+    const ImVec2 sh[]={ImVec2(p0.x,p0.y+3),ImVec2(p1.x,p1.y+3),ImVec2(p2.x,p2.y+3),ImVec2(p3.x,p3.y+3)};
+    d->AddConvexPolyFilled(sh,4,shadow);
+    const ImVec2 poly[]={p0,p1,p2,p3};
+    d->AddConvexPolyFilled(poly,4,selected?IM_COL32(234,250,255,248):dark);
+    if (selected) {
+        d->AddPolyline(poly,4,IM_COL32(255,255,255,215),ImDrawFlags_Closed,1.6f);
+        d->AddRectFilled({p3.x+3,p3.y-1},{p3.x+8,p3.y+1},IM_COL32(29,211,255,255));
+        const float elapsed = float(now-selected_since);
+        if (elapsed < 0.42f) {
+            const float shine = std::clamp(elapsed / 0.42f, 0.0f, 1.0f);
+            const float sx = a.x+slide+12.0f+shine*(size.x-54.0f);
+            d->PushClipRect({p0.x,p0.y},{p2.x,p2.y},true);
+            d->AddLine({sx,p0.y+5},{sx+13,p2.y-5},IM_COL32(255,255,255,110),2.0f);
+            d->PopClipRect();
+        }
+    }
+    const ImVec2 icon{a.x+31.0f+slide,a.y+size.y*0.5f};
+    DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),0.75f);
+    ImFont* label_font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
+    const float label_font_size = ImGui::GetFontSize();
+    const ImVec2 text_size=label_font->CalcTextSizeA(label_font_size, FLT_MAX, 0.0f, label);
+    const ImVec2 text{a.x+55.0f+slide,a.y+(size.y-text_size.y)*0.5f};
+    d->AddText(label_font,label_font_size,text,selected?IM_COL32(4,46,84,255):IM_COL32(237,249,255,245),label);
+    return clicked;
+}
+
 void Frame() {
     App& a = g_app;
     PollJobs();
+    PollUpdate();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::Begin("launcher", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.6f);
-    ImGui::TextUnformatted("CTR Nitro-Fueled PC");
-    ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::TextColored(kGrey, "%s", a.version.c_str());
+    if (g_menu_background.texture) {
+        const float wa=vp->WorkSize.x/vp->WorkSize.y;
+        const float ia=float(g_menu_background.width)/float(g_menu_background.height);
+        ImVec2 uv0{0,0},uv1{1,1};
+        if (ia>wa) { const float v=wa/ia; uv0.x=(1-v)*0.5f; uv1.x=1-uv0.x; }
+        else { const float v=ia/wa; uv0.y=(1-v)*0.5f; uv1.y=1-uv0.y; }
+        ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)g_menu_background.texture,
+                                             vp->WorkPos, ImVec2(vp->WorkPos.x + vp->WorkSize.x,
+                                                                 vp->WorkPos.y + vp->WorkSize.y),uv0,uv1);
+    }
+    const float width = ImGui::GetWindowSize().x;
+    WindowBar(width);
+    HeroHeader();
 
     if (!a.notice.empty()) {
         ImGui::TextColored(kYellow, "%s", a.notice.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton("OK")) a.notice.clear();
     }
+    UpdateBanner();
 
-    if (ImGui::BeginTabBar("tabs")) {
-        if (ImGui::BeginTabItem(T("Jugar", "Play"))) {
-            PlayTab();
-            ImGui::EndTabItem();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
+    ImGui::BeginChild("menu_body", ImVec2(0, 0), ImGuiChildFlags_None);
+    const float menu_w = 238.0f;
+    ImGui::BeginChild("menu_navigation", ImVec2(menu_w, 0), ImGuiChildFlags_None);
+    ImGui::SetCursorPos(ImVec2(18.0f, 14.0f));
+    ImGui::TextColored(ImVec4(0.76f, 0.92f, 1.0f, 0.9f), "%s", T("MENÚ PRINCIPAL", "MAIN MENU"));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+    const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
+                           T("Teclado", "Keyboard"), T("Parches", "Patches"), T("Guardados", "Saves"), "DLC",
+                           T("Logros", "Achievements"), T("Herramientas", "Tools")};
+    for (int i=0; i<10; ++i) {
+        ImGui::SetCursorPosX(8.0f);
+        if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
+            a.active_page = i;
+            if (i != 3) g_pad_capture = -1;
+            if (i != 4) g_key_capture = -1;
         }
-        if (ImGui::BeginTabItem(T("Ajustes", "Settings"))) {
-            ImGui::BeginChild("settings");
-            SettingsTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Online")) {
-            ImGui::BeginChild("online");
-            OnlineTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Mando", "Gamepad"))) {
-            ImGui::BeginChild("gamepad");
-            GamepadTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        } else if (g_pad_capture >= 0) {
-            g_pad_capture = -1;
-        }
-        if (ImGui::BeginTabItem(T("Teclado", "Keyboard"))) {
-            ImGui::BeginChild("keyboard");
-            KeyboardTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        } else if (g_key_capture >= 0) {
-            g_key_capture = -1;  // left the tab while waiting for a key
-        }
-        if (ImGui::BeginTabItem(T("Parches", "Patches"))) {
-            ImGui::BeginChild("patches");
-            PatchesTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Guardados", "Saves"))) {
-            ImGui::BeginChild("saves");
-            SavesTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("DLC")) {
-            ImGui::BeginChild("dlc");
-            DlcTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Herramientas", "Tools"))) {
-            ToolsTab();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
     }
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 38.0f));
+    ImGui::SetCursorPosX(18.0f);
+    ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.84f), "CTR  •  %s", a.version.c_str());
+    ImGui::EndChild();
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.015f, 0.13f, 0.32f, 0.82f));
+    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::SetCursorPos(ImVec2(22.0f, 17.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
+    switch (a.active_page) {
+    case 0: PlayTab(); break;
+    case 1: SettingsTab(); break;
+    case 2: OnlineTab(); break;
+    case 3: GamepadTab(); break;
+    case 4: KeyboardTab(); break;
+    case 5: PatchesTab(); break;
+    case 6: SavesTab(); break;
+    case 7: DlcTab(); break;
+    case 8: TrophiesTab(); break;
+    default: ToolsTab(); break;
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     SaveConfirmations();
     NickPopup();
@@ -4703,7 +6102,8 @@ void LoadState() {
     a.game.Load(GameIni());
     SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
-    g_spanish = lang.empty() ? PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH : lang == "es";
+    g_language = lang.empty() ? "auto" : lang;
+    ApplyLauncherLanguage();
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
@@ -4725,47 +6125,6 @@ void LoadState() {
     a.update_info = Analyze(a.update_dir);
     a.patches = LoadPatches();
     ReadPatchConfig(a.patch_enabled, a.patch_disabled);
-    // v0.3 one-time migration: ultrawide moves from the Patches tab (patches.json)
-    // to Settings > Display > Aspect ratio (bbport.ini aspect_ratio, single dropdown).
-    // If the game settings have no aspect key yet but a Patches toggle enabled an
-    // ultrawide XML, adopt it as the aspect and drop both XMLs from patches.json so
-    // Patches (which hides them now) can never re-enable them behind the dropdown.
-    if (a.game.Get("aspect_ratio").empty()) {
-        const char* adopted = nullptr;
-        bool both = false;
-        for (const auto& key : a.patch_enabled) {
-            const char* mine = nullptr;
-            if (key == "CTR-UltraWide21x9-v1.0.xml/21:9 UltraWide") mine = "21:9";
-            if (key == "CTR-SuperUltraWide32x9-v1.0.xml/32:9 Super UltraWide") mine = "32:9";
-            if (mine) {
-                if (adopted) both = true;
-                adopted = mine;
-            }
-        }
-        if (both) adopted = nullptr;  // both on: leave off, the player picks one
-        auto drop_uw = [&](std::vector<std::string>& v) {
-            v.erase(std::remove_if(v.begin(), v.end(), [](const std::string& k) { return IsUltrawideKey(k); }), v.end());
-        };
-        if (adopted) {
-            a.game.Set("aspect_ratio", adopted);
-            SaveGameIni();
-            drop_uw(a.patch_enabled);
-            drop_uw(a.patch_disabled);
-            WritePatchConfig(a.patch_enabled, a.patch_disabled);
-            a.notice = T("Ultra-panorámico movido a Ajustes > Pantalla > Aspecto / salida.",
-                         "Ultrawide moved to Settings > Display > Aspect / output.");
-        } else {
-            // No single legacy toggle: just hide any stale entries from the JSON.
-            bool had = false;
-            for (const auto& k : a.patch_enabled) had = had || IsUltrawideKey(k);
-            for (const auto& k : a.patch_disabled) had = had || IsUltrawideKey(k);
-            if (had) {
-                drop_uw(a.patch_enabled);
-                drop_uw(a.patch_disabled);
-                WritePatchConfig(a.patch_enabled, a.patch_disabled);
-            }
-        }
-    }
     StartCheck();
     StartProbe();
 }
@@ -4779,6 +6138,24 @@ IDXGISwapChain* g_swapchain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
 UINT g_resize_w = 0, g_resize_h = 0;
 bool g_occluded = false;
+
+ID3D11ShaderResourceView* MakeTexture(const uint32_t* bgra, int width, int height) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(width);
+    td.Height = UINT(height);
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA data{bgra, UINT(width * 4), 0};
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* view = nullptr;
+    if (!g_device || FAILED(g_device->CreateTexture2D(&td, &data, &texture))) return nullptr;
+    g_device->CreateShaderResourceView(texture, nullptr, &view);
+    texture->Release();
+    return view;
+}
 
 void CreateRenderTarget() {
     ID3D11Texture2D* back = nullptr;
@@ -4832,6 +6209,19 @@ void CleanupDevice() {
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_NCHITTEST) {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd, &pt);
+        RECT client{}; GetClientRect(hwnd, &client);
+        if (!IsZoomed(hwnd)) {
+            const LONG edge = LONG(8.0f * g_ui_scale);
+            const bool l=pt.x<edge, r=pt.x>=client.right-edge, t=pt.y<edge, b=pt.y>=client.bottom-edge;
+            if (t&&l) return HTTOPLEFT; if (t&&r) return HTTOPRIGHT;
+            if (b&&l) return HTBOTTOMLEFT; if (b&&r) return HTBOTTOMRIGHT;
+            if (l) return HTLEFT; if (r) return HTRIGHT; if (t) return HTTOP; if (b) return HTBOTTOM;
+        }
+        return PtInRect(&g_titlebar_drag, pt) ? HTCAPTION : HTCLIENT;
+    }
     // Gamepad tab: Esc cancels capture
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_pad_capture >= 0) {
         if (wparam == VK_ESCAPE) {
@@ -4847,6 +6237,30 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam)) return true;
     switch (msg) {
+    case WM_NCCALCSIZE:
+        if (wparam) {
+            auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+            if (IsZoomed(hwnd)) {
+                MONITORINFO monitor{sizeof monitor};
+                if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+                    params->rgrc[0] = monitor.rcWork;
+            }
+            return 0;
+        }
+        break;
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+        info->ptMinTrackSize.x = LONG(900.0f * g_ui_scale);
+        info->ptMinTrackSize.y = LONG(640.0f * g_ui_scale);
+        MONITORINFO monitor{sizeof monitor};
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left;
+            info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top;
+            info->ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left;
+            info->ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top;
+        }
+        return 0;
+    }
     case WM_SIZE:
         if (wparam == SIZE_MINIMIZED) return 0;
         g_resize_w = LOWORD(lparam);
@@ -4885,6 +6299,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (op == L"--dlc") {
                 for (const auto& d : ScanDlc())
                     result += d.file + " | " + d.title + " | " + d.label + " | " + (d.ok ? "ok" : d.problem) + "\n";
+            } else if (op == L"--aes") {
+                // FIPS-197 C.1: AES-128, key 00..0f, plaintext 00112233..ff.
+                std::string key;
+                unsigned char plain[16], out[16], zero[16]{};
+                for (int i = 0; i < 16; ++i) {
+                    key += char(i);
+                    plain[i] = (unsigned char)(i * 0x11);
+                }
+                AesCbc(key, zero, plain, 16, out, true);
+                char hex[40]{};
+                for (int i = 0; i < 16; ++i) std::snprintf(hex + i * 2, 3, "%02x", out[i]);
+                result = std::string("aes ") + hex + (std::string(hex) == "69c4e0d86a7b0430d8cdb78070b4c55a" ? " ok" : " BAD");
+            } else if (op == L"--esfm" && argc == 6) {
+                // --esfm <key hex> <NP comm ID> <entry file> <port>
+                const std::string xml = DecryptEsfm(TrophyKeyBytes(PathText(fs::path(argv[2]))), PathText(fs::path(argv[3])),
+                                                    ReadText(argv[4]));
+                result = xml.empty() ? "esfm: no xml" : "esfm: " + xml.substr(0, 200);
+            } else if (op == L"--trophies" && argc == 4) {
+                // --trophies <game folder> <port>
+                g_app.game_dir = argv[2];
+                LoadTrophies();
+                result = "title " + g_trophies.title_id + " np " + g_trophies.np_comm_id + " trophies " +
+                         std::to_string(g_trophies.list.size()) + (g_trophies.error.empty() ? "" : " error " + g_trophies.error) + "\n";
+                for (const auto& tr : g_trophies.list)
+                    result += std::to_string(tr.id) + " " + (tr.unlocked ? "unlocked" : "locked") + "\n";
             } else if (op == L"--patches") {
                 for (const auto& p : LoadPatches())
                     result += p.key + " | " + p.author + " | " + p.version + " | " + (p.ini_key ? p.ini_key : "-") +
@@ -4903,9 +6342,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     int cmd_argc = 0;
     LPWSTR* cmd_argv = CommandLineToArgvW(GetCommandLineW(), &cmd_argc);
-    bool direct_launch = false;
+    bool direct_launch = false, updated = false;
     if (cmd_argv) {
         for (int i = 1; i < cmd_argc; ++i) {
+            if (_wcsicmp(cmd_argv[i], L"--updated") == 0) updated = true;  // started by an update (PollUpdate)
             if (_wcsicmp(cmd_argv[i], L"--launch") == 0 || _wcsicmp(cmd_argv[i], L"--play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"-launch") == 0 || _wcsicmp(cmd_argv[i], L"-play") == 0 ||
                 _wcsicmp(cmd_argv[i], L"--direct") == 0) {
@@ -4917,6 +6357,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     LoadState();
+    MigrateOldLauncher();
+    if (!direct_launch) {
+        CleanupUpdate();
+        if (updated) {
+            g_app.notice = Format(T("Actualizado a %s. Tus ajustes, amigos, parches y partidas se mantienen.",
+                                    "Updated to %s. Your settings, friends, patches and saves are kept."),
+                                  g_app.version);
+        } else if (g_app.launcher.Flag("update_check", true)) {
+            StartUpdateCheck(g_app.launcher.Flag("update_auto", false));
+        }
+    }
 
     if (direct_launch) {
         if (g_app.worker.joinable()) g_app.worker.join();
@@ -4953,17 +6404,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                                 GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
-    const int width = int(820 * scale), height = int(720 * scale);
+    const int width = int(1120 * scale), height = int(840 * scale);
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const int x = work.left + std::max(0, int(work.right - work.left - width) / 2);
     const int y = work.top + std::max(0, int(work.bottom - work.top - height) / 2);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"CTR Nitro-Fueled PC", WS_OVERLAPPEDWINDOW, x, y, width, height, nullptr,
-                              nullptr, instance, nullptr);
+    g_ui_scale = scale;
+    HWND hwnd = CreateWindowW(wc.lpszClassName, kLauncherName,
+                              WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
+                              x, y, width, height, nullptr, nullptr, instance, nullptr);
     g_app.hwnd = hwnd;
+    const BOOL dark_titlebar = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark_titlebar, sizeof(dark_titlebar));
     if (!CreateDevice(hwnd)) {
         CleanupDevice();
-        MessageBoxW(nullptr, L"Direct3D 11 is not available.", L"CTR Nitro-Fueled PC", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Direct3D 11 is not available.", kLauncherName, MB_ICONERROR);
         return 1;
     }
     ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -4977,6 +6432,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_Text] = ImVec4(0.94f, 0.98f, 1.0f, 1.0f);
+    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.65f, 0.83f, 0.94f, 1.0f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.10f, 0.24f, 1.0f);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.02f, 0.18f, 0.36f, 0.78f);
+    style.Colors[ImGuiCol_PopupBg] = ImVec4(0.02f, 0.13f, 0.30f, 0.98f);
+    style.Colors[ImGuiCol_Border] = ImVec4(0.48f, 0.84f, 0.97f, 0.35f);
+    style.Colors[ImGuiCol_FrameBg] = ImVec4(0.04f, 0.24f, 0.43f, 0.90f);
+    style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.07f, 0.38f, 0.60f, 1.0f);
+    style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.10f, 0.48f, 0.68f, 1.0f);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.04f, 0.27f, 0.49f, 0.95f);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.10f, 0.50f, 0.70f, 1.0f);
+    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.17f, 0.71f, 0.87f, 1.0f);
+    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.91f, 1.0f, 1.0f);
+    style.Colors[ImGuiCol_Header] = ImVec4(0.05f, 0.35f, 0.60f, 0.9f);
+    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.11f, 0.55f, 0.76f, 1.0f);
+    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.16f, 0.68f, 0.84f, 1.0f);
     style.FontSizeBase = 17.0f;
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
@@ -4985,15 +6456,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     style.ItemSpacing = ImVec2(10 * scale, 8 * scale);
     style.FrameRounding = 4 * scale;
     style.TabRounding = 4 * scale;
+    style.WindowRounding = 9 * scale;
     wchar_t fonts[MAX_PATH];
     const UINT n = GetWindowsDirectoryW(fonts, MAX_PATH);
     const fs::path segoe = fs::path(std::wstring(fonts, n)) / L"Fonts" / L"segoeui.ttf";
     std::error_code ec;
+    // Japanese and Chinese, which Segoe UI and the CTR font lack: Windows' own CJK fonts merged in
+    // as fallbacks (ImGui 1.92 loads their glyphs only when a text uses them).
+    const auto merge_fallbacks = [&](bool with_segoe) {
+        std::vector<fs::path> files;
+        if (with_segoe) files.push_back(segoe);
+        for (const wchar_t* name : {L"msyh.ttc", L"YuGothM.ttc", L"msgothic.ttc"})
+            files.push_back(fs::path(std::wstring(fonts, n)) / L"Fonts" / name);
+        for (const fs::path& file : files) {
+            if (!fs::is_regular_file(file, ec)) continue;
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), 0.0f, &merge);
+        }
+    };
     if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
     else io.Fonts->AddFontDefault();
+    merge_fallbacks(false);
+    const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
+    if (fs::is_regular_file(ctr_font, ec)) {
+        g_ctr_font = io.Fonts->AddFontFromFileTTF(PathText(ctr_font).c_str(), style.FontSizeBase);
+        merge_fallbacks(true);  // Cyrillic and CJK labels in the CTR font's places
+    }
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
+    LoadArtwork();
     if (g_app.launcher.Flag("discord_rpc", true))
         RegisterDiscordLaunch(DiscordAppId());
 
@@ -5037,15 +6530,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     DiscordPresence::Shutdown();
+    if (g_update.worker.joinable()) {  // a download stops; an install in progress finishes
+        g_update.progress.cancel = true;
+        g_update.worker.join();
+    }
     // Background work finishes on its own; a running game keeps running.
     if (g_app.worker.joinable()) {
         if (g_app.job == Job::Play) g_app.worker.detach();
         else g_app.worker.join();
     }
     if (g_app.probe.joinable()) g_app.probe.join();
+    ReleaseTrophies(g_trophies);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    ReleaseArtwork();
     CleanupDevice();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);

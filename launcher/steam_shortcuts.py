@@ -131,19 +131,35 @@ def make_entry(exe, start_dir, name=NAME, launch_options="", icon=""):
     }
 
 
+def ours(existing, entry):
+    """An entry this launcher wrote earlier: its name, and an AppImage or the checkout's script
+    (an older release's AppImage, under its own versioned file name)."""
+    exe = str(existing.get("Exe", "")).strip('"')
+    return existing.get("AppName") == entry["AppName"] and (exe.endswith(".AppImage") or exe.endswith("bb-launcher.sh"))
+
+
 def add_shortcut(path, entry):
-    """Adds `entry` to the shortcuts file at `path` (created if missing); an entry with the same
-    executable and name is replaced. Returns True when a new entry was added, False on replace."""
+    """Adds `entry` to the shortcuts file at `path` (created if missing). An entry with the same
+    executable and name is replaced; so is one this launcher wrote for another AppImage (an older
+    release), keeping its app id, so Steam keeps its artwork and play time. Returns True when a
+    new entry was added, False on replace."""
     path = Path(path)
     data = path.read_bytes() if path.exists() else b""
     top = parse(data)
     shortcuts = top.setdefault("shortcuts", {})
-    for key, existing in list(shortcuts.items()):
-        if isinstance(existing, dict) and existing.get("Exe") == entry["Exe"] \
-                and existing.get("AppName") == entry["AppName"]:
-            shortcuts[key] = entry
-            added = False
-            break
+    same = [k for k, e in shortcuts.items() if isinstance(e, dict) and e.get("Exe") == entry["Exe"]
+            and e.get("AppName") == entry["AppName"]]
+    older = [k for k, e in shortcuts.items() if isinstance(e, dict) and k not in same and ours(e, entry)]
+    if same or older:
+        key = (same or older)[0]
+        if not same:
+            kept = shortcuts[key]
+            entry = dict(entry)
+            for field in ("appid", "LastPlayTime", "IsHidden", "tags"):
+                if field in kept:
+                    entry[field] = kept[field]
+        shortcuts[key] = entry
+        added = False
     else:
         index = max((int(k) for k in shortcuts if k.isdigit()), default=-1) + 1
         shortcuts[str(index)] = entry
@@ -155,12 +171,40 @@ def add_shortcut(path, entry):
     return added
 
 
+def stable_appimage_link():
+    """A fixed path for the AppImage this launcher runs from (APPIMAGE, set by its runtime):
+    <data dir>/SacredFire.AppImage, a symlink kept pointing at the AppImage opened last. Releases
+    come as versioned files (SacredFire-v0.5.2-x86_64.AppImage); a Steam shortcut to the link
+    keeps working once a newer one has been opened. None when not running from an AppImage or
+    the link cannot be made (a file of the player's own there is left alone)."""
+    appimage = os.environ.get("APPIMAGE")
+    if not appimage or not Path(appimage).is_file():
+        return None
+    data = Path(os.environ.get("BB_DATA_DIR") or
+                Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "sacredfire")
+    link = data / "SacredFire.AppImage"
+    target = Path(appimage).resolve()
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            if Path(os.readlink(link)) == target:
+                return str(link)
+            link.unlink()
+        elif link.exists():
+            return None
+        link.symlink_to(target)
+        return str(link)
+    except OSError:
+        return None
+
+
 def launcher_command():
-    """What Steam should start: the AppImage when running from one, else launcher/bb-launcher.sh;
-    `--play` starts the game without the launcher window (game mode)."""
+    """What Steam should start: the AppImage when running from one (through its fixed link when
+    it can be made), else launcher/bb-launcher.sh; `--play` starts the game without the launcher
+    window (game mode)."""
     appimage = os.environ.get("APPIMAGE")
     if appimage and Path(appimage).is_file():
-        exe = str(Path(appimage).resolve())
+        exe = stable_appimage_link() or str(Path(appimage).resolve())
     else:
         exe = str((Path(__file__).resolve().parent / "bb-launcher.sh"))
     return exe, str(Path(exe).parent), "--play"

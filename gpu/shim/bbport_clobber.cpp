@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <utility>
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/mman.h>
@@ -104,6 +106,91 @@ void NoteDecoding(std::uint64_t seq) {
     decoding.store(seq, std::memory_order_relaxed);
 }
 
+namespace {
+// The dcb being decoded, for StaleLabel, and the ranges of it the port wrote since (NoteWrite).
+struct DecodingCopy {
+    std::uint64_t seq = 0, base = 0, dwords = 0;
+    std::shared_ptr<const std::uint32_t> words;
+    std::array<std::pair<std::uint64_t, std::uint64_t>, 512> touched{};
+    std::size_t touched_count = 0;
+    bool touched_overflow = false;
+};
+std::mutex decoding_copy_mutex;
+DecodingCopy decoding_copy;
+std::atomic<std::uint64_t> decoding_base{0}, decoding_end{0};
+std::atomic<std::uint64_t> stale_skipped{0};
+
+// NoteWrite: a port write inside the dcb being decoded. Holds no lock.
+void NoteTouched(std::uint64_t address, std::uint64_t bytes) {
+    if (address + bytes <= decoding_base.load(std::memory_order_relaxed) ||
+        address >= decoding_end.load(std::memory_order_relaxed)) {
+        return;
+    }
+    std::scoped_lock lock{decoding_copy_mutex};
+    DecodingCopy& d = decoding_copy;
+    if (d.touched_count < d.touched.size()) {
+        d.touched[d.touched_count++] = {address, address + bytes};
+    } else {
+        d.touched_overflow = true;
+    }
+}
+} // namespace
+
+void NoteDecodingCopy(std::uint64_t seq, const void* guest_dcb,
+                      std::shared_ptr<const std::uint32_t> copy, std::uint64_t dwords) {
+    std::scoped_lock lock{decoding_copy_mutex};
+    DecodingCopy& d = decoding_copy;
+    d.seq = seq;
+    d.base = reinterpret_cast<std::uint64_t>(guest_dcb);
+    d.dwords = copy ? dwords : 0;
+    d.words = std::move(copy);
+    d.touched_count = 0;
+    d.touched_overflow = false;
+    decoding_base.store(d.base, std::memory_order_relaxed);
+    decoding_end.store(d.base + d.dwords * 4, std::memory_order_relaxed);
+}
+
+bool StaleLabel(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, Source source) {
+    (void)value;
+    std::scoped_lock lock{decoding_copy_mutex};
+    DecodingCopy& d = decoding_copy;
+    const std::uint64_t end = d.base + d.dwords * 4;
+    // Outside the dcb being decoded, or too many port writes into it to tell (then the label is
+    // written, as before the guard).
+    if (!d.words || d.touched_overflow || bytes == 0 || address < d.base || address + bytes > end ||
+        (address & 3) != 0) {
+        return false;
+    }
+    const std::uint32_t dwords = (bytes + 3) / 4;
+    for (std::uint32_t i = 0; i < dwords; ++i) {
+        const std::uint64_t at = address + i * 4;
+        const std::uint32_t now = *reinterpret_cast<const volatile std::uint32_t*>(at);
+        const std::uint32_t then = d.words.get()[(at - d.base) / 4];
+        if (now == then) {
+            continue;
+        }
+        bool port = false;
+        for (std::size_t t = 0; t < d.touched_count && !port; ++t) {
+            port = at >= d.touched[t].first && at < d.touched[t].second;
+        }
+        if (port) {
+            continue; // the port itself changed it since the submit (an earlier label, WRITE_DATA)
+        }
+        const std::uint64_t n = stale_skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 20 || n % 100 == 0) {
+            std::fprintf(stderr,
+                         "Issue #2 guard: skipped a late %s to %#llx (+%#llx of submission %llu's "
+                         "command buffer): the game already reused it (now %08x, at submit %08x; "
+                         "%llu skipped so far)\n",
+                         SourceName(source), (unsigned long long)address,
+                         (unsigned long long)(address - d.base), (unsigned long long)d.seq, now,
+                         then, (unsigned long long)n);
+        }
+        return true;
+    }
+    return false;
+}
+
 void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, Source source) {
     if (bytes == 0 || address == 0) {
         return;
@@ -113,6 +200,7 @@ void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, 
     const std::uint64_t decoding_now = decoding.load(std::memory_order_relaxed);
     writes[writes_head.fetch_add(1, std::memory_order_relaxed) % writes.size()] =
         Write{address, value, now, decoding_now, bytes, source, tid, 0};
+    NoteTouched(address, bytes);
     // The newest submitted buffer the write lands in.
     const Range* hit = nullptr;
     const std::uint64_t head = ranges_head.load(std::memory_order_relaxed);
