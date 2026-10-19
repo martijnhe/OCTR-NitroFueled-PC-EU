@@ -655,57 +655,36 @@ void Menu() {
     ImGui::EndDisabled(); // upscaler off
 
     ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
-    static_assert(sizeof(outputs) / sizeof(outputs[0]) == BbSettings::OutputCount, "outputs match settings");
-    int output = std::clamp(s.output_res.load(), 0, BbSettings::OutputCount - 1);
-    if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
-                          outputs[output])) {
-        for (int i = 0; i < BbSettings::OutputCount; ++i) {
-            if (ImGui::Selectable(outputs[i], i == output)) {
-                Store(s.output_res, i, true);
-            }
-        }
-        ImGui::EndCombo();
-    }
-
-    // Corrected 21:9 and 32:9 layouts by tcosi (scripts/widescreen.py), as the launchers'
-    // Settings > Display > Aspect ratio: the aspect, then the screen size; applied at start.
-    ImGui::SeparatorText(BbSettings::MenuText("Aspect ratio", "Соотношение сторон"));
+    // GetLostIn's native ultrawide (by tcosi): one choice sets the aspect and the output size
+    // together, so they never mismatch; run.sh / run.py prepare the matching game files at start.
     {
-        const int layout = std::clamp(s.widescreen_layout.load(), 0, BbSettings::WidescreenLayoutCount - 1);
-        if (ImGui::BeginCombo(BbSettings::MenuText("Aspect ratio (restart required)",
-                                                   "Соотношение сторон (после перезапуска)"),
-                              BbSettings::WidescreenLayoutLabels[layout])) {
-            for (int l = 0; l < BbSettings::WidescreenLayoutCount; ++l) {
-                if (ImGui::Selectable(BbSettings::WidescreenLayoutLabels[l], l == layout) && l != layout) {
-                    Store(s.widescreen_layout, l, true);
-                    Store(s.widescreen_output, BbSettings::WidescreenFirst[l], true);
+        static const char* entries[] = {"16:9 - 1280 x 720", "16:9 - 1920 x 1080", "16:9 - 2560 x 1440", "16:9 - 3840 x 2160",
+                                        "21:9 UltraWide - 2560 x 1080", "21:9 UltraWide - 3440 x 1440",
+                                        "32:9 Super UltraWide - 5120 x 1440"};
+        static_assert(sizeof(entries) / sizeof(entries[0]) == BbSettings::OutputCount, "outputs match settings");
+        int current = std::clamp(s.output_res.load(), 0, BbSettings::OutputCount - 1);
+        if (BbSettings::OutputAspects[current] != s.aspect_ratio) {
+            // aspect_ratio set without its size (by hand): the aspect's first size, 1080p for 16:9.
+            current = s.aspect_ratio == 0 ? BbSettings::OutputDefault : s.aspect_ratio == 1 ? 4 : 6;
+        }
+        if (ImGui::BeginCombo(BbSettings::MenuText("Aspect / output (restart required)",
+                                                   "Соотношение / вывод (после перезапуска)"),
+                              entries[current])) {
+            for (int i = 0; i < BbSettings::OutputCount; ++i) {
+                if (ImGui::Selectable(entries[i], i == current)) {
+                    Store(s.output_res, i, i != current);
+                    Store(s.aspect_ratio, BbSettings::OutputAspects[i], BbSettings::OutputAspects[i] != s.aspect_ratio);
                 }
             }
             ImGui::EndCombo();
         }
-        const int now = std::clamp(s.widescreen_layout.load(), 0, BbSettings::WidescreenLayoutCount - 1);
-        if (now != 0) {
-            const int size = std::clamp(s.widescreen_output.load(), BbSettings::WidescreenFirst[now],
-                                        BbSettings::WidescreenEnd[now] - 1);
-            if (ImGui::BeginCombo(BbSettings::MenuText("Screen size", "Размер экрана"),
-                                  BbSettings::WidescreenOutputs[size])) {
-                for (int o = BbSettings::WidescreenFirst[now]; o < BbSettings::WidescreenEnd[now]; ++o) {
-                    if (ImGui::Selectable(BbSettings::WidescreenOutputs[o], o == size)) {
-                        Store(s.widescreen_output, o, o != size);
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        }
         Hint(BbSettings::MenuText(
-            "21:9 and 32:9 with corrected menus, backgrounds and a centred HUD, made by tcosi. For the 1.21 "
-            "update of the USA and European editions, offline only for now (with online on, the game starts "
-            "at 16:9). No FSR or DLSS with these layouts. The game files are not changed (about 9 MB are "
-            "prepared once). The Ultrawide option (your monitor's own size) stays as it was. Applies after "
-            "restarting the game.",
-            "21:9 и 32:9 с исправленными меню, фонами и HUD по центру (tcosi). Для обновления 1.21, пока "
-            "только офлайн. Без FSR и DLSS. Применяется после перезапуска игры."));
+            "One choice: the aspect and the output size together. 21:9 and 32:9 (by tcosi) bring menus, "
+            "backgrounds and a centred HUD made for them, online too. Upscaling is off with 21:9 / 32:9. The "
+            "first start in 21:9 or 32:9 prepares about 9 GB of patched game archives once; your game files "
+            "are not changed. Applies after restarting the game.",
+            "Одна настройка: соотношение и размер вывода вместе. 21:9 и 32:9 (tcosi) с меню, фонами и HUD по "
+            "центру, и онлайн. Первый запуск готовит около 9 ГБ архивов. Применяется после перезапуска игры."));
     }
     const char* live_modes[] = {BbSettings::MenuText("Auto (based on GPU)", "Авто (по видеокарте)"),
                                 BbSettings::MenuText("Off (faster)", "Выключена (быстрее)"),

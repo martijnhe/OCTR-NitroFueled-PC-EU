@@ -807,7 +807,8 @@ std::wstring GameTitle() { return Widen(GameTitleId()); }
 bool EuEdition() { return GameTitle() == L"CUSA14876"; }
 
 std::string EffectiveRenderRes();
-std::string GameLayout();
+std::string GameAspect();
+bool UltrawideCacheWarm();
 
 fs::path LauncherIni() {
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
@@ -1936,41 +1937,44 @@ std::string GameTemporal() {
     return game.Flag("fsr1", true) ? "fsr1" : "off";
 }
 
-/// The corrected 21:9 / 32:9 layout (scripts/widescreen.py, by tcosi): bbport.ini widescreen_layout
-/// "21x9" or "32x9", "off" for 16:9; widescreen_output the screen size.
-constexpr const char* kLayouts[][3] = {{"off", "16:9", "16:9"}, {"21x9", "21:9", "21:9"}, {"32x9", "32:9", "32:9"}};
-constexpr const char* kLayoutOutputs21[] = {"3440x1440", "2560x1080"};
-constexpr const char* kLayoutOutputs32[] = {"5120x1440", "3840x1080", "2560x720", "7680x2160"};
-
-std::string GameLayout() {
-    const std::string v = g_app.game.Get("widescreen_layout", "off");
-    if (v == "21x9" || v == "32x9") return v;
-    const std::string old = g_app.game.Get("aspect_ratio");  // v0.3's single selector
-    if (old == "21:9" || old == "21x9") return "21x9";
-    if (old == "32:9" || old == "32x9") return "32x9";
-    return "off";
-}
-
-std::string GameLayoutOutput() {
-    const std::string layout = GameLayout(), v = g_app.game.Get("widescreen_output");
-    if (layout == "21x9") {
-        for (const char* o : kLayoutOutputs21)
-            if (v == o) return v;
-        return kLayoutOutputs21[0];
-    }
-    if (layout == "32x9") {
-        for (const char* o : kLayoutOutputs32)
-            if (v == o) return v;
-        return kLayoutOutputs32[0];
-    }
-    return {};
-}
-
-std::string LayoutLabel(const std::string& layout) {
-    for (const auto& l : kLayouts)
-        if (layout == l[0]) return l[1];
+/// v0.3 native ultrawide (by tcosi): bbport.ini aspect_ratio, Settings > Display.
+/// 16:9 off; 21:9 needs a 2560x1080/3440x1440 output; 32:9 needs 5120x1440.
+std::string GameAspect() {
+    const std::string v = g_app.game.Get("aspect_ratio", "16:9");
+    if (v == "21:9" || v == "21x9") return "21:9";
+    if (v == "32:9" || v == "32x9") return "32:9";
     return "16:9";
 }
+
+bool IsUltrawideKey(const std::string& key) {
+    return key == "CTR-UltraWide21x9-v1.0.xml/21:9 UltraWide" ||
+           key == "CTR-SuperUltraWide32x9-v1.0.xml/32:9 Super UltraWide";
+}
+
+/// v0.3: the ultrawide options unlock only with a warm HUD shader cache
+/// (user/cache/CUSA13795 from a normal 16:9 launch to the menu), mirroring
+/// scripts/ultrawide_*_shader.py require_warm_cache. Otherwise every new player
+/// would hit the launch-time refusal on their first ultrawide try.
+bool UltrawideCacheWarm() {
+    const fs::path cache = UserDir() / "cache" / GameTitleId();
+    std::error_code ec;
+    auto present = [&](const wchar_t* name) {
+        std::error_code e2;
+        return fs::is_regular_file(cache / name, e2) && fs::file_size(cache / name, e2) > 0;
+    };
+    if (!present(L"profile.bin") || !present(L"0x00000000d4aaf527_0.spv") ||
+        !present(L"0x0000000008948e32_0.spv")) {
+        return false;
+    }
+    bool meta = false, key = false;
+    for (fs::directory_iterator it(cache, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto ext = it->path().extension();
+        if (ext == L".meta") meta = true;
+        if (ext == L".key") key = true;
+    }
+    return meta && key;
+}
+
 
 /// A combo over a bbport.ini key; true when the player picked another value (already set).
 template <size_t N>
@@ -2054,48 +2058,62 @@ void SettingsTab() {
 
     Section(T("Pantalla", "Display"));
     {
-        // Corrected 21:9 and 32:9 layouts (scripts/widescreen.py, tcosi; the European edition
-        // through GetLostIn's port): the aspect ratio, then the screen size, as the in-game menu.
-        const std::string layout = GameLayout();
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-        if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), LayoutLabel(layout).c_str())) {
-            for (const auto& l : kLayouts) {
-                if (ImGui::Selectable(l[1], layout == l[0]) && layout != l[0]) {
-                    a.game.Set("widescreen_layout", l[0]);
-                    a.game.Erase("aspect_ratio");
-                    if (std::strcmp(l[0], "off") == 0) a.game.Erase("widescreen_output");
-                    else a.game.Set("widescreen_output", std::strcmp(l[0], "21x9") == 0 ? kLayoutOutputs21[0] : kLayoutOutputs32[0]);
+        // v0.3 native (by tcosi): ONE dropdown sets aspect + output together, so they
+        // can never mismatch. The two ultrawide XMLs stay hidden in Patches.
+        struct AspectOutput { const char* es; const char* en; const char* aspect; const char* output; };
+        static constexpr AspectOutput kOptions[] = {
+            {"16:9 — 1280 x 720", "16:9 — 1280 x 720", "16:9", "1280x720"},
+            {"16:9 — 1920 x 1080", "16:9 — 1920 x 1080", "16:9", "1920x1080"},
+            {"16:9 — 2560 x 1440", "16:9 — 2560 x 1440", "16:9", "2560x1440"},
+            {"16:9 — 3840 x 2160 (4K)", "16:9 — 3840 x 2160 (4K)", "16:9", "3840x2160"},
+            {"21:9 UltraWide — 2560 x 1080", "21:9 UltraWide — 2560 x 1080", "21:9", "2560x1080"},
+            {"21:9 UltraWide — 3440 x 1440", "21:9 UltraWide — 3440 x 1440", "21:9", "3440x1440"},
+            {"32:9 Super UltraWide — 5120 x 1440", "32:9 Super UltraWide — 5120 x 1440", "32:9", "5120x1440"},
+        };
+        const std::string aspect = GameAspect();
+        const std::string output = g_app.game.Get("output_res", "1920x1080");
+        const AspectOutput* selected = &kOptions[1];
+        for (const auto& o : kOptions) {
+            if (output == o.output && aspect == o.aspect) { selected = &o; break; }
+        }
+        if (selected->output != output) {
+            for (const auto& o : kOptions) {
+                if (output == o.output) { selected = &o; break; }
+            }
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
+        // The ultrawide rows unlock only with a warm shader cache (a normal 16:9
+        // launch to the menu first); otherwise every new player would hit the
+        // launch-time refusal. run.py keeps the same guard as a safety net.
+        const bool warm = UltrawideCacheWarm();
+        if (!warm) {
+            ImGui::TextColored(kYellow, "%s",
+                               T("El ultra-panorámico se desbloquea tras jugar una vez en 16:9 hasta el menú.",
+                                 "Ultrawide unlocks after playing once in 16:9 up to the menu."));
+        }
+        if (ImGui::BeginCombo(T("Aspecto / salida", "Aspect / output"), T(selected->es, selected->en))) {
+            for (const auto& o : kOptions) {
+                const bool locked = std::strcmp(o.aspect, "16:9") != 0 && !warm;
+                ImGui::BeginDisabled(locked);
+                if (ImGui::Selectable(T(o.es, o.en), &o == selected)) {
+                    a.game.Set("aspect_ratio", o.aspect);
+                    a.game.Set("output_res", o.output);
                     SaveGameIni();
                 }
+                ImGui::EndDisabled();
             }
             ImGui::EndCombo();
         }
-        HelpMarker(T("21:9 y 32:9 con menús, fondos y un HUD centrado corregidos, hechos por tcosi. Para la actualización 1.21 "
-                     "de las ediciones de EE. UU. y europea; por ahora sin online (con el online activado, el juego arranca en "
-                     "16:9) y sin FSR ni DLSS. Tus archivos del juego no cambian (se preparan unos 9 MB una vez). La opción "
-                     "Ultrawide del menú del juego sigue como estaba.",
-                     "21:9 and 32:9 with corrected menus, backgrounds and a centered HUD, made by tcosi. For the 1.21 update "
-                     "of the USA and European editions; offline only for now (with online on, the game starts at 16:9) and "
-                     "no FSR or DLSS. Your game files are not changed (about 9 MB are prepared once). The in-game menu's "
-                     "Ultrawide option stays as it was."));
-        if (layout != "off") {
-            const std::string output = GameLayoutOutput();
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-            if (ImGui::BeginCombo(T("Tamaño de pantalla", "Screen size"), output.c_str())) {
-                auto option = [&](const char* o) {
-                    if (ImGui::Selectable(o, output == o)) {
-                        a.game.Set("widescreen_output", o);
-                        SaveGameIni();
-                    }
-                };
-                if (layout == "21x9") for (const char* o : kLayoutOutputs21) option(o);
-                else for (const char* o : kLayoutOutputs32) option(o);
-                ImGui::EndCombo();
-            }
-            if (a.game.Flag("online", false))
-                ImGui::TextColored(kYellow, "%s", T("Con el online activado el juego arranca en 16:9.",
-                                                    "With online on, the game starts at 16:9."));
-        }
+        HelpMarker(T("Una sola opción: aspecto y salida juntos, con HUD centrado en ultra-panorámico. "
+                     "Mientras hay ultra-panorámico el escalado se desactiva; la resolución interna puede llegar a 4K (se reduce a la pantalla). "
+                     "La primera vez prepara unos 9 GB de archivos; tus archivos originales no cambian. "
+                     "Antes de usarlo, una vez en 16:9: JUGAR hasta el menú principal, unos segundos, y cerrar "
+                     "el juego desde su menú, para que la caché de shaders se guarde. Funciona también online.",
+                     "One choice: aspect and output together, with centered HUD in ultrawide. "
+                     "Upscaling is off while ultrawide is on; the internal resolution can go up to 4K (scaled down to the screen). "
+                     "The first run prepares about 9 GB of files; your original files are kept. "
+                     "Before using it, once in 16:9: PLAY to the main menu, stay a few seconds and close "
+                     "the game from its menu, so the shader cache is saved. Works online too."));
     }
     GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
              T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
@@ -2105,7 +2123,7 @@ void SettingsTab() {
                "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
                "Needs a restart."));
     const std::string temporal = GameTemporal();
-    const bool uw_on = GameLayout() != "off";
+    const bool uw_on = GameAspect() != "16:9";
     const bool dlss_sized = temporal == "dlss" && a.game.Get("dlss_quality", "auto") != "auto";
     ImGui::BeginDisabled(dlss_sized);
     RenderResCombo();
@@ -2116,7 +2134,7 @@ void SettingsTab() {
     }
     {
         // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time.
-        // Off with a 21:9 / 32:9 layout (scripts/widescreen.py turns it off).
+        // Off while ultrawide is on (the ultrawide scripts turn it off).
         static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
                                                {"AMD FSR 1", "AMD FSR 1", "fsr1"},
                                                {"AMD FSR 3", "AMD FSR 3", "fsr3"},
@@ -2131,7 +2149,7 @@ void SettingsTab() {
         ImGui::EndDisabled();
         if (uw_on) {
             ImGui::SameLine();
-            ImGui::TextColored(kGrey, "%s", T("(desactivado con 21:9 / 32:9)", "(off with 21:9 / 32:9)"));
+            ImGui::TextColored(kGrey, "%s", T("(desactivado con ultra-panorámico)", "(off with ultrawide)"));
         }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3, FSR 4 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
@@ -2286,10 +2304,8 @@ void SettingsTab() {
             nick_loaded = true;
         }
         GameFlag("online", T("Jugar online", "Play online"), false,
-                 T("Carreras online, salas con amigos y el Pit Stop en el servidor RyuNET. Con el online activado, "
-                   "21:9 y 32:9 arrancan en 16:9 por ahora.",
-                   "Online races, rooms with friends and the Pit Stop on the RyuNET server. With online on, 21:9 and 32:9 "
-                   "start at 16:9 for now."));
+                 T("Carreras online, salas con amigos y el Pit Stop en el servidor RyuNET.",
+                   "Online races, rooms with friends and the Pit Stop on the RyuNET server."));
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
         if (ImGui::InputText(T("Apodo", "Nickname"), nick, sizeof nick)) {
             a.game.Set("online_name", nick);
@@ -2333,8 +2349,8 @@ void PatchesTab() {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kGrey, "%s", T("Se aplican al iniciar el juego (o con \"Apply and restart\" del menú del juego).",
                                       "Applied when the game starts (or with the in-game menu's \"Apply and restart\")."));
-    ImGui::TextColored(kGrey, "%s", T("21:9 y 32:9 están en Ajustes > Pantalla > Relación de aspecto.",
-                                      "21:9 and 32:9 are in Settings > Display > Aspect ratio."));
+    ImGui::TextColored(kGrey, "%s", T("El ultra-panorámico 21:9/32:9 está en Ajustes > Pantalla > Aspecto / salida.",
+                                      "Ultrawide 21:9/32:9 is in Settings > Display > Aspect / output."));
     ImGui::PopTextWrapPos();
     const bool neo = a.launcher.Flag("neo", false);
     if (a.patches.empty()) {
@@ -2352,7 +2368,7 @@ void PatchesTab() {
         }
         const bool needs_neo = p.ini_key && std::strcmp(p.ini_key, "patch_pro_1080p") == 0;
         // The online key patch follows the online switch; the 1080p Pro patch, the resolution.
-        const bool hidden = p.key.find("CrashTeamRacingOnline") == 0;
+        const bool hidden = p.key.find("CrashTeamRacingOnline") == 0 || IsUltrawideKey(p.key);
         if (needs_neo || hidden) {  // replaced by Settings
             ImGui::PopID();
             continue;
@@ -4278,17 +4294,14 @@ void PlaySummary() {
     };
     const int fps = a.game.Int("fps_limit", 60);
     const std::string framegen = a.game.Get("framegen", "off");
-    const std::string layout = GameLayout();
     const bool online = a.game.Flag("online", false);
-    const std::string aspect = layout == "off" ? std::string("16:9")
-                               : online ? LayoutLabel(layout) + T(" (16:9 con online)", " (16:9 with online)")
-                                        : LayoutLabel(layout) + "  ·  " + GameLayoutOutput();
+    const std::string aspect = GameAspect() + "  ·  " + a.game.Get("output_res", "1920x1080");
     const std::pair<std::string, std::string> rows[] = {
         {T("Resolución interna", "Internal resolution"), res()},
-        {T("Escalado", "Upscaling"), layout != "off" ? T("(apagado con 21:9 / 32:9)", "(off with 21:9 / 32:9)") : upscaler()},
+        {T("Escalado", "Upscaling"), GameAspect() != "16:9" ? T("(apagado con ultra-panorámico)", "(off with ultrawide)") : upscaler()},
         {T("Generación de cuadros", "Frame generation"),
          framegen == "fsr3" || framegen == "fsr" ? "AMD FSR 3" : T("Desactivada", "Off")},
-        {T("Relación de aspecto", "Aspect ratio"), aspect},
+        {T("Aspecto / salida", "Aspect / output"), aspect},
         {"Online", online ? std::string("RyuNET  ·  ") + a.game.Get("online_name") : std::string(T("No", "Off"))},
         {T("Límite de FPS", "FPS limit"), fps == 0 ? T("Sin límite", "No limit") : std::to_string(fps) + " FPS"},
         {T("Idioma del juego", "Game language"), language()},

@@ -71,6 +71,20 @@ export BB_GAME_PROFILE=${profile:-ctr}
 read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
 title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
+# GetLostIn's native ultrawide (UltraWide v1.0 by tcosi; bbport.ini aspect_ratio=21:9|32:9 with
+# output_res, as run.py): the game runs from a patched view of its archives (made once, ~9 GB),
+# with tcosi's executable patches and centered HUD shaders; patches.py and the render plan read
+# its compiler settings. The European edition through GetLostIn's port (scripts/ultrawide_eu.py).
+user_config=$BB_CONFIG render_config=$BB_CONFIG uw_source=$game
+uw_env=$(mktemp "$out/ultrawide-env.XXXXXX")
+if ! "$PYTHON" scripts/ultrawide_linux.py prepare --port "$PWD" --data "$data" --game "$game" \
+        --config "$user_config" --env-file "$uw_env"; then
+    rm -f "$uw_env"
+    exit 1
+fi
+while IFS= read -r -d '' setting; do export "$setting"; done < "$uw_env"
+rm -f "$uw_env"
+if [[ ${BB_UW_ENABLED:-0} == 1 ]]; then game=$BB_UW_GAME render_config=$BB_UW_RENDER_CONFIG; fi
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
@@ -88,6 +102,8 @@ fi
 # DLC (optional): the player's add-on packages in dlc/ (BB_DLC_DIR), reported installed (as run.py).
 "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}" \
     --dlc-dir "${BB_DLC_DIR:-$data/dlc}"
+"$PYTHON" scripts/ultrawide_linux.py shaders --port "$PWD" --data "$data" --game "$uw_source" \
+    --config "$user_config" --user "${BB_USER_DIR:-$data/user}" --out "$out"
 # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
 # own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
 # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
@@ -104,21 +120,10 @@ fi
 # it through an archive patch. When it cannot be built, the game keeps its own.
 unset BB_ARCHIVE_PATCHES
 "$PYTHON" scripts/online_playlist.py "$game" --out "$out"
-base_patches=()
-if [[ -f $out/online_playlist.bbpatch ]]; then base_patches=(--base "$out/online_playlist.bbpatch"); fi
-# A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py), as run.py: the
-# render path and the patches read its settings, and it adds its archive patches (the playlist's
-# kept in them), executable patch and HUD scale.
-settings=$BB_CONFIG layout_patches=()
-while IFS='=' read -r key value; do
-    case $key in
-        settings) settings=$value ;;
-        patches_dir) if [[ -n $value ]]; then layout_patches=(--patches-dir "$value"); fi ;;
-        archive_patches) if [[ -n $value ]]; then export BB_ARCHIVE_PATCHES=$value; fi ;;
-        env.*) export "${key#env.}=$value" ;;
-    esac
-done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CONFIG" \
-             --title-id "$title_id" --app-version "$app_version" "${base_patches[@]}")
+if [[ -f $out/online_playlist.bbpatch ]]; then
+    BB_ARCHIVE_PATCHES=$(realpath "$out")/online_playlist.bbpatch
+    export BB_ARCHIVE_PATCHES
+fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
@@ -126,12 +131,12 @@ done < <("$PYTHON" scripts/widescreen.py "$game" --out "$out" --settings "$BB_CO
 # in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
 "$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
-    "${layout_patches[@]}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
-    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$settings"
+    --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
+    --app-version "$app_version" --title-id "$title_id" --out "$out" --settings "$render_config"
 patch_args=(--patches "$out/patches.bin")
 # bbport.ini render_res / ultrawide (scripts/patches.py render_plan), as run.py: the PS4 Pro path
 # above 1080p, the base path for ultrawide; native 4K's larger GPU heap needs more direct memory.
-read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$settings") || true
+read -r plan_pro plan_heap plan_label < <("$PYTHON" scripts/patches.py --print-plan --settings "$render_config") || true
 # unlock_all (default off; bbport.ini unlock_all=1 starts it on, the in-game menu switches it at
 # any time): the runtime sets the build setups' _unlockAll flag (src/runtime_unlock.c), found by
 # the CBuildData vtable of this executable.
@@ -147,7 +152,7 @@ fi
 # Ultrawide: videos and cutscenes at 16:9 with black bars (src/runtime_cinematic.c) unless
 # bbport.ini has ultrawide_cinematics=0.
 unset BB_CINEMATIC_16X9 BB_CUTSCENE
-if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_cinematics=0' "$settings" 2>/dev/null; then
+if [[ ${plan_label:-} == ultrawide* || ${BB_UW_ENABLED:-0} == 1 ]] && ! grep -qx 'ultrawide_cinematics=0' "$BB_CONFIG" 2>/dev/null; then
     export BB_CINEMATIC_16X9=1
     BB_CUTSCENE=$("$PYTHON" scripts/patches.py --print-cutscene --out "$out" || true)
     export BB_CUTSCENE
@@ -155,7 +160,7 @@ fi
 # Ultrawide: the title and customization screens with a 16:9 field of view, so their backdrop
 # fills the width (src/runtime_frontend.c), unless bbport.ini has ultrawide_frontend=0.
 unset BB_FRONTEND_FOV
-if [[ ${plan_label:-} == ultrawide* ]] && ! grep -qx 'ultrawide_frontend=0' "$settings" 2>/dev/null; then
+if [[ ${plan_label:-} == ultrawide* || ${BB_UW_ENABLED:-0} == 1 ]] && ! grep -qx 'ultrawide_frontend=0' "$BB_CONFIG" 2>/dev/null; then
     BB_FRONTEND_FOV=$("$PYTHON" scripts/patches.py --print-frontend --out "$out" || true)
     export BB_FRONTEND_FOV
 fi
@@ -293,7 +298,7 @@ unset BB_CTRTV
 episode=$(sed -n 's/^ctrtv_episode=\([A-Za-z0-9_]*\)$/\1/p' "$BB_CONFIG" 2>/dev/null | tail -1)
 if [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_next=1' "$BB_CONFIG"; then
     export BB_CTRTV=${episode:-CTRTV_FebGP}
-    sed -i '/^ctrtv_next=/d' "$BB_CONFIG"
+    sed -i '/^ctrtv_next=/d' "$BB_CONFIG" "$user_config"
 elif [[ -f $BB_CONFIG ]] && grep -qx 'ctrtv_at_start=1' "$BB_CONFIG"; then
     export BB_CTRTV=${episode:-CTRTV_FebGP}
 fi

@@ -162,25 +162,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.output_res = r;
             }
         }
-        // v0.3 kept the ultrawide size here; it becomes the layout's size.
-        for (int o = 0; o < WidescreenOutputCount && !v.widescreen_seen; ++o) {
-            if (value == WidescreenOutputs[o]) v.widescreen_output = o;
-        }
     } else if (key == "launcher_at_start") {
         v.launcher_at_start = i != 0;
-    } else if (key == "widescreen_layout") {
-        v.widescreen_seen = true;
-        v.widescreen_layout = 0;
-        for (int l = 0; l < WidescreenLayoutCount; ++l) {
-            if (value == WidescreenLayouts[l]) v.widescreen_layout = l;
-        }
-    } else if (key == "widescreen_output") {
-        for (int o = 0; o < WidescreenOutputCount; ++o) {
-            if (value == WidescreenOutputs[o]) v.widescreen_output = o;
-        }
-    } else if (key == "aspect_ratio" && !v.widescreen_seen) {
-        // v0.3's single selector (aspect_ratio=21:9|32:9 with output_res=WxH): the same choice.
-        v.widescreen_layout = value == "21:9" || value == "21x9" ? 1 : value == "32:9" || value == "32x9" ? 2 : 0;
+    } else if (key == "aspect_ratio") {
+        v.aspect_ratio = value == "21:9" || value == "21x9" ? 1 : value == "32:9" || value == "32x9" ? 2 : 0;
     } else {
         for (int e = 0; e < EffectCount; ++e) {
             if (key == Effects[e].key) {
@@ -357,22 +342,14 @@ void Load() {
     v.startup_dlss_quality = v.dlss_quality;
     v.startup_dlss_output = v.dlss_output;
     v.startup_output_res = v.output_res;
-    {
-        // A size outside the layout's own range: the layout's first one (scripts/widescreen.py too).
-        const int layout = std::clamp(v.widescreen_layout.load(), 0, WidescreenLayoutCount - 1);
-        if (v.widescreen_output < WidescreenFirst[layout] || v.widescreen_output >= WidescreenEnd[layout]) {
-            v.widescreen_output = WidescreenFirst[layout];
-        }
-    }
-    v.startup_widescreen_layout = v.widescreen_layout;
-    v.startup_widescreen_output = v.widescreen_output;
+    v.startup_aspect_ratio = v.aspect_ratio;
     v.startup_live_resolution = v.live_resolution;
 }
 
 bool RenderSizeNeedsRestart() {
     const auto& v = Get();
     // As scripts/patches.py render_plan: a DLSS quality mode decides, else render_res.
-    // A widescreen layout also needs a restart (archive patches and executable at start).
+    // The native ultrawide aspect also needs a restart (archives and executable at start).
     const auto key = [](int temporal, int quality, int output, int render_res) {
         return temporal == TemporalDlss && quality > 0 ? 100 + quality * 2 + output : render_res;
     };
@@ -387,8 +364,7 @@ bool RenderSizeNeedsRestart() {
     return key(v.temporal, v.dlss_quality, v.dlss_output, v.render_res) !=
            key(v.startup_temporal, v.startup_dlss_quality, v.startup_dlss_output,
                v.startup_render_res) ||
-           v.widescreen_layout != v.startup_widescreen_layout ||
-           (v.widescreen_layout != 0 && v.widescreen_output != v.startup_widescreen_output);
+           v.aspect_ratio != v.startup_aspect_ratio;
 }
 
 bool UltrawideAvailable() {
@@ -516,11 +492,8 @@ void Save() {
     put("output_res", std::to_string(OutputWidths[v.output_res]) + "x" +
                           std::to_string(OutputHeights[v.output_res]));
     {
-        const int layout = std::clamp(v.widescreen_layout.load(), 0, WidescreenLayoutCount - 1);
-        put("widescreen_layout", WidescreenLayouts[layout]);
-        if (layout != 0) {
-            put("widescreen_output", WidescreenOutputs[std::clamp(v.widescreen_output.load(), 0, WidescreenOutputCount - 1)]);
-        }
+        const int aspect = std::clamp(v.aspect_ratio.load(), 0, 2);
+        put("aspect_ratio", aspect == 1 ? "21:9" : aspect == 2 ? "32:9" : "16:9");
     }
     put("launcher_at_start", flag(v.launcher_at_start));
     // Read by run.sh at start.

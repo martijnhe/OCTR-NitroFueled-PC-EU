@@ -54,6 +54,9 @@ gpu/shim/bbport_gnm_table.inc
 # Written by the online runtime while it runs: the server address and session state.
 /host_overrides.json
 /sessions/
-/widescreen/
+# GetLostIn's native ultrawide: the prepared game views (scripts/ultrawide_21x9.py, ultrawide_32x9.py)
+scripts/ultrawide_*_data/profile-eu-*/
+scripts/ultrawide_*_data/profile-*/view*/
+scripts/ultrawide_*_data/view*/
 /CUSA13795*/
 *.pkg

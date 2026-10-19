@@ -21,8 +21,12 @@ let
     path = root;
     filter = path: type:
       let rel = lib.removePrefix (toString root + "/") (toString path);
-      in builtins.elem rel wanted
-        || lib.any (dir: lib.hasPrefix (dir + "/") rel) assetDirs;
+        # The native ultrawide's prepared game views (several GB of the player's archives) and
+        # its EU work folders stay out of the package.
+        uwView = lib.hasPrefix "scripts/ultrawide_" rel
+          && (lib.hasInfix "/view" rel || lib.hasInfix "/profile-eu-" rel);
+      in (builtins.elem rel wanted
+        || lib.any (dir: lib.hasPrefix (dir + "/") rel) assetDirs) && !uwView;
   };
   python = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
   # Mesa's Vulkan drivers come with the package (RADV and ANV); bbport_vulkan.py adds the host

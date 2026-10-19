@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Starts the game directly (no launcher window): the application menu entry "Crash Team Racing
-# Nitro-Fueled" (install-desktop.sh) runs this. The game folder: $1, else BB_GAME_DIR, else the
-# one install-desktop.sh saved in ~/.config/sacredfire/game_dir. Output goes to logs/last_play.log.
+# The application menu entry "Crash Team Racing Nitro-Fueled" (install-desktop.sh) runs this: the
+# launcher (out/ctr-launcher) when bbport.ini has launcher_at_start=1 (switched in the launcher
+# and in the in-game menu's General tab), else the game directly. The game folder: $1, else
+# BB_GAME_DIR, else the one install-desktop.sh saved in ~/.config/sacredfire/game_dir. The game's
+# output goes to logs/last_play.log.
 set -euo pipefail
 here=$(cd -- "$(dirname -- "$0")/.." && pwd)
+config=${BB_CONFIG:-$here/bbport.ini}
+if [[ $# -eq 0 && -x $here/out/ctr-launcher ]] && grep -qx 'launcher_at_start=1' "$config" 2>/dev/null; then
+    exec "$here/out/ctr-launcher"
+fi
 saved=${XDG_CONFIG_HOME:-$HOME/.config}/sacredfire/game_dir
 game=${1:-${BB_GAME_DIR:-}}
 if [[ -z $game && -f $saved ]]; then game=$(<"$saved"); fi

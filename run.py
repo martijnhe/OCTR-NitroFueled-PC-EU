@@ -34,8 +34,6 @@ APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
 
 sys.path.insert(0, str(PORT / 'scripts'))
-import archive_patch  # noqa: E402  (scripts/)
-import widescreen  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
@@ -328,6 +326,89 @@ def setup_online(env, config, data):
                 say(f'Season theme from the server: {theme}')
 
 
+def uw_disabled(game, config):
+    """Fallback when the ultrawide helpers are absent: 16:9, nothing to do."""
+    from types import SimpleNamespace
+    return SimpleNamespace(enabled=False, game=Path(game), config=str(config),
+                           render_config=str(config))
+
+
+def uw_prepare_native(port, data, env, game, config):
+    """v0.3 native ultrawide dispatch (Settings > Display > Aspect ratio).
+
+    bbport.ini aspect_ratio=16:9|21:9|32:9 drives scripts/ultrawide_dispatch.py;
+    a legacy patches.json toggle still applies when the aspect is 16:9/unset.
+    Missing helpers mean 16:9 (never a fatal error for normal launches).
+    """
+    sys.path.insert(0, str(Path(port) / 'scripts'))
+    try:
+        from ultrawide_dispatch import prepare as dispatch_prepare
+    except Exception as error:
+        print(f'Ultrawide: helpers not available ({error}); running 16:9', flush=True)
+        return uw_disabled(game, config)
+    try:
+        return dispatch_prepare(Path(port), Path(data), env, Path(game), str(config))
+    finally:
+        try:
+            sys.path.remove(str(Path(port) / 'scripts'))
+        except ValueError:
+            pass
+
+
+def uw_refresh_native(mode, env, config):
+    try:
+        sys.path.insert(0, str(PORT / 'scripts'))
+        from ultrawide_dispatch import refresh as dispatch_refresh
+        return dispatch_refresh(mode, env, config)
+    except Exception as error:
+        if getattr(mode, 'enabled', False):
+            raise
+        print(f'Ultrawide refresh skipped: {error}', flush=True)
+    finally:
+        try:
+            sys.path.remove(str(PORT / 'scripts'))
+        except ValueError:
+            pass
+
+
+def uw_shaders_native(mode, user_dir, out):
+    try:
+        sys.path.insert(0, str(PORT / 'scripts'))
+        from ultrawide_dispatch import shaders as dispatch_shaders
+        return dispatch_shaders(mode, user_dir, out)
+    except Exception as error:
+        if getattr(mode, 'enabled', False):
+            raise
+        print(f'Ultrawide shaders skipped: {error}', flush=True)
+    finally:
+        try:
+            sys.path.remove(str(PORT / 'scripts'))
+        except ValueError:
+            pass
+
+
+# Short names match the v1.0 external installer hook so its rewrite() can still
+# strip and re-apply cleanly on a v0.3 tree (backward compatibility).
+uw_prepare = uw_prepare_native
+uw_refresh = uw_refresh_native
+uw_shaders = uw_shaders_native
+
+
+def uw_aspect(config):
+    """bbport.ini aspect_ratio: 16:9, 21:9 or 32:9 (GetLostIn's native ultrawide)."""
+    sys.path.insert(0, str(PORT / 'scripts'))
+    try:
+        from ultrawide_dispatch import aspect_setting
+        return aspect_setting(Path(config))
+    except Exception:
+        return '16:9'
+    finally:
+        try:
+            sys.path.remove(str(PORT / 'scripts'))
+        except ValueError:
+            pass
+
+
 def pump(stream):
     for raw in iter(stream.readline, b''):
         # The game writes CRLF; the log is a text file that adds its own CR.
@@ -435,6 +516,20 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
+    # GetLostIn's native ultrawide (UltraWide v1.0 by tcosi): the selected aspect ratio
+    # (bbport.ini aspect_ratio, Settings > Display). The European edition uses GetLostIn's port
+    # (scripts/ultrawide_eu.py).
+    try:
+        if title_id not in (TITLE_ID, 'CUSA14876'):
+            if uw_aspect(config) in ('21:9', '32:9'):
+                say(f'Ultrawide: made for {TITLE_ID} and CUSA14876; {title_id} runs at 16:9')
+            uw_mode = uw_disabled(game, config)
+        else:
+            uw_mode = uw_prepare(PORT, data, env, game, config)
+    except RuntimeError as error:
+        fail(f'Ultrawide: {error}')
+    game, config = uw_mode.game, uw_mode.config
+
     original_game = game.resolve()
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
@@ -477,34 +572,10 @@ def main():
         env.pop('BB_ARCHIVE_PATCHES', None)
         run_python('scripts/online_playlist.py', game, '--out', out)
         playlist_patch = out / 'online_playlist.bbpatch'
-        base_patches = {}
         if playlist_patch.is_file():
-            base_patches[archive_patch.read(playlist_patch)[1]] = playlist_patch
+            env['BB_ARCHIVE_PATCHES'] = str(playlist_patch)
         env.setdefault('BB_NEO', '0')
-        # A 21:9 or 32:9 layout (bbport.ini widescreen_layout, scripts/widescreen.py): the render
-        # path and the patches read its settings (the player's, with the ones it was made for),
-        # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
-        layout_saved = {}
-
-        def apply_layout():
-            for key, value in layout_saved.items():
-                if value is None:
-                    env.pop(key, None)
-                else:
-                    env[key] = value
-            layout_saved.clear()
-            layout = widescreen.prepare(game, out, config, env, title_id, app_version, base_patches)
-            if layout:
-                layout_saved.update({key: env.get(key) for key in layout['env']})
-                env.update(layout['env'])
-            archives = widescreen.archive_list(base_patches, layout)
-            if archives:
-                env['BB_ARCHIVE_PATCHES'] = archives
-            else:
-                env.pop('BB_ARCHIVE_PATCHES', None)
-            return (layout['config'], layout['patches_dir']) if layout else (config, None)
-
-        settings, layout_patches = apply_layout()
+        settings = uw_mode.render_config if uw_mode.enabled else config
         apply_render_res(env, settings)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
@@ -540,12 +611,12 @@ def main():
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
         while True:
+            uw_refresh(uw_mode, env, config)
+            uw_shaders(uw_mode, user_dir, out)
             if not first:  # the in-game menu may have changed render_res
-                settings, layout_patches = apply_layout()
                 apply_render_res(env, settings)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
-                       *(['--patches-dir', layout_patches] if layout_patches else []),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
                        '--app-version', app_version, '--title-id', title_id, '--out', out,
                        '--settings', settings)

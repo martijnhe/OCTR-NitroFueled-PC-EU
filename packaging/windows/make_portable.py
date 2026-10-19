@@ -248,8 +248,12 @@ def main():
     shutil.copy2(ROOT / 'run.py', folder)
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
-    shutil.copytree(ROOT / 'scripts' / 'widescreen_data',
-                    folder / 'scripts' / 'widescreen_data', dirs_exist_ok=True)
+    # GetLostIn's native ultrawide data (manifests, baseline, shaders): needed by run.py.
+    for data in list((ROOT / 'scripts').glob('ultrawide_*_data')):
+        if data.is_dir():
+            # Prepared game views (view*/, several GB) and the EU work folder are per player.
+            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('view', 'view-*', 'view-building-*', 'profile-eu-*'))
     # FSR 4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
     if (ROOT / 'fsr4_shaders').is_dir():
         shutil.copytree(ROOT / 'fsr4_shaders', folder / 'fsr4_shaders', dirs_exist_ok=True)
