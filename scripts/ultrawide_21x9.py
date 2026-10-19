@@ -14,6 +14,14 @@ from ultrawide_21x9_shader import centered_shader,SIGNATURES,known_ultrawide_sha
 DATA=Path(__file__).resolve().parent/'ultrawide_21x9_data'
 MANIFEST=json.loads((DATA/'manifest.json').read_text(encoding='utf-8'))
 KEY=MANIFEST['key']
+# The game's edition (set_title): the European one (CUSA14876) uses the ported data of
+# ultrawide_eu.py and its own work folder, so a US view is never mistaken for it.
+TITLE='CUSA13795'
+def set_title(game):
+ global TITLE
+ from game_check import sfo_info
+ TITLE=sfo_info(Path(game)).get('TITLE_ID') or 'CUSA13795'
+ select_data()
 OWN_ASPECT='21:9'
 LEGACY_FILES={'CTR-Centered-HUD-720p-v3.xml','CTR-Centered-HUD-v4.xml','CTR-HUD-Rotation-Fix.xml','CTR-SuperUltrawide-2560x720.xml','CTR-SuperUltrawide-3840x1080.xml','CTR-SuperUltrawide-5120x1440.xml','HUD-Screen-Effects.xml','HUD-Clipping-Diagnostic.xml','HUD-Rotation-Diagnostic.xml','HUD-Rotation-Diagnostic-v2.xml','Movie-Aspect.xml'}
 
@@ -85,11 +93,14 @@ def select_profile(settings):
 
 PROFILE=None
 BASE_DATA=DATA
+def select_data():
+ pass  # 21:9 picks its data per output profile (configure_profile)
 def configure_profile(settings):
  global PROFILE,DATA,MANIFEST
  PROFILE=select_profile(settings)
- DATA=BASE_DATA/('profile-'+PROFILE);DATA.mkdir(exist_ok=True)
- source=BASE_DATA/('manifest-'+PROFILE+'.json')
+ eu='' if TITLE=='CUSA13795' else 'eu-'
+ DATA=BASE_DATA/('profile-'+eu+PROFILE);DATA.mkdir(exist_ok=True)
+ source=BASE_DATA/('manifest-'+eu+PROFILE+'.json')
  if not (DATA/'manifest.json').exists() or (DATA/'manifest.json').read_bytes()!=source.read_bytes():atomic(DATA/'manifest.json',source.read_bytes())
  MANIFEST=json.loads(source.read_text())
 
@@ -131,6 +142,7 @@ def ensure_view(source):
 
 def prepare(port,data,env,game,config):
  from patches import external_patches,external_selection,read_settings
+ set_title(game)
  selection_path=Path(env.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
  patch_dir=Path(env.get('BB_PATCHES_DIR',Path(port)/'patches'))
  ini_settings=read_settings(Path(config))
@@ -245,12 +257,16 @@ def refresh(mode,env,config):
   atomic(config,('\n'.join(lines+['render_res=1440'])+'\n').encode('utf-8'))
   settings['render_res']='1440'
  source=external_patches(mode.patch_dir);original=next(x for x in source if x[0]==KEY)
- meta=resolution_metadata(original[2],settings);mode.selected=[(KEY,original[1],meta)]
+ meta=resolution_metadata(original[2],settings)
+ if TITLE!='CUSA13795':
+  import ultrawide_eu
+  meta=ultrawide_eu.port_meta(meta);print(f'{OWN_ASPECT} ultrawide: executable patches moved for {TITLE}',flush=True)
+ mode.selected=[(KEY,original[1],meta)]
  generated=mode.effective/'patches';generated.mkdir(exist_ok=True)
  # Keep other patch files available; selection remains frozen for this launch.
  for p in mode.patch_dir.glob('*.xml'):
   if p.name!=KEY.split('/',1)[0]:atomic(generated/p.name,p.read_bytes())
- root=ET.Element('Patch');ids=ET.SubElement(root,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795';root.append(meta);ET.indent(root)
+ root=ET.Element('Patch');ids=ET.SubElement(root,'TitleID');ET.SubElement(ids,'ID').text=TITLE;root.append(meta);ET.indent(root)
  atomic(generated/KEY.split('/',1)[0],ET.tostring(root,encoding='utf-8',xml_declaration=True))
  env['BB_PATCHES_DIR']=str(generated);env['BB_NEO']='0'
  text=Path(config).read_text(encoding='utf-8');lines=[line for line in text.splitlines() if line.partition('=')[0].strip() not in {'render_res','patch_pro_1080p','temporal','upscaler'}]
@@ -263,7 +279,7 @@ def shaders(mode,user_dir,out):
   from patches import compile_external,eboot_segments
   elf=(Path(out)/'eboot.elf').read_bytes();writes=compile_external(mode.selected,eboot_segments(elf),elf)
   if len(writes)!=sum(len(list(m.iter('Line'))) for _,_,m in mode.selected):raise RuntimeError('21:9 UltraWide executable signatures do not match; launch stopped.')
- cache=Path(user_dir)/'cache/CUSA13795';operations=[]
+ cache=Path(user_dir)/'cache'/TITLE;operations=[]
  if mode.enabled:require_warm_cache(cache)
  for shader,signature in SIGNATURES.items():
   name=f'0x00000000{shader}_0.spv';original=(BASE_DATA/'shaders'/name).read_bytes()

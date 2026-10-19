@@ -457,9 +457,15 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
-    # UltraWide v1.0: dispatch the selected aspect-ratio patch (v0.3 native, Settings > Display).
+    # UltraWide v1.0 by tcosi: dispatch the selected aspect-ratio patch (Settings > Display). Made for
+    # CUSA13795; the European edition uses the ported data (scripts/ultrawide_eu.py, v0.4).
     try:
-        uw_mode = uw_prepare(PORT, data, env, game, config)
+        if title_id not in (TITLE_ID, 'CUSA14876'):
+            if uw_aspect(config) in ('21:9', '32:9'):
+                say(f'Ultrawide: made for {TITLE_ID} and CUSA14876; {title_id} runs at 16:9')
+            uw_mode = uw_disabled(game, config)
+        else:
+            uw_mode = uw_prepare(PORT, data, env, game, config)
     except RuntimeError as error:
         fail(f'Ultrawide: {error}')
     game, config = uw_mode.game, uw_mode.config

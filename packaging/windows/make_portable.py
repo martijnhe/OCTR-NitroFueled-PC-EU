@@ -207,7 +207,9 @@ def main():
     # v0.3 native ultrawide data (manifests, baseline, shaders): needed by run.py.
     for data in list((ROOT / 'scripts').glob('ultrawide_*_data')):
         if data.is_dir():
-            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True)
+            # Prepared game views (view*/, several GB) and the EU work folder are per player.
+            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('view', 'view-building-*', 'eu'))
     # v0.4 FSR4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
     if (ROOT / 'fsr4_shaders').is_dir():
         shutil.copytree(ROOT / 'fsr4_shaders', folder / 'fsr4_shaders', dirs_exist_ok=True)

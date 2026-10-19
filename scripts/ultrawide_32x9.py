@@ -12,8 +12,27 @@ from ultrawide_32x9_archive import Archive
 from ultrawide_32x9_shader import centered_shader,SIGNATURES,known_ultrawide_shader,require_warm_cache
 
 DATA=Path(__file__).resolve().parent/'ultrawide_32x9_data'
+WORK=DATA  # the manifest in use and the prepared view (US: as before; EU: DATA/'eu')
 MANIFEST=json.loads((DATA/'manifest.json').read_text(encoding='utf-8'))
+def select_data():
+ global WORK,MANIFEST
+ if TITLE=='CUSA13795':
+  WORK=DATA
+ else:
+  import ultrawide_eu
+  WORK=DATA/'eu';WORK.mkdir(exist_ok=True)
+  source=DATA/ultrawide_eu.manifest_name('manifest.json')
+  if not (WORK/'manifest.json').exists() or (WORK/'manifest.json').read_bytes()!=source.read_bytes():atomic(WORK/'manifest.json',source.read_bytes())
+ MANIFEST=json.loads((WORK/'manifest.json').read_text(encoding='utf-8'))
 KEY=MANIFEST['key']
+# The game's edition (set_title): the European one (CUSA14876) uses the ported data of
+# ultrawide_eu.py and its own work folder, so a US view is never mistaken for it.
+TITLE='CUSA13795'
+def set_title(game):
+ global TITLE
+ from game_check import sfo_info
+ TITLE=sfo_info(Path(game)).get('TITLE_ID') or 'CUSA13795'
+ select_data()
 OWN_ASPECT='32:9'
 LEGACY_FILES={'CTR-Centered-HUD-720p-v3.xml','CTR-Centered-HUD-v4.xml','CTR-HUD-Rotation-Fix.xml','CTR-SuperUltrawide-2560x720.xml','CTR-SuperUltrawide-3840x1080.xml','CTR-SuperUltrawide-5120x1440.xml','HUD-Screen-Effects.xml','HUD-Clipping-Diagnostic.xml','HUD-Rotation-Diagnostic.xml','HUD-Rotation-Diagnostic-v2.xml','Movie-Aspect.xml'}
 
@@ -76,22 +95,22 @@ def verify_assets(game):
   finally:a.data.close();a._file.close()
 
 def view_record(source,game):
- return dict(source=str(source.resolve()),manifest_sha256=digest(DATA/'manifest.json'),archives=[dict(archive=a['archive'],source_stamp=stamp(source/'archives'/a['archive']),view_stamp=stamp(game/'archives'/a['archive'])) for a in MANIFEST['archives']])
+ return dict(source=str(source.resolve()),manifest_sha256=digest(WORK/'manifest.json'),archives=[dict(archive=a['archive'],source_stamp=stamp(source/'archives'/a['archive']),view_stamp=stamp(game/'archives'/a['archive'])) for a in MANIFEST['archives']])
 
 def ensure_view(source):
- source=Path(source).resolve();game=DATA/'view/game';record=DATA/'view/ready.json'
+ source=Path(source).resolve();game=WORK/'view/game';record=WORK/'view/ready.json'
  if record.exists():
   state=json.loads(record.read_text(encoding='utf-8'))
-  if state['source']!=str(source) or state['manifest_sha256']!=digest(DATA/'manifest.json'):raise RuntimeError('Super UltraWide view belongs to another game or package version; reinstall the package.')
+  if state['source']!=str(source) or state['manifest_sha256']!=digest(WORK/'manifest.json'):raise RuntimeError('Super UltraWide view belongs to another game or package version; reinstall the package.')
   for a in state['archives']:
    if stamp(source/'archives'/a['archive'])!=a['source_stamp'] or stamp(game/'archives'/a['archive'])!=a['view_stamp']:raise RuntimeError('Super UltraWide source or prepared archives changed; reinstall before launching.')
   return game
- if (DATA/'view').exists():raise RuntimeError('Incomplete Super UltraWide view; reinstall before launching.')
+ if (WORK/'view').exists():raise RuntimeError('Incomplete Super UltraWide view; reinstall before launching.')
  required=sum(a['original_size'] for a in MANIFEST['archives'])+64*1024*1024
  if shutil.disk_usage(DATA).free<required:raise RuntimeError('Super UltraWide needs about 9 GB free for its first preparation; original game files are retained.')
  for a in MANIFEST['archives']:
   if digest(source/'archives'/a['archive'])!=a['original_sha256']:raise RuntimeError('Unsupported or modified archive: '+a['archive'])
- temporary=DATA/('view-building-'+uuid.uuid4().hex);view=temporary/'game';view.mkdir(parents=True)
+ temporary=WORK/('view-building-'+uuid.uuid4().hex);view=temporary/'game';view.mkdir(parents=True)
  # Partial builds are kept on failure for diagnosis; never modify source links.
  link_tree(source,view)
  for item in MANIFEST['archives']:
@@ -111,11 +130,12 @@ def ensure_view(source):
     old=struct.unpack('<4I',old_headers[entry['index']]);headers.append((56+count*4+entry['index']*16,struct.pack('<4I',offset&0xffffffff,(old[1]&0xffffff00)|(offset>>32),len(payload),0xffffffff)))
    for off,value in headers:f.seek(off);f.write(value)
    f.flush();os.fsync(f.fileno())
- verify_assets(view);json_write(temporary/'ready.json',view_record(source,view));os.replace(temporary,DATA/'view')
+ verify_assets(view);json_write(temporary/'ready.json',view_record(source,view));os.replace(temporary,WORK/'view')
  return game
 
 def prepare(port,data,env,game,config):
  from patches import external_patches,external_selection,read_settings
+ set_title(game)
  selection_path=Path(env.get('BB_PATCHES_CONFIG',Path(data)/'patches.json'))
  patch_dir=Path(env.get('BB_PATCHES_DIR',Path(port)/'patches'))
  ini_settings=read_settings(Path(config))
@@ -223,12 +243,16 @@ def refresh(mode,env,config):
   atomic(config,('\n'.join(lines+['render_res=1440'])+'\n').encode('utf-8'))
   settings['render_res']='1440'
  source=external_patches(mode.patch_dir);original=next(x for x in source if x[0]==KEY)
- meta=resolution_metadata(original[2],settings);mode.selected=[(KEY,original[1],meta)]
+ meta=resolution_metadata(original[2],settings)
+ if TITLE!='CUSA13795':
+  import ultrawide_eu
+  meta=ultrawide_eu.port_meta(meta);print(f'{OWN_ASPECT} ultrawide: executable patches moved for {TITLE}',flush=True)
+ mode.selected=[(KEY,original[1],meta)]
  generated=mode.effective/'patches';generated.mkdir(exist_ok=True)
  # Keep other patch files available; selection remains frozen for this launch.
  for p in mode.patch_dir.glob('*.xml'):
   if p.name!=KEY.split('/',1)[0]:atomic(generated/p.name,p.read_bytes())
- root=ET.Element('Patch');ids=ET.SubElement(root,'TitleID');ET.SubElement(ids,'ID').text='CUSA13795';root.append(meta);ET.indent(root)
+ root=ET.Element('Patch');ids=ET.SubElement(root,'TitleID');ET.SubElement(ids,'ID').text=TITLE;root.append(meta);ET.indent(root)
  atomic(generated/KEY.split('/',1)[0],ET.tostring(root,encoding='utf-8',xml_declaration=True))
  env['BB_PATCHES_DIR']=str(generated);env['BB_NEO']='0'
  text=Path(config).read_text(encoding='utf-8');lines=[line for line in text.splitlines() if line.partition('=')[0].strip() not in {'render_res','patch_pro_1080p','temporal','upscaler'}]
@@ -241,7 +265,7 @@ def shaders(mode,user_dir,out):
   from patches import compile_external,eboot_segments
   elf=(Path(out)/'eboot.elf').read_bytes();writes=compile_external(mode.selected,eboot_segments(elf),elf)
   if len(writes)!=sum(len(list(m.iter('Line'))) for _,_,m in mode.selected):raise RuntimeError('Super UltraWide executable signatures do not match; launch stopped.')
- cache=Path(user_dir)/'cache/CUSA13795';operations=[]
+ cache=Path(user_dir)/'cache'/TITLE;operations=[]
  if mode.enabled:require_warm_cache(cache)
  for shader,signature in SIGNATURES.items():
   name=f'0x00000000{shader}_0.spv';original=(DATA/'shaders'/name).read_bytes()
