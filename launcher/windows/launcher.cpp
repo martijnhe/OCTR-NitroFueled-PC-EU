@@ -35,6 +35,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -51,6 +52,7 @@
 #include "discord_link.h"
 #include "nat_check.h"
 #include "port_update.h"
+#include "settings_import.h"
 #include "discord_presence.h"
 #include "launcher_locales.h"
 
@@ -139,6 +141,8 @@ std::string FormatBytes(std::uintmax_t bytes) {
 
 const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kRed{1.0f, 0.45f, 0.40f, 1.0f};
+// The game found no Vulkan 1.3 (GPU, driver or loader): UnsupportedVulkanExitCode in vk_platform.h.
+constexpr DWORD kUnsupportedGpuCode = 24;
 const ImVec4 kYellow{1.0f, 0.80f, 0.35f, 1.0f};
 const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 // The Achievements page (TrophiesTab, from GetLostIn's launcher v0.4, GPL-2.0) draws with its
@@ -190,6 +194,7 @@ std::string DetectWindowsLocale() {
     if (locale.rfind(L"ja", 0) == 0) return "ja";
     if (locale.rfind(L"zh", 0) == 0) return "zh_CN";
     if (locale.rfind(L"ru", 0) == 0) return "ru";
+    if (locale.rfind(L"id", 0) == 0) return "id";
     return "en";
 }
 
@@ -656,7 +661,15 @@ struct Backup {
     std::uintmax_t bytes = 0;
 };
 
+struct ModOption {
+    bool advanced=false;
+    std::string id, type, label, description, value, default_value, row, column;
+    std::vector<std::pair<std::string,std::string>> choices;
+};
+
 struct PatchInfo {
+    std::vector<ModOption> mod_options;
+    std::string mod_name, mod_hash, mod_source, mod_description, mod_versions;
     std::string key, name, author, note, version;
     std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
@@ -682,7 +695,6 @@ struct App {
     Ini game;      // bbport.ini
     char online_server_buf[128] = "octr.ryu7w7.xyz";
     char online_name_buf[32] = "";
-    char online_friends_buf[512] = "";
 
     // Game folders.
     fs::path game_dir, base_dir, update_dir;
@@ -704,12 +716,18 @@ struct App {
     std::deque<std::string> log;
     std::string last_status;
     std::atomic<bool> game_running{false};
+    // The native renderer's shaders being built before the game starts (run.py's "@progress"
+    // lines): percent, -1 when no build is on; its stage (extract, export, translate, compile).
+    std::atomic<int> shader_percent{-1};
+    std::string shader_stage;
     DWORD exit_code = 0;
     bool show_exit = false, stopped = false;
 
     // Monitors and controllers (bb-gpu-capabilities).
     std::vector<std::pair<std::string, std::string>> displays;  // value (number), label
     std::vector<std::pair<std::string, std::string>> gamepads;  // GUID, name
+    struct Gpu { std::string kind, vulkan, name; };              // bb-gpu-capabilities --gpus
+    std::vector<Gpu> gpus;
     std::thread probe;
     std::atomic<bool> probe_done{false};
 
@@ -737,6 +755,18 @@ struct App {
 };
 
 App g_app;
+
+/// Bringing the settings from another installation (settings_import.h, ImportPopup).
+enum class ImportState { Idle, Copying, Done, Failed };
+struct {
+    std::vector<fs::path> from;  // the installations found, the last played first
+    int choice = 0;
+    bool ask = false;            // open the question on the next frame
+    std::atomic<ImportState> state{ImportState::Idle};
+    std::string error;           // written before state turns Failed
+} g_import;
+
+bool RestartLauncher(const std::wstring& args);
 
 /// The title ID of the chosen game (the merged folder, else the update or the base game): the
 /// saves, the shader cache and the merged folder's name follow it. CUSA13795 when none is known.
@@ -776,13 +806,10 @@ void SyncOnlineBuffers() {
         a.game.Set("online_server", srv);
     }
     std::string nick = a.game.Get("online_name", a.game.Get("user_name"));
-    std::string friends = a.game.Get("online_friends", "");
     std::strncpy(a.online_server_buf, srv.c_str(), sizeof(a.online_server_buf) - 1);
     a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
     std::strncpy(a.online_name_buf, nick.c_str(), sizeof(a.online_name_buf) - 1);
     a.online_name_buf[sizeof(a.online_name_buf) - 1] = '\0';
-    std::strncpy(a.online_friends_buf, friends.c_str(), sizeof(a.online_friends_buf) - 1);
-    a.online_friends_buf[sizeof(a.online_friends_buf) - 1] = '\0';
 }
 
 std::string CurrentNick() { return Trim(g_app.game.Get("online_name", g_app.game.Get("user_name"))); }
@@ -857,11 +884,49 @@ bool WriteKeyFile(const fs::path& path, const std::string& key) {
     return bool(out);
 }
 
+std::string Lower(std::string s) {
+    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/// Every key used on this PC (run.py known_keys), one per line next to the backup: a nickname
+/// the current key does not own may belong to another folder's (two installations, or the
+/// backup from an older one), and the nickname check switches to it (AskNickStatus).
+fs::path KeyringPath() {
+    const fs::path backup = BackupKeyPath();
+    return backup.empty() ? fs::path() : backup.parent_path() / L"ryunet_online_keys.txt";
+}
+
+std::vector<std::string> KnownKeys() {
+    std::vector<std::string> keys;
+    const fs::path path = KeyringPath();
+    if (path.empty()) return keys;
+    std::ifstream in(path, std::ios::binary);
+    for (std::string line; std::getline(in, line);) {
+        line = Lower(Trim(line));
+        if (line.size() == 64 && line.find_first_not_of("0123456789abcdef") == std::string::npos &&
+            std::find(keys.begin(), keys.end(), line) == keys.end())
+            keys.push_back(line);
+    }
+    return keys;
+}
+
+void RememberKey(const std::string& key) {
+    const fs::path path = KeyringPath();
+    if (path.empty() || key.size() != 64) return;
+    const std::vector<std::string> keys = KnownKeys();
+    if (std::find(keys.begin(), keys.end(), key) != keys.end()) return;
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    std::ofstream(path, std::ios::binary | std::ios::app) << key << "\n";
+}
+
+std::mutex g_online_key_mutex;  // the server checks ask from background threads
+std::string g_online_key;
+
 std::string OnlineKey() {
-    static std::mutex mutex;  // the server checks ask from background threads
-    static std::string cached;
-    std::scoped_lock lock{mutex};
-    if (!cached.empty()) return cached;
+    std::scoped_lock lock{g_online_key_mutex};
+    if (!g_online_key.empty()) return g_online_key;
     const fs::path path = g_app.root / L"ryunet_online.key";
     const fs::path backup = BackupKeyPath();
     std::string key = ReadKeyFile(path);
@@ -877,8 +942,18 @@ std::string OnlineKey() {
     }
     if (ReadKeyFile(path) != key && !WriteKeyFile(path, key)) return {};
     if (ReadKeyFile(backup).empty()) WriteKeyFile(backup, key);  // never overwrites another folder's
-    cached = key;
-    return cached;
+    RememberKey(ReadKeyFile(backup));
+    RememberKey(key);
+    g_online_key = key;
+    return g_online_key;
+}
+
+/// This folder plays with another of this PC's keys from now on (the game reads the file too).
+bool UseOnlineKey(const std::string& key) {
+    std::scoped_lock lock{g_online_key_mutex};
+    if (!WriteKeyFile(g_app.root / L"ryunet_online.key", key)) return false;
+    g_online_key = key;
+    return true;
 }
 
 /// Server availability of a nickname: "free", "yours", "taken", "reserved", "invalid", or
@@ -890,17 +965,16 @@ struct NickCheck {
         bool linked = false;          // the nickname is linked to a Discord account
         bool link_available = false;  // the server can link Discord accounts
         std::string discord;          // the linked account's name (only for our own nickname)
+        std::string banned;           // the ban's reason when this player or address is banned
+        std::string ban_kind;         // "player" or "ip"
+        long long ban_until = 0;      // unix time; 0: permanent
+        bool key_switched = false;    // it was another installation's on this PC: its key is used now
     };
     std::mutex mutex;
     std::map<std::string, Result> results;  // "server|nick" -> answer
     std::string in_flight;
 };
 NickCheck g_nick_check;
-
-std::string Lower(std::string s) {
-    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
-    return s;
-}
 
 /// The server setting's host and HTTP port, split exactly as run.py does ("host" or "host:port").
 void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& port) {
@@ -916,68 +990,135 @@ void SplitServer(const std::string& server, std::string& host, INTERNET_PORT& po
 
 /// What one server sees of the installation's key: HMAC-SHA256(key, host), as run.py sends it.
 /// Every server gets a different value, so none can reuse it on another to take a nickname.
-std::string ServerKey(const std::string& host) {
-    const std::string key = OnlineKey();
-    if (key.size() != 64) return {};
-    unsigned char raw[32];
-    for (int i = 0; i < 32; ++i) raw[i] = static_cast<unsigned char>(std::stoi(key.substr(i * 2, 2), nullptr, 16));
-    const std::string msg = Lower(Trim(host));
-    unsigned char mac[32];
+/// SHA-256 of msg (HMAC-SHA256 with key when there is one), in lower-case hex; "" on failure.
+std::string Sha256Hex(const std::string& msg, const std::string& key = {}) {
+    unsigned char out[32];
     bool ok = false;
     BCRYPT_ALG_HANDLE alg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0) {
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                    key.empty() ? 0 : BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0) {
         BCRYPT_HASH_HANDLE hash = nullptr;
-        if (BCryptCreateHash(alg, &hash, nullptr, 0, raw, sizeof raw, 0) == 0) {
+        // No secret at all for a plain hash: a non-null pointer, even with length 0, makes
+        // BCryptCreateHash fail (STATUS_INVALID_PARAMETER), and every request went unsigned.
+        PUCHAR secret = key.empty() ? nullptr : reinterpret_cast<PUCHAR>(const_cast<char*>(key.data()));
+        if (BCryptCreateHash(alg, &hash, nullptr, 0, secret, ULONG(key.size()), 0) == 0) {
             ok = BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(msg.data())), ULONG(msg.size()), 0) == 0 &&
-                 BCryptFinishHash(hash, mac, sizeof mac, 0) == 0;
+                 BCryptFinishHash(hash, out, sizeof out, 0) == 0;
             BCryptDestroyHash(hash);
         }
         BCryptCloseAlgorithmProvider(alg, 0);
     }
     if (!ok) return {};
     static const char kHex[] = "0123456789abcdef";
-    std::string out;
-    for (const unsigned char b : mac) {
-        out += kHex[b >> 4];
-        out += kHex[b & 15];
+    std::string hex;
+    for (const unsigned char b : out) {
+        hex += kHex[b >> 4];
+        hex += kHex[b & 15];
     }
-    return out;
+    return hex;
 }
 
-/// A request to the RyuNET server's HTTP port, with this installation's key for that server.
-/// The body, or "" when the server could not be reached. Called from background threads.
+std::string ServerKey(const std::string& host, const std::string& key) {
+    if (key.size() != 64) return {};
+    std::string raw(32, '\0');
+    for (int i = 0; i < 32; ++i) raw[size_t(i)] = static_cast<char>(std::stoi(key.substr(i * 2, 2), nullptr, 16));
+    return Sha256Hex(Lower(Trim(host)), raw);
+}
+
+/// What the server stores of the server key (its keyHash): the key requests are signed with.
+/// key: one of this PC's keys (KnownKeys); the installation's own when empty.
+std::string ServerKeyHash(const std::string& host, const std::string& key = {}) {
+    const std::string server_key = ServerKey(host, key.empty() ? OnlineKey() : key);
+    return server_key.empty() ? std::string() : Sha256Hex(server_key);
+}
+
+/// Seconds to add to this PC's clock to get the RyuNET server's (run.py SERVER_CLOCK_OFFSET), from
+/// the Date of its answers. Signatures carry the time and the server takes them only within 5
+/// minutes of its own clock: with the PC's clock off, every signed request was refused and the
+/// player's own nickname read as taken.
+std::atomic<long long> g_server_clock_offset{0};
+
+/// An answer of the RyuNET server: its Date header sets g_server_clock_offset.
+void NoteServerClock(HINTERNET req) {
+    SYSTEMTIME date{};
+    DWORD size = sizeof date;
+    FILETIME file{};
+    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_DATE | WINHTTP_QUERY_FLAG_SYSTEMTIME, WINHTTP_HEADER_NAME_BY_INDEX,
+                             &date, &size, WINHTTP_NO_HEADER_INDEX) ||
+        !SystemTimeToFileTime(&date, &file))
+        return;
+    const long long ticks = (static_cast<long long>(file.dwHighDateTime) << 32) | file.dwLowDateTime;
+    const long long server = (ticks - 116444736000000000LL) / 10000000LL;  // 100 ns since 1601 -> Unix
+    const long long offset = server - static_cast<long long>(std::time(nullptr));
+    // The header has whole seconds: a few seconds either way change nothing.
+    g_server_clock_offset = offset > 5 || offset < -5 ? offset : 0;
+}
+
+/// X-RyuNET-Proof for one request (the server's nick_proof.go, run.py proof_header): the key
+/// never crosses the network, and the signature is good once, for a few minutes of the
+/// server's time.
+std::string ProofHeader(const std::string& key_hash, const char* method, const std::string& target) {
+    unsigned char raw[16];
+    if (key_hash.empty() || BCryptGenRandom(nullptr, raw, sizeof raw, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return {};
+    static const char kHex[] = "0123456789abcdef";
+    std::string nonce;
+    for (const unsigned char b : raw) {
+        nonce += kHex[b >> 4];
+        nonce += kHex[b & 15];
+    }
+    const std::string ts = std::to_string(static_cast<long long>(std::time(nullptr)) + g_server_clock_offset.load());
+    const std::string mac = Sha256Hex(ts + "\n" + nonce + "\n" + method + "\n" + target, key_hash);
+    return mac.empty() ? std::string() : "1." + ts + "." + nonce + "." + mac;
+}
+
+/// A request to the RyuNET server's HTTP port, signed with this installation's key for that
+/// server; register also sends the key's hash (a Discord link takes it for a new installation).
+/// The body, or "" when the server could not be reached. A request signed with a clock found off
+/// by minutes goes again once: the server refuses it before doing anything. Called from
+/// background threads. with_key signs with another of this PC's keys (KnownKeys).
 std::string HttpRequest(const std::string& server, const wchar_t* method, const std::wstring& path,
-                        const std::string& form = {}, int timeout_ms = 3000) {
+                        const std::string& form = {}, int timeout_ms = 3000, bool register_key = false,
+                        const std::string& with_key = {}) {
     std::string host;
     INTERNET_PORT port = 0;
     SplitServer(server, host, port);
-    const std::string key = ServerKey(host);
+    const std::string key_hash = ServerKeyHash(host, with_key);
     std::string body;
     HINTERNET session = WinHttpOpen(L"CTR-NitroFueled-PC launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return body;
     WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
     HINTERNET conn = WinHttpConnect(session, Widen(host).c_str(), port, 0);
-    HINTERNET req = conn ? WinHttpOpenRequest(conn, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, 0)
-                         : nullptr;
-    std::wstring headers;
-    if (!key.empty()) headers += L"X-RyuNET-Key: " + Widen(key) + L"\r\n";
-    if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
-    if (req && WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
-                                  headers.empty() ? 0 : DWORD(-1),
-                                  form.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(form.data()),
-                                  DWORD(form.size()), DWORD(form.size()), 0) &&
-        WinHttpReceiveResponse(req, nullptr)) {
-        DWORD avail = 0;
-        while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
-            std::string chunk(avail, '\0');
-            DWORD got = 0;
-            if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;
-            body.append(chunk.data(), got);
+    for (int attempt = 1; conn && attempt <= 2; ++attempt) {
+        const long long offset = g_server_clock_offset.load();
+        const std::string proof = ProofHeader(key_hash, Narrow(method).c_str(), Narrow(path));
+        HINTERNET req = WinHttpOpenRequest(conn, method, path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        std::wstring headers;
+        if (!proof.empty()) headers += L"X-RyuNET-Proof: " + Widen(proof) + L"\r\n";
+        if (register_key && !key_hash.empty()) headers += L"X-RyuNET-Key-Hash: " + Widen(key_hash) + L"\r\n";
+        if (!form.empty()) headers += L"Content-Type: application/x-www-form-urlencoded\r\n";
+        body.clear();
+        bool answered = false;
+        if (req && WinHttpSendRequest(req, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                      headers.empty() ? 0 : DWORD(-1),
+                                      form.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(form.data()),
+                                      DWORD(form.size()), DWORD(form.size()), 0) &&
+            WinHttpReceiveResponse(req, nullptr)) {
+            answered = true;
+            NoteServerClock(req);
+            DWORD avail = 0;
+            while (WinHttpQueryDataAvailable(req, &avail) && avail && body.size() < 4096) {
+                std::string chunk(avail, '\0');
+                DWORD got = 0;
+                if (!WinHttpReadData(req, chunk.data(), avail, &got) || !got) break;
+                body.append(chunk.data(), got);
+            }
         }
+        if (req) WinHttpCloseHandle(req);
+        const long long moved = g_server_clock_offset.load() - offset;
+        if (!answered || proof.empty() || (moved <= 240 && moved >= -240)) break;
     }
-    if (req) WinHttpCloseHandle(req);
     if (conn) WinHttpCloseHandle(conn);
     WinHttpCloseHandle(session);
     return body;
@@ -1006,6 +1147,9 @@ bool JsonNumber(const std::string& body, const char* key, int& value) {
     return true;
 }
 
+// Defined with the Discord join secrets below.
+std::string JsonText(const std::string& body, const char* key);
+
 /// A true/false field of a small flat JSON answer.
 bool JsonBool(const std::string& body, const char* key) {
     return body.find(std::string("\"") + key + "\":true") != std::string::npos;
@@ -1014,12 +1158,32 @@ bool JsonBool(const std::string& body, const char* key) {
 NickCheck::Result AskNickStatus(const std::string& server, const std::string& nick) {
     // {"status":"...","linked":..,"discord_link":..,"discord":".."}; a server without this
     // endpoint answers something else.
-    const std::string body = HttpGet(server, L"/ryunet/nick?name=" + Widen(nick));  // [A-Za-z0-9_-]
+    const std::wstring path = L"/ryunet/nick?name=" + Widen(nick);  // [A-Za-z0-9_-]
+    std::string body = HttpGet(server, path);
+    bool key_switched = false;
+    if (JsonField(body, "status") == "taken") {
+        // Another installation on this PC may own it (KnownKeys): this folder takes its key.
+        const std::string own = OnlineKey();
+        for (const std::string& key : KnownKeys()) {
+            if (key == own) continue;
+            const std::string other = HttpRequest(server, L"GET", path, {}, 3000, false, key);
+            if (JsonField(other, "status") == "yours" && UseOnlineKey(key)) {
+                body = other;
+                key_switched = true;
+                break;
+            }
+        }
+    }
     NickCheck::Result r;
+    r.key_switched = key_switched;
     r.status = JsonField(body, "status");
     r.linked = JsonBool(body, "linked");
     r.link_available = JsonBool(body, "discord_link");
     r.discord = JsonField(body, "discord");
+    r.banned = JsonText(body, "banned");
+    r.ban_kind = JsonField(body, "ban_kind");
+    if (const auto at = body.find("\"ban_until\":"); at != std::string::npos)
+        r.ban_until = std::strtoll(body.c_str() + at + 12, nullptr, 10);
     return r;
 }
 
@@ -1040,6 +1204,7 @@ std::string NickAvailability() {
         NickCheck::Result result = AskNickStatus(server, nick);
         result.at = GetTickCount64();
         std::scoped_lock done{g_nick_check.mutex};
+        if (result.key_switched) g_nick_check.results.clear();  // the other answers were for the old key
         g_nick_check.results[id] = result;
         g_nick_check.in_flight.clear();
     }).detach();
@@ -1076,14 +1241,49 @@ NickCheck::Result NickInfo() {
     return it == g_nick_check.results.end() ? NickCheck::Result{} : it->second;
 }
 
+constexpr const wchar_t* kCommunityDiscord = L"https://discord.gg/PAT5SJzdXw";
+
+/// The community's Discord (bugs, questions, ban appeals): a line and a button.
+void CommunityDiscordLine(const char* why) {
+    ImGui::TextColored(kGrey, "%s", why);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Abrir Discord", "Open Discord"))) OpenInShell(kCommunityDiscord);
+}
+
+/// This player's ban, as the server's nickname check tells it (nothing when not banned).
+bool BanNotice() {
+    const NickCheck::Result info = NickInfo();
+    if (info.banned.empty()) return false;
+    ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+    ImGui::TextWrapped("%s", info.ban_kind == "ip" ? T("Tu conexión (IP) está baneada del online.", "Your connection (IP) is banned from online play.") : T("Tu cuenta está baneada del online.", "Your account is banned from online play."));
+    ImGui::TextWrapped(T("Motivo: %s", "Reason: %s"), info.banned.c_str());
+    if (info.ban_until > 0) {
+        char when[32];
+        const std::time_t t = std::time_t(info.ban_until);
+        std::tm local{};
+        localtime_s(&local, &t);
+        std::strftime(when, sizeof when, "%Y-%m-%d %H:%M", &local);
+        ImGui::TextWrapped(T("Hasta: %s", "Until: %s"), when);
+    } else {
+        ImGui::TextWrapped("%s", T("Duración: permanente", "Duration: permanent"));
+    }
+    ImGui::PopStyleColor();
+    CommunityDiscordLine(T("Si crees que es un error, apela en nuestro Discord.", "If you think it is a mistake, appeal on our Discord."));
+    return true;
+}
+
 /// One line under a nickname field: what the server says about it.
 void NickAvailabilityLine() {
     const std::string s = NickAvailability();
+    if (BanNotice()) return;
     if (s == "?") {
         ImGui::TextColored(kGrey, "%s", T("Comprobando el apodo en el servidor...", "Checking the nickname with the server..."));
     } else if (s == "free") {
         ImGui::TextColored(kGreen, "%s", T("Disponible: será tuyo la primera vez que juegues online.",
                                            "Available: it becomes yours the first time you play online."));
+    } else if (s == "yours" && NickInfo().key_switched) {
+        ImGui::TextColored(kGreen, "%s", T("Este apodo es tuyo (recuperado de otra instalación de este PC).",
+                                           "This nickname is yours (recovered from another installation on this PC)."));
     } else if (s == "yours") {
         ImGui::TextColored(kGreen, "%s", T("Este apodo es tuyo.", "This nickname is yours."));
     } else if (s == "taken" && NickInfo().linked) {
@@ -1096,6 +1296,16 @@ void NickAvailabilityLine() {
                                          "Someone else already uses that nickname: choose another one."));
     } else if (s == "reserved" || s == "invalid") {
         ImGui::TextColored(kRed, "%s", T("El servidor no acepta ese apodo: elige otro.", "The server does not accept that nickname: choose another one."));
+    }
+    const long long clock_off = std::llabs(g_server_clock_offset.load());
+    if (clock_off > 240) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kYellow);
+        ImGui::TextWrapped(T("La hora de este PC va %lld min desfasada: el online la corrige, pero activa la fecha y hora "
+                             "automáticas en la configuración de Windows.",
+                             "This PC's clock is %lld min off: online corrects it, but set the date and time to "
+                             "automatic in the Windows settings."),
+                           (clock_off + 30) / 60);
+        ImGui::PopStyleColor();
     }
 }
 
@@ -1188,6 +1398,11 @@ std::string NatLabel(const std::string& server, ImVec4& color) {
     }
     color = kGrey;
     if (running) return std::string("NAT: ") + T("comprobando...", "checking...");
+    if (r.replies_blocked || r.error == "server") {
+        color = kRed;
+        return r.replies_blocked ? T("NAT: online bloqueado (¿firewall?)", "NAT: online blocked (firewall?)")
+                                 : T("NAT: el servidor no responde", "NAT: no answer from the server");
+    }
     switch (r.type) {
     case NatCheck::Type::Open: color = kGreen; return T("NAT: tipo 1 (abierto)", "NAT: type 1 (open)");
     case NatCheck::Type::Moderate: color = kGreen; return T("NAT: tipo 2 (moderado)", "NAT: type 2 (moderate)");
@@ -1211,7 +1426,33 @@ bool ListHas(const std::string& csv, const std::string& name) {
     return false;
 }
 
+/// run.py's "@progress native-shaders ..." lines: the launcher comes back to show the shader build
+/// (ShaderProgressPopup) and goes away again when the game starts. Not shown in the log.
+bool ShaderProgressLine(const std::string& line) {
+    static const std::string prefix = "@progress native-shaders ";
+    if (line.compare(0, prefix.size(), prefix) != 0) return line.rfind("@progress ", 0) == 0;
+    App& a = g_app;
+    const std::string rest = line.substr(prefix.size());
+    if (rest.rfind("done", 0) == 0) {
+        a.shader_percent = -1;
+        if (a.hwnd) ShowWindowAsync(a.hwnd, a.launcher.Flag("hide_on_play", false) ? SW_HIDE : SW_MINIMIZE);
+        return true;
+    }
+    const size_t space = rest.find(' ');
+    const int percent = std::clamp(std::atoi(rest.substr(0, space).c_str()), 0, 100);
+    {
+        std::scoped_lock lock{a.mutex};
+        a.shader_stage = space == std::string::npos ? "" : Trim(rest.substr(space + 1));
+    }
+    if (a.shader_percent.exchange(percent) < 0 && a.hwnd) {
+        ShowWindowAsync(a.hwnd, SW_RESTORE);
+        SetForegroundWindow(a.hwnd);
+    }
+    return true;
+}
+
 void AddLog(const std::string& line) {
+    if (ShaderProgressLine(line)) return;
     std::scoped_lock lock{g_app.mutex};
     g_app.log.push_back(line);
     while (g_app.log.size() > 2000) g_app.log.pop_front();
@@ -1374,6 +1615,7 @@ void StartGame() {
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
+    SetEnv(L"BB_GPU_NAME", a.launcher.Get("gpu"));  // the graphics card, by name (empty: automatic)
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
@@ -1819,9 +2061,20 @@ void StartProbe() {
             const auto t = line.find('\t');
             if (t != std::string::npos) pads.emplace_back(line.substr(0, t), line.substr(t + 1));
         }
+        std::vector<App::Gpu> gpus;
+        const Captured g = RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --gpus", app.bin, 10000);
+        std::stringstream gs(g.output);
+        while (std::getline(gs, line)) {
+            line = Trim(line);
+            const auto t1 = line.find('\t');
+            const auto t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+            if (t2 == std::string::npos) continue;
+            gpus.push_back({line.substr(0, t1), line.substr(t1 + 1, t2 - t1 - 1), line.substr(t2 + 1)});
+        }
         std::scoped_lock lock{app.mutex};
         app.displays = std::move(displays);
         app.gamepads = std::move(pads);
+        app.gpus = std::move(gpus);
         app.probe_done = true;
     });
 }
@@ -1902,8 +2155,11 @@ std::string FormatSize(std::uintmax_t bytes) {
 fs::path SaveRoot() {
     const fs::path base = g_app.root / L"user" / L"savedata";
     std::error_code ec;
+    // Player 1's; guest<N> holds split-screen players 2-4's, emptied each run (src/runtime_savedata.c).
+    if (fs::is_directory(base / L"1" / GameTitle(), ec)) return base / L"1" / GameTitle();
     for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
+        if (it->path().filename().wstring().rfind(L"guest", 0) == 0) continue;
         if (fs::is_directory(it->path() / GameTitle(), e2)) return it->path() / GameTitle();
     }
     return base / L"1" / GameTitle();
@@ -2071,6 +2327,7 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
     {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
     // The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+    {"CrashTeamRacingUnlockAllEU.xml/Unlock Everything", "patch_unlock_all"},
     {"CrashTeamRacingEU.xml/60 FPS Unlock", "patch_60fps"},
     {"CrashTeamRacingEU.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
@@ -2085,7 +2342,7 @@ const char* RegionOf(const std::string& title) {
 
 std::string XmlUnescape(std::string s) {
     const std::pair<const char*, const char*> entities[] = {
-        {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}};
+        {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&#10;", "\n"}, {"&#13;", "\r"}, {"&#9;", "\t"}, {"&amp;", "&"}};
     for (const auto& [from, to] : entities) {
         for (size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += std::strlen(to))
             s.replace(at, std::strlen(from), to);
@@ -2115,7 +2372,20 @@ std::map<std::string, std::string> XmlAttributes(const std::string& tag) {
     return out;
 }
 
-std::vector<PatchInfo> LoadPatches() {
+void ScanModPackages() {
+    App& a = g_app;
+    if (!a.python || a.game_running) return;
+    const fs::path script = a.root / L"scripts" / L"mod_packages.py";
+    if (!fs::is_regular_file(script)) return;
+    const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+        Quote(script.wstring()) + L" --scan " + Quote(a.root.wstring());
+    const Captured r = RunCaptured(a.python->exe, cmd, a.root, 120000);
+    if (!r.output.empty()) AddLog(r.output);
+    if (!r.started || r.code != 0) AddLog("Mod scan failed; check the log before enabling packages.");
+}
+
+std::vector<PatchInfo> LoadPatches(bool scan = true) {
+    if(scan) ScanModPackages();
     std::vector<PatchInfo> list;
     std::error_code ec;
     std::vector<fs::path> files;
@@ -2159,6 +2429,36 @@ std::vector<PatchInfo> LoadPatches() {
             std::string on = get("isEnabled");
             std::transform(on.begin(), on.end(), on.begin(), [](unsigned char c) { return char(std::tolower(c)); });
             p.default_on = on == "true";
+            p.mod_name = get("ModName");
+            p.mod_hash = get("ModHash");
+            p.mod_source = get("ModSource");
+            p.mod_description = get("ModDescription");
+            p.mod_versions = get("ModVersions");
+            // Only our generated package catalog declares configurable controls.
+            if (file.filename() == L"OCTR-Mod-Library.xml" && !p.mod_hash.empty()) {
+                const size_t meta_end=xml.find("</Metadata>",close);
+                for (size_t pos=close; meta_end!=std::string::npos && p.mod_options.size()<16 &&
+                     (pos=xml.find("<ModOption ",pos))!=std::string::npos && pos<meta_end; ++pos) {
+                    const size_t end=xml.find('>',pos), tail=xml.find("</ModOption>",end);
+                    if (end==std::string::npos || end>meta_end) break;
+                    const auto fields=XmlAttributes(xml.substr(pos+11,end-pos-11));
+                    auto field=[&](const char* key) { const auto i=fields.find(key); return i==fields.end()?std::string():i->second; };
+                    ModOption option; option.id=field("Id");option.type=field("Type");option.label=field("Label");
+                    option.description=field("Description");option.value=field("Value");option.default_value=field("Default");
+                    option.advanced=field("Advanced")=="true";
+                    option.row=field("Row");option.column=field("Column");
+                    if (option.type=="choice" && tail!=std::string::npos && tail<meta_end) {
+                        for (size_t c=end;option.choices.size()<32 && (c=xml.find("<Choice ",c))!=std::string::npos && c<tail;++c) {
+                            const size_t ce=xml.find('>',c);if(ce==std::string::npos || ce>tail)break;
+                            const auto choice=XmlAttributes(xml.substr(c+8,ce-c-8));
+                            if(choice.count("Value") && choice.count("Label"))option.choices.emplace_back(choice.at("Value"),choice.at("Label"));
+                        }
+                    }
+                    if (!option.id.empty() && !option.label.empty() &&
+                        (option.type=="boolean" || (option.type=="choice" && !option.choices.empty())))
+                        p.mod_options.push_back(std::move(option));
+                }
+            }
             for (const auto& [key, ini] : kIniPatches)
                 if (p.key == key) p.ini_key = ini;
             list.push_back(std::move(p));
@@ -2238,6 +2538,8 @@ void HelpMarker(const char* text) {
     }
 }
 
+const char* PerfReportsText();  // the performance diagnostic's explanation (PerfReportsPopup)
+
 void GameFlag(const char* key, const char* label, bool fallback, const char* help = nullptr) {
     bool v = g_app.game.Flag(key, fallback);
     if (ImGui::Checkbox(label, &v)) {
@@ -2276,6 +2578,25 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
 bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
 void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
+
+/// "Add to Steam" and its confirmation (Steam is closed first), on the Play tab and in Settings.
+void SteamButton() {
+    auto& a = g_app;
+    if (ImGui::Button(T("Añadir a Steam", "Add to Steam"))) ImGui::OpenPopup("steam_add");
+    if (ImGui::BeginPopupModal("steam_add", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextUnformatted(T("Si Steam está abierto, se cerrará para añadir el juego (vuelve a abrirlo después).",
+                                 "If Steam is open, it will be closed to add the game (open it again afterwards)."));
+        if (ImGui::Button(T("Añadir", "Add"))) {
+            std::string message;
+            AddToSteam(message);
+            a.notice = message;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T("Cancelar", "Cancel"))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
 
 bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
     const bool pressed = ImGui::InvisibleButton("##primary_play", size);
@@ -2353,17 +2674,8 @@ void PlayTab() {
                 std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
                 if (srv.empty()) srv = "octr.ryu7w7.xyz";
                 const std::string nick = CurrentNick().empty() ? std::string("-") : CurrentNick();
-                const std::string friends = a.game.Get("online_friends", "");
-                if (!friends.empty()) {
-                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s  |  %s: %s",
-                                       T("Servidor", "Server"), srv.c_str(),
-                                       T("Apodo", "Nick"), nick.c_str(),
-                                       T("Amigos", "Friends"), friends.c_str());
-                } else {
-                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
-                                       T("Servidor", "Server"), srv.c_str(),
-                                       T("Apodo", "Nick"), nick.c_str());
-                }
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
+                                   T("Servidor", "Server"), srv.c_str(), T("Apodo", "Nick"), nick.c_str());
                 {
                     ImVec4 nat_color;
                     const std::string nat = NatLabel(Trim(srv), nat_color);
@@ -2377,6 +2689,7 @@ void PlayTab() {
                                                   "Whether other players can connect to you directly. Details in the Online "
                                                   "tab. Your IP is not shown."));
                 }
+                if (!NickInfo().banned.empty()) ImGui::TextColored(kRed, "%s", T("Baneado del online: mira la pestaña Online.", "Banned from online play: see the Online tab."));
                 if (const char* problem = NickProblem(CurrentNick()))
                     ImGui::TextColored(kYellow, "%s %s", problem, T("Se te pedirá al pulsar Jugar.", "You will be asked when you press Play."));
             } else {
@@ -2489,6 +2802,8 @@ void PlayTab() {
                 a.notice = err;
             }
         }
+        ImGui::SameLine();
+        SteamButton();
     }
 
     std::string status;
@@ -2501,6 +2816,16 @@ void PlayTab() {
                                             "The game is running. The first start compiles shaders and takes a while."));
     } else if (a.show_exit) {
         if (a.exit_code == 0 || a.stopped) ImGui::TextColored(kGrey, "%s", T("El juego se cerró.", "The game was closed."));
+        else if (a.exit_code == kUnsupportedGpuCode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+            ImGui::TextWrapped("%s", T("Tu tarjeta gráfica o su driver no soporta Vulkan 1.3 / sparse binding, que el juego necesita. Actualiza el "
+                                       "driver de la GPU; si ya es el último, la tarjeta es demasiado antigua para Windows (en "
+                                       "Linux, el driver Mesa da Vulkan 1.3 a muchas GPU antiguas).",
+                                       "Your graphics card or its driver doesn't support Vulkan 1.3 / sparse binding, which the game needs. Update "
+                                       "the GPU driver; if it is already the latest, the card is too old for Windows (on Linux, "
+                                       "the Mesa driver gives Vulkan 1.3 to many older GPUs)."));
+            ImGui::PopStyleColor();
+        }
         else ImGui::TextColored(kRed, T("El juego se cerró con un error (código %lu). Mira el registro abajo o en last_run.log.",
                                         "The game ended with an error (code %lu). See the log below or last_run.log."),
                                 (unsigned long)a.exit_code);
@@ -2555,6 +2880,16 @@ std::string GameTemporal() {
     return game.Flag("fsr1", true) ? "fsr1" : "off";
 }
 
+/// v0.7.4: FSR 4's model files (the fsr4_shaders folder next to the launcher, where sacredfire.exe
+/// looks for them; not included). Without them FSR 4 is still listed, and the game uses FSR 3.
+bool Fsr4FilesPresent() {
+    static const bool present = [] {
+        std::error_code ec;
+        return fs::is_regular_file(g_app.root / L"fsr4_shaders" / L"LICENSE-FSR4-v07.txt", ec);
+    }();
+    return present;
+}
+
 /// A combo over a bbport.ini key; true when the player picked another value (already set).
 template <size_t N>
 bool GameChoiceCombo(const char* label, const char* key, const Choice (&choices)[N], const char* fallback,
@@ -2604,50 +2939,140 @@ void RenderResCombo() {
                  "PCs (the picture is output at 1080p)."));
 }
 
-// The corrected 21:9 and 32:9 layouts (scripts/widescreen.py, by tcosi): menus, backgrounds and a
-// centered HUD. bbport.ini widescreen_layout / widescreen_output; the in-game ultrawide (the
-// monitor's size without those corrections) is turned off while one is on.
-void WidescreenSettings() {
+// Aspect ratio is independent of the corrected widescreen layouts: 16:10 prepares the
+// display/camera in scripts/aspect_ratio.py; 21:9/32:9 keep tcosi's menus and HUD.
+/// Windows' own graphics preference for the game (Settings > Display > Graphics), so a laptop's
+/// switchable graphics runs it on the chosen GPU: 2 high performance, 1 power saving, 0 removes
+/// the launcher's entry (Windows decides again).
+void SetWindowsGpuPreference(int preference) {
+    const std::wstring exe = (g_app.bin / L"sacredfire.exe").wstring();
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    if (preference) {
+        const std::wstring value = L"GpuPreference=" + std::to_wstring(preference) + L";";
+        RegSetValueExW(key, exe.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       DWORD((value.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, exe.c_str());
+    }
+    RegCloseKey(key);
+}
+
+std::string GpuLabel(const App::Gpu& gpu) {
+    std::string label = gpu.name;
+    if (gpu.kind == "discrete") label += T(" (dedicada)", " (dedicated)");
+    else if (gpu.kind == "integrated") label += T(" (integrada)", " (integrated)");
+    else if (gpu.kind == "cpu") label += T(" (por software, muy lenta)", " (software, very slow)");
+    const auto dot = gpu.vulkan.find('.');
+    const int major = std::atoi(gpu.vulkan.c_str()), minor = dot == std::string::npos ? 0 : std::atoi(gpu.vulkan.c_str() + dot + 1);
+    if (major < 1 || (major == 1 && minor < 3))
+        label += std::string(T(" - Vulkan ", " - Vulkan ")) + gpu.vulkan + T(", no sirve para el juego", ", not enough for the game");
+    return label;
+}
+
+/// The graphics card: automatic (the engine prefers a dedicated GPU with Vulkan 1.3) or one of
+/// the GPUs Vulkan sees, by name (BB_GPU_NAME; one that is gone falls back to automatic).
+void GpuCombo() {
     App& a = g_app;
-    std::string mode = a.game.Get("widescreen_layout", "off");
-    static constexpr Choice layouts[] = {{"16:9", "16:9", "off"}, {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
-    if (mode != "21x9" && mode != "32x9") mode = "off";
+    std::scoped_lock lock{a.mutex};
+    const std::string current = a.launcher.Get("gpu");
+    std::string preview = T("Automática", "Automatic");
+    bool listed = false;
+    for (const auto& gpu : a.gpus)
+        if (gpu.name == current) { preview = GpuLabel(gpu); listed = true; }
+    if (!current.empty() && !listed) preview = current + T(" (no detectada)", " (not detected)");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+    if (ImGui::BeginCombo(T("Tarjeta gráfica", "Graphics card"), preview.c_str())) {
+        if (ImGui::Selectable(T("Automática", "Automatic"), current.empty())) {
+            a.launcher.Set("gpu", "");
+            SaveLauncher();
+            SetWindowsGpuPreference(0);
+        }
+        for (const auto& gpu : a.gpus) {
+            if (ImGui::Selectable(GpuLabel(gpu).c_str(), gpu.name == current)) {
+                a.launcher.Set("gpu", gpu.name);
+                SaveLauncher();
+                SetWindowsGpuPreference(gpu.kind == "discrete" ? 2 : gpu.kind == "integrated" ? 1 : 0);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker(T("En notebooks con dos GPU, elige la dedicada (NVIDIA o AMD) si el juego arranca con la integrada. "
+                 "Automática usa la dedicada cuando tiene Vulkan 1.3. Se aplica al iniciar el juego. Si no ves tu "
+                 "GPU dedicada en la lista, actualiza su driver.",
+                 "On laptops with two GPUs, choose the dedicated one (NVIDIA or AMD) if the game starts on the "
+                 "integrated one. Automatic uses the dedicated GPU when it has Vulkan 1.3. Applied when the game "
+                 "starts. If your dedicated GPU is not listed, update its driver."));
+}
+
+void AspectRatioSettings() {
+    App& a = g_app;
+    std::string mode = a.game.Get("aspect_ratio", a.game.Get("widescreen_layout", "16x9"));
+    static constexpr Choice ratios[] = {{"16:9", "16:9", "16x9"},
+                                        {"16:10", "16:10", "16x10"},
+                                        {"21:9", "21:9", "21x9"}, {"32:9", "32:9", "32x9"}};
+    if (mode != "16x10" && mode != "21x9" && mode != "32x9") mode = "16x9";
     const char* preview = "16:9";
-    for (const auto& c : layouts) if (mode == c.value) preview = T(c.es, c.en);
+    for (const auto& c : ratios) if (mode == c.value) preview = T(c.es, c.en);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
     if (ImGui::BeginCombo(T("Relación de aspecto", "Aspect ratio"), preview)) {
-        for (const auto& c : layouts) {
+        for (const auto& c : ratios) {
             if (ImGui::Selectable(T(c.es, c.en), mode == c.value)) {
                 mode = c.value;
-                a.game.Set("widescreen_layout", mode);
-                if (mode != "off") {
+                a.game.Set("aspect_ratio", mode);
+                a.game.Set("widescreen_layout", mode == "21x9" || mode == "32x9" ? mode : "off");
+                if (mode != "16x9") {
                     a.game.Set("ultrawide", "0");
-                    const std::string output = a.game.Get("widescreen_output");
+                    std::string output = a.game.Get("aspect_output", a.game.Get("widescreen_output"));
+                    const bool tall = output == "1920x1200" || output == "1280x800" || output == "2560x1600";
                     const bool wide = output == "3440x1440" || output == "2560x1080";
-                    if (wide != (mode == "21x9") || output.empty())
-                        a.game.Set("widescreen_output", mode == "21x9" ? "3440x1440" : "5120x1440");
+                    const bool super = output == "5120x1440" || output == "3840x1080" ||
+                                       output == "2560x720" || output == "7680x2160";
+                    if (!((mode == "16x10" && tall) || (mode == "21x9" && wide) || (mode == "32x9" && super)))
+                        output = mode == "16x10" ? "1920x1200" : mode == "21x9" ? "3440x1440" : "5120x1440";
+                    a.game.Set("aspect_output", output);
+                    if (mode == "21x9" || mode == "32x9") a.game.Set("widescreen_output", output);
                 }
                 SaveGameIni();
             }
         }
         ImGui::EndCombo();
     }
-    if (mode == "off") return;
+    if (mode == "16x9") return;
+    static constexpr Choice tall[] = {{"1920 x 1200", "1920 x 1200", "1920x1200"},
+                                      {"1280 x 800", "1280 x 800", "1280x800"},
+                                      {"2560 x 1600", "2560 x 1600", "2560x1600"}};
     static constexpr Choice wide[] = {{"3440 x 1440", "3440 x 1440", "3440x1440"},
                                       {"2560 x 1080", "2560 x 1080", "2560x1080"}};
     static constexpr Choice super[] = {{"5120 x 1440", "5120 x 1440", "5120x1440"},
                                        {"3840 x 1080", "3840 x 1080", "3840x1080"},
                                        {"2560 x 720", "2560 x 720", "2560x720"},
                                        {"7680 x 2160", "7680 x 2160", "7680x2160"}};
+    const std::string output = a.game.Get("aspect_output", a.game.Get("widescreen_output"));
     const char* label = T("Tamaño de pantalla", "Screen size");
-    if (mode == "21x9") {
-        if (GameChoiceCombo(label, "widescreen_output", wide, "3440x1440", 16.0f)) SaveGameIni();
+    bool changed;
+    if (mode == "16x10") {
+        changed = GameChoiceCombo(label, "aspect_output", tall, output.empty() ? "1920x1200" : output.c_str(), 16.0f);
+        ImGui::TextColored(kGrey, "%s", T("16:10: pantalla y cámara adaptadas; efectos del HUD alineados. "
+            "Actualización 1.21, USA o Europa. Sin FSR ni DLSS. Requiere reiniciar.",
+            "16:10 display and camera; aligned HUD effects. USA or Europe 1.21. "
+            "No FSR or DLSS. Requires a restart."));
+    } else if (mode == "21x9") {
+        changed = GameChoiceCombo(label, "aspect_output", wide, output.empty() ? "3440x1440" : output.c_str(), 16.0f);
     } else {
-        if (GameChoiceCombo(label, "widescreen_output", super, "5120x1440", 16.0f)) SaveGameIni();
+        changed = GameChoiceCombo(label, "aspect_output", super, output.empty() ? "5120x1440" : output.c_str(), 16.0f);
     }
-    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. Solo sin conexión y con la actualización 1.21, USA o Europa "
+    if (changed) {
+        a.game.Set("aspect_ratio", mode);
+        a.game.Set("widescreen_layout", mode == "21x9" || mode == "32x9" ? mode : "off");
+        if (mode == "21x9" || mode == "32x9") a.game.Set("widescreen_output", a.game.Get("aspect_output"));
+        SaveGameIni();
+    }
+    if (mode != "16x10") ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
         "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
-        "Corrected menus, backgrounds and a centered HUD. Offline only, with the 1.21 update, USA or Europe "
+        "Corrected menus, backgrounds and a centered HUD. Online or offline, with the 1.21 update, USA or Europe "
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
 }
 
@@ -2657,6 +3082,21 @@ void SettingsTab() {
                                       "Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings."));
 
     ImGui::SeparatorText(T("Rendimiento", "Performance"));
+    {
+        // renderer=shadps4|native (bbport.ini; run.py sets the native renderer up and builds its
+        // shaders from the player's game the first time)
+        static constexpr Choice kRenderer[] = {{"Vulkan (shadPS4)", "Vulkan (shadPS4)", "shadps4"},
+                                               {"Vulkan nativo (experimental)", "Native Vulkan (experimental)", "native"}};
+        if (GameChoiceCombo(T("Motor gráfico", "Graphics engine"), "renderer", kRenderer, "shadps4", 16.0f)) SaveGameIni();
+        HelpMarker(T("Vulkan (shadPS4) es el motor de siempre. El nativo dibuja el juego directamente en Vulkan, sin la "
+                     "emulación de la GPU de PS4: más FPS y menos tirones, pero es experimental. La primera vez prepara "
+                     "sus shaders a partir de tu copia del juego (unos minutos). Con el nativo no hay FSR 3 ni DLSS "
+                     "(FSR 1 sí). Si algo va mal, vuelve a Vulkan (shadPS4).",
+                     "Vulkan (shadPS4) is the usual engine. The native one draws the game straight with Vulkan, without "
+                     "emulating the PS4's GPU: more FPS and fewer hitches, but it is experimental. The first time it "
+                     "builds its shaders from your copy of the game (a few minutes). The native engine has no FSR 3 or "
+                     "DLSS (FSR 1 works). If something goes wrong, go back to Vulkan (shadPS4)."));
+    }
     {
         int limit = a.game.Int("fps_limit", 60);
         auto name = [](int v) -> std::string {
@@ -2692,36 +3132,60 @@ void SettingsTab() {
         ImGui::SameLine();
         ImGui::TextColored(kGrey, "%s", T("(la decide la calidad de DLSS)", "(set by the DLSS quality)"));
     }
-    WidescreenSettings();
+    AspectRatioSettings();
+    GameFlag("skip_intro", T("Saltar los vídeos de inicio", "Skip intro videos"), false,
+             T("Sin los logos de Activision y Beenox al arrancar el juego.",
+               "Skips the Activision and Beenox logo videos when the game starts."));
     GameFlag("msaa", T("MSAA del juego (2x)", "Game MSAA (2x)"), false,
-             T("El antialiasing 2x de la PS4. Desactivado por defecto: en PC dibuja líneas punteadas en el "
-               "cielo y en los rayos de luz. A resoluciones altas o con FSR/DLSS casi no se nota. "
-               "Requiere reiniciar.",
-               "The PS4's 2x anti-aliasing. Off by default: on PC it draws dotted lines in the sky and "
-               "in light shafts. At high internal resolutions or with FSR/DLSS it is barely missed. "
+             T("El antialiasing 2x de la PS4: bordes más limpios en la vegetación. En NVIDIA ya no dibuja "
+               "líneas punteadas en el cielo; en otras gráficas puede que sí. Cuesta algo de "
+               "rendimiento en gráficas modestas. Requiere reiniciar.",
+               "The PS4's 2x anti-aliasing: cleaner foliage edges. On NVIDIA it no longer draws dotted "
+               "lines in the sky; on other GPUs it may. Costs some frames on modest GPUs. "
                "Needs a restart."));
     {
-        // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time.
-        static constexpr Choice kTemporal[] = {{"Desactivado", "Off", "off"},
-                                               {"AMD FSR 1", "AMD FSR 1", "fsr1"},
-                                               {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
-                                               {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"},
-                                               {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"}};
-        if (GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporal, temporal.c_str(), 16.0f)) {
+        // temporal=off|fsr1|fsr3|dlss|fsr4 (bbport.ini): one upscaler at a time. FSR 4 runs with its
+        // model files (Fsr4FilesPresent); without them the line below says what is missing.
+        static constexpr Choice kTemporalFsr4[] = {{"Desactivado", "Off", "off"},
+                                                   {"AMD FSR 1", "AMD FSR 1", "fsr1"},
+                                                   {"AMD FSR 3 (experimental)", "AMD FSR 3 (experimental)", "fsr3"},
+                                                   {"NVIDIA DLSS (experimental)", "NVIDIA DLSS (experimental)", "dlss"},
+                                                   {"AMD FSR 4 (experimental)", "AMD FSR 4 (experimental)", "fsr4"}};
+        static constexpr Choice kTemporalNative[] = {{"Desactivado", "Off", "off"},
+                                                     {"AMD FSR 1", "AMD FSR 1", "fsr1"}};
+        const bool native = a.game.Get("renderer") == "native";
+        const bool fsr4 = Fsr4FilesPresent();
+        const bool picked = native ? GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalNative,
+                                                     temporal == "off" ? "off" : "fsr1", 16.0f)
+                                   : GameChoiceCombo(T("Escalado", "Upscaling"), "temporal", kTemporalFsr4,
+                                                     temporal.c_str(), 16.0f);
+        if (picked) {
             a.game.Erase("fsr1");
             a.game.Erase("fsr3");
             SaveGameIni();
         }
+        if (native && (temporal == "fsr3" || temporal == "dlss" || temporal == "fsr4")) {
+            ImGui::TextColored(kGrey, "%s", T("FSR 3, FSR 4 y DLSS no funcionan con el motor nativo: se usa FSR 1.",
+                                              "FSR 3, FSR 4 and DLSS do not work with the native engine: FSR 1 is used."));
+        } else if (temporal == "fsr4" && !fsr4) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 34.0f);
+            ImGui::TextColored(kGrey, "%s", T("FSR 4 necesita sus archivos, que no vienen con el juego: pon la carpeta "
+                                              "fsr4_shaders junto al launcher. Mientras falten, se usa FSR 3. También "
+                                              "necesita una gráfica con soporte INT8.",
+                                              "FSR 4 needs its files, which do not come with the game: put the "
+                                              "fsr4_shaders folder next to the launcher. While they are missing, FSR 3 "
+                                              "is used. It also needs a GPU with INT8 support."));
+            ImGui::PopTextWrapPos();
+        }
         HelpMarker(T("FSR 1 agranda una escena más pequeña con bordes más nítidos que el estirado simple del juego. "
                      "FSR 3, FSR 4 y DLSS reconstruyen el detalle a lo largo de varios cuadros con la profundidad y el movimiento "
                      "del juego, y a la misma resolución también suavizan los bordes. DLSS necesita una tarjeta NVIDIA "
-                     "RTX (si no, se usa FSR 3); FSR 4 necesita soporte INT8 y sus modelos (si no, se usa FSR 3). "
-                     "Experimentales: si ves estelas o parpadeos, cambia a FSR 1.",
-                     "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. FSR 3, FSR 4 and DLSS "
+                     "RTX y FSR 4 una gráfica con soporte INT8 y sus archivos (si no, se usa FSR 3). Experimentales: "
+                     "si ves estelas o parpadeos, cambia a FSR 1.",
+                     "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. FSR 3 and DLSS "
                      "rebuild detail over several frames from the game's depth and motion, and smooth edges even at the "
-                     "same resolution. DLSS needs an NVIDIA RTX card (FSR 3 runs otherwise); FSR 4 needs INT8 support "
-                     "and its model files (FSR 3 runs otherwise). Experimental: switch to "
-                     "FSR 1 if you see trails or shimmering."));
+                     "same resolution. DLSS needs an NVIDIA RTX card and FSR 4 a GPU with INT8 support and its files "
+                     "(FSR 3 runs otherwise). Experimental: switch to FSR 1 if you see trails or shimmering."));
     }
     if (temporal == "dlss") {
         static constexpr Choice kQuality[] = {
@@ -2750,10 +3214,10 @@ void SettingsTab() {
                      "Transformer: NVIDIA's current model (DLSS 4), sharper and steadier, a little heavier. CNN: the "
                      "older model (preset E), lighter; NVIDIA marks it deprecated."));
     }
-    if (temporal == "fsr3") {
+    if (temporal == "fsr3" || temporal == "fsr4") {
         float sharp = float(std::atof(a.game.Get("fsr3_sharpness", "0.30").c_str()));
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-        if (ImGui::SliderFloat(T("Nitidez de FSR 3", "FSR 3 sharpness"), &sharp, 0.0f, 1.0f, "%.2f")) {
+        if (ImGui::SliderFloat(T("Nitidez de FSR", "FSR sharpness"), &sharp, 0.0f, 1.0f, "%.2f")) {
             char text[16];
             std::snprintf(text, sizeof text, "%.2f", sharp);
             a.game.Set("fsr3_sharpness", text);
@@ -2764,6 +3228,13 @@ void SettingsTab() {
     GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
              T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
     GameFlag("show_fps", T("Contador de FPS en la esquina", "FPS counter in the corner"), false);
+    GameFlag("show_ping", T("Contador de ping en la esquina", "Ping counter in the corner"), false,
+             T("En una sala online, el ping de cada jugador en ms, debajo del contador de FPS. También en el menú "
+               "del juego (Insert o L3+R3), pestaña Sala.",
+               "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
+               "(Insert or L3+R3), Room tab."));
+    GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
+             PerfReportsText());
     {
         std::scoped_lock lock{a.mutex};
         const std::string current = a.launcher.Get("display");
@@ -2785,6 +3256,7 @@ void SettingsTab() {
             ImGui::EndCombo();
         }
     }
+    GpuCombo();
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
     ChoiceCombo(T("Presentación", "Presentation"), "present_mode", kPresentModes, "Mailbox");
     {
@@ -2898,6 +3370,27 @@ void SettingsTab() {
                      "the controller stays player 1 and the keyboard plays player 2 (Space is Cross). If you play on "
                      "the keyboard alone, leave it on Player 1. The in-game menu (Insert or L3+R3) changes it too."));
     }
+    // bbport.ini button_prompts (scripts/button_prompts.py): the buttons the game shows.
+    {
+        static constexpr Choice kButtonPrompts[] = {
+            {"PlayStation", "PlayStation", "playstation"},
+            {"Xbox", "Xbox", "xbox"},
+        };
+        if (GameChoiceCombo(T("Iconos de botones", "Button prompts"), "button_prompts", kButtonPrompts, "playstation", 12.0f))
+            SaveGameIni();
+        HelpMarker(T("Los botones que muestra el juego en menús y avisos. Xbox: A, B, X, Y, LB, RB, LT, RT y View. "
+                     "Se aplica al pulsar Jugar.",
+                     "The buttons the game shows in menus and prompts. Xbox: A, B, X, Y, LB, RB, LT, RT and View. "
+                     "Applies when you press Play."));
+    }
+    GameFlag("split_auto", T("Pantalla dividida: asignar los mandos automáticamente", "Split screen: assign controllers automatically"),
+             true,
+             T("Para jugar de 2 a 4 con varios mandos: cada mando que conectes es el siguiente jugador (el primero, el "
+               "jugador 1). Desactivado, una persona puede cambiar de mando cuando quiera, y los mandos de los jugadores "
+               "2-4 se eligen en el menú del juego (Insert o L3+R3), Controllers.",
+               "For 2 to 4 players with several controllers: each controller you connect is the next player (the first "
+               "one, player 1). Off, one person can switch controllers at will, and players 2-4's controllers are chosen "
+               "in the in-game menu (Insert or L3+R3), Controllers."));
     ImGui::TextColored(kGrey, "%s", T("Más mandos para la pantalla dividida: menú del juego (Insert o L3+R3), Controllers.",
                                       "More controllers for split screen: in-game menu (Insert or L3+R3), Controllers."));
 
@@ -2988,7 +3481,8 @@ void StartDiscordLink(DiscordLinkMode mode) {
             } else {
                 const std::string body =
                     HttpRequest(server, L"POST", L"/ryunet/discord/link",
-                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000);
+                                form("nick", nick) + "&" + form("code", auth.code) + "&" + form("redirect_uri", auth.redirect_uri), 25000,
+                                true);
                 const std::string status = JsonField(body, "status"), account = JsonField(body, "discord");
                 if (status == "linked") {
                     error = false;
@@ -3226,7 +3720,7 @@ void NatTypeSection(const std::string& server) {
                                    "3074 to this PC helps."));
         break;
     case NatCheck::Type::Unknown:
-        ImGui::TextColored(kGrey, "%s",
+        ImGui::TextColored(result.error == "server" ? kRed : kGrey, "%s",
                            result.error == "server" ? T("El servidor no respondió (¿está bien escrito? ¿UDP 3074 bloqueado?).",
                                                         "The server did not answer (is it spelled right? UDP 3074 blocked?).")
                            : result.error == "dns" ? T("No se encontró el servidor.", "The server was not found.")
@@ -3234,6 +3728,20 @@ void NatTypeSection(const std::string& server) {
                                                         "Could not compare (the STUN server did not answer).")
                                                     : T("No se pudo comprobar.", "Could not check."));
         break;
+    }
+    if (result.replies_blocked || result.error == "server") {
+        ImGui::PushStyleColor(ImGuiCol_Text, kRed);
+        ImGui::TextWrapped("%s", T("Tu red bloquea las respuestas del servidor (UDP 3074): el juego dirá \"Failed to initialize "
+                                   "network\" al entrar en Online. Permite el launcher y sacredfire.exe en el Firewall de "
+                                   "Windows (redes privadas y públicas), revisa la protección de red del antivirus y las VPN, "
+                                   "reinicia el router o prueba otra red (los datos del móvil). No hace falta abrir puertos "
+                                   "en el router.",
+                                   "Your network blocks the server's replies (UDP 3074): the game will say \"Failed to "
+                                   "initialize network\" when you enter Online. Allow the launcher and sacredfire.exe in "
+                                   "Windows Firewall (private and public networks), check your antivirus' network protection "
+                                   "and any VPN, restart your router or try another network (a phone hotspot). You don't need "
+                                   "to forward ports on your router."));
+        ImGui::PopStyleColor();
     }
 }
 
@@ -3313,13 +3821,10 @@ void OnlineTab() {
             DiscordAccountSection();
         }
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
-        if (ImGui::InputText(T("Amigos (Friends)", "Friends"), a.online_friends_buf, sizeof(a.online_friends_buf))) {
-            a.game.Set("online_friends", a.online_friends_buf);
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
-        HelpMarker(T("Lista de amigos para Partidas Privadas, separados por comas (ejemplo: ESDRONIX,Amigo2).",
-                     "List of friends for Private Matches, separated by commas (example: ESDRONIX,Friend2)."));
+        // Friends: the in-game menu's Friends tab (Insert / L3+R3) finds, adds and invites them;
+        // the names of the old Friends field (online_friends) get friend requests once.
+        ImGui::TextColored(kGrey, "%s", T("Amigos: dentro del juego, menú (Insert / L3+R3) > Amigos.",
+                                          "Friends: in the game, menu (Insert / L3+R3) > Friends."));
 
         // Which Pit Stop items (characters, skins, karts) count as yours online: the server's,
         // bought with coins and tied to the nickname, or the save's (run.py sends it at login).
@@ -3334,7 +3839,7 @@ void OnlineTab() {
                      "queda guardado en el servidor, ligado a tu apodo.",
                      "You earn it by playing: races give coins and you buy in the Pit Stop. What you buy is kept on "
                      "the server, tied to your nickname."));
-        if (ImGui::RadioButton(T("De mi partida guardada (100%)", "From my save (100%)"), from_save)) {
+        if (ImGui::RadioButton(T("Progresión de guardado local", "Local save progress"), from_save)) {
             a.game.Set("online_inventory", "save");
             SaveGameIni();
         }
@@ -3346,6 +3851,19 @@ void OnlineTab() {
 
         ImGui::EndDisabled();
     }
+
+    // The rules of the online, and where to report and appeal.
+    ImGui::SeparatorText(T("Reglas del online", "Online rules"));
+    for (const char* rule : {T("Nada de trampas: hacks, trainers, modificaciones de velocidad u objetos, ni tiempos falsos en los récords. Arruinan la partida de todos.", "No cheating: hacks, trainers, speed or item modifications, or fake leaderboard times. They ruin the game for everyone."), T("Respeta a los demás: sin apodos ofensivos, insultos ni acoso.", "Respect others: no offensive nicknames, insults or harassment."), T("No sabotees partidas ni abandones a propósito para molestar.", "Do not sabotage races or quit on purpose to annoy others."), T("Usa tu propio apodo: no te hagas pasar por otra persona.", "Use your own nickname: do not impersonate anyone."), T("¿Ves a alguien haciendo trampas? Repórtalo en el juego: menú (Insert / L3+R3) > Amigos > Reportar jugador.", "See someone cheating? Report them in the game: menu (Insert / L3+R3) > Friends > Report a player.")}) {
+        ImGui::Bullet();
+        ImGui::TextWrapped("%s", rule);
+    }
+    ImGui::TextColored(kYellow, "%s", T("Romper las reglas puede costarte tus récords y un ban del online, temporal o permanente, también por IP.", "Breaking the rules can cost you your records and a ban from online play, temporary or permanent, also by IP."));
+    CommunityDiscordLine(T("Errores, dudas o apelar un baneo: nuestro Discord", "Bugs, questions or a ban appeal: our Discord"));
+    // Record validation now; ranked play with ranks and MMR, tied to the server, later.
+    ImGui::TextColored(kGrey, "%s", T("Crash Team Rank: valida tus récords (próximamente, competitivo con rangos y MMR)", "Crash Team Rank: validate your records (ranked play with MMR coming)"));
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Abrir página", "Open page"))) OpenInShell(L"https://crashteamrank.vercel.app");
 
     ImGui::SeparatorText("Discord");
     LauncherFlag("discord_rpc", T("Mostrar actividad en Discord", "Show activity on Discord"), true,
@@ -3401,102 +3919,525 @@ void OnlineTab() {
     }
 }
 
-void PatchesTab() {
+std::string PackagePatchId(const PatchInfo& patch) {
+    const std::string prefix = "OCTR-Mod-Library.xml/Mod: ";
+    return patch.key.rfind(prefix, 0) == 0 ? patch.key.substr(prefix.size()) : std::string();
+}
+
+bool ModEnableToggle(bool& on) {
+    const ImVec2 size{46.0f, 24.0f};
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+    const bool changed = ImGui::Button("##mod_enabled", size);
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    if (changed) on = !on;
+    const ImVec2 p = ImGui::GetItemRectMin();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImU32 track = ImGui::GetColorU32(on ? ImVec4(0.19f, 0.77f, 0.97f, 1.0f)
+                                           : ImVec4(0.23f, 0.31f, 0.46f, 1.0f));
+    draw->AddRectFilled(p, {p.x + size.x, p.y + size.y}, track, size.y * 0.5f);
+    draw->AddCircleFilled({p.x + (on ? size.x - 12.0f : 12.0f), p.y + 12.0f}, 9.0f,
+                          ImGui::GetColorU32(on ? ImVec4(0.04f, 0.13f, 0.27f, 1) : ImVec4(0.75f, 0.82f, 0.94f, 1)));
+    if (ImGui::IsItemFocused()) draw->AddRect({p.x - 2, p.y - 2}, {p.x + size.x + 2, p.y + size.y + 2},
+                                             ImGui::GetColorU32(ImGuiCol_Text), 14.0f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", on ? T("Desactivar mod", "Disable mod")
+                                                                       : T("Activar mod", "Enable mod"));
+    return changed;
+}
+
+void ImportMods(const std::vector<fs::path>& inputs) {
     App& a = g_app;
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(kGrey, "%s", T("Se aplican al iniciar el juego (o con \"Apply and restart\" del menú del juego).",
-                                      "Applied when the game starts (or with the in-game menu's \"Apply and restart\")."));
-    ImGui::PopTextWrapPos();
-    const bool neo = a.launcher.Flag("neo", false);
-    if (a.patches.empty()) {
-        ImGui::TextColored(kYellow, "%s", T("No hay parches en la carpeta patches.", "No patches in the patches folder."));
-    }
-    // Only the patches of the detected edition (the other's are for another executable).
-    const std::string game_title = Narrow(GameTitle());
-    ImGui::TextColored(kGreen, "%s",
-                       Format(T("Tu juego: versión %s (%s). Se muestran sus parches.",
-                                "Your game: %s edition (%s). Its patches are shown."),
-                              RegionOf(game_title), game_title).c_str());
-    for (const auto& p : a.patches) {
-        if (!p.title.empty() && p.title != game_title) continue;
-        // The online key patch follows the Online tab's switch (run.py turns it on).
-        if (p.key.find("Online: custom Demonware key") != std::string::npos) continue;
-        ImGui::PushID(p.key.c_str());
-        bool on;
-        if (p.ini_key) {
-            on = a.game.Flag(p.ini_key, false);
-        } else {
-            const bool listed_on = std::find(a.patch_enabled.begin(), a.patch_enabled.end(), p.key) != a.patch_enabled.end();
-            const bool listed_off = std::find(a.patch_disabled.begin(), a.patch_disabled.end(), p.key) != a.patch_disabled.end();
-            on = listed_on || (p.default_on && !listed_off);
-        }
-        const bool needs_neo = p.ini_key && std::strcmp(p.ini_key, "patch_pro_1080p") == 0;
-        if (needs_neo) {  // replaced by Settings > Internal resolution
-            ImGui::PopID();
+    size_t added = 0;
+    for (const auto& source : inputs) {
+        std::error_code ec;
+        std::wstring extension = source.extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+        if (!fs::is_directory(source) && extension != L".pak" && extension != L".zip" && extension != L".xml") {
+            a.notice = T("Añade archivos .pak, .zip, .xml o una carpeta.", "Add .pak, .zip, .xml files or a folder.");
             continue;
         }
-        // render_res decides the 1080p Pro patch (Settings > Internal resolution).
-        if (needs_neo) on = EffectiveRenderRes() == "1080" && neo;
-        ImGui::BeginDisabled(needs_neo);
-        const char* region = RegionOf(p.title);
-        const std::string label = *region ? p.name + " [" + region + "]" : p.name;
-        if (ImGui::Checkbox(label.c_str(), &on)) {
-            if (p.ini_key) {
-                a.game.Set(p.ini_key, on ? "1" : "0");
-                SaveGameIni();
-            } else {
-                auto drop = [&](std::vector<std::string>& v) { v.erase(std::remove(v.begin(), v.end(), p.key), v.end()); };
-                drop(a.patch_enabled);
-                drop(a.patch_disabled);
-                if (on) a.patch_enabled.push_back(p.key);
-                else if (p.default_on) a.patch_disabled.push_back(p.key);
-                WritePatchConfig(a.patch_enabled, a.patch_disabled);
+        const fs::path destination = a.root / L"mods" / source.filename();
+        fs::create_directories(a.root / L"mods", ec);
+        if (fs::is_directory(source)) {
+            // The mods folder itself, or one holding it (the port's), would be copied into
+            // itself without end (issue #70); one already inside it is in the library.
+            const auto inside = [](const fs::path& path, const fs::path& folder) {
+                const fs::path relative = path.lexically_relative(folder);
+                return !relative.empty() && *relative.begin() != L"..";
+            };
+            std::error_code e1, e2;
+            const fs::path real = fs::weakly_canonical(source, e1), mods = fs::weakly_canonical(a.root / L"mods", e2);
+            if (!e1 && !e2 && inside(mods, real)) {
+                a.notice = T("Esa es la carpeta de mods (o la contiene): añade la carpeta del propio mod.",
+                             "That is the mods folder (or holds it): add the mod's own folder.");
+                continue;
+            }
+            if (!e1 && !e2 && inside(real, mods)) {
+                a.notice = T("Esa carpeta ya está dentro de la carpeta de mods.", "That folder is already in the mods folder.");
+                continue;
             }
         }
-        ImGui::EndDisabled();
-        if (!p.author.empty()) {
-            ImGui::SameLine();
-            ImGui::TextColored(kGrey, "%s %s%s%s", T("de", "by"), p.author.c_str(), p.version.empty() ? "" : "  v",
-                               p.version.c_str());
+        if (fs::exists(destination)) {
+            a.notice = T("Ya existe un mod con ese nombre. No se ha sobrescrito.",
+                         "A mod with that filename already exists. It was not overwritten.");
+            continue;
         }
-        ImGui::Indent();
-        ImGui::PushTextWrapPos(0.0f);
-        if (needs_neo) ImGui::TextColored(kGrey, "%s", T("Lo controla Ajustes > Resolución interna (1080p con el modo PS4 Pro).",
-                                                          "Controlled by Settings > Internal resolution (1080p with PS4 Pro mode)."));
-        if (p.ini_key && std::strcmp(p.ini_key, "patch_unlock_all") == 0) {
-            ImGui::TextColored(kYellow, "%s",
-                               T("Desbloquea lo que el juego da al cumplir sus condiciones de desbloqueo, con el mismo "
-                                 "interruptor que usaban las demos de feria (E3/PAX). El autor recomienda copiar antes tu "
-                                 "partida (pestaña Guardados). Se aplica al iniciar el juego.",
-                                 "Unlocks what the game grants when its unlock conditions are met, with the same switch "
-                                 "the trade-show demos (E3/PAX) used. The author advises backing up your save first "
-                                 "(Saves tab). Applied when the game starts."));
-        }
-        if (!p.note.empty()) ImGui::TextColored(kGrey, "%s", p.note.c_str());
-        ImGui::TextColored(kGrey, "%s", p.key.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::Unindent();
-        ImGui::PopID();
+        if (fs::is_directory(source)) fs::copy(source, destination, fs::copy_options::recursive, ec);
+        else fs::copy_file(source, destination, fs::copy_options::none, ec);
+        if (ec) {
+            a.notice = T("No se pudo importar el mod. Revisa el registro.", "Could not import the mod. Check the log.");
+            AddLog("Mod import: " + ec.message());
+        } else ++added;
     }
+    if (added) {
+        a.patches = LoadPatches();
+        ReadPatchConfig(a.patch_enabled, a.patch_disabled);
+        a.notice = T("Mods añadidos. Revisa la lista y actívalos para jugar.",
+                     "Mods added. Review the list and enable them to play.");
+    }
+}
 
-    ImGui::SeparatorText(T("Añadir parches", "Add patches"));
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextUnformatted(T("Copia archivos .xml de parches en formato shadPS4 (como los de PS-Game-Patch o GoldHEN) en la "
-                             "carpeta patches y pulsa Recargar. Solo aparecen los que son para CUSA13795 versión 01.21.",
-                             "Copy patch .xml files in shadPS4 format (like PS-Game-Patch's or GoldHEN's) into the patches "
-                             "folder and press Reload. Only those for CUSA13795 version 01.21 are listed."));
-    ImGui::TextColored(kGrey, "%s", T("Para tener el juego desbloqueado: activa Unlock Everything (arriba) o importa una partida "
-                                      "al 100% en la pestaña Guardados.",
-                                      "To have the game unlocked: turn on Unlock Everything (above) or import a 100% save in "
-                                      "the Saves tab."));
-    ImGui::PopTextWrapPos();
-    if (ImGui::Button(T("Abrir la carpeta de parches", "Open the patches folder"))) {
-        std::error_code ec;
-        fs::create_directories(a.root / L"patches", ec);
-        OpenInShell(a.root / L"patches");
+
+bool ModIsOn(const PatchInfo& p) {
+    const App& a = g_app;
+    if (p.ini_key) return a.game.Flag(p.ini_key, false);
+    const bool enabled = std::find(a.patch_enabled.begin(), a.patch_enabled.end(), p.key) != a.patch_enabled.end();
+    const bool disabled = std::find(a.patch_disabled.begin(), a.patch_disabled.end(), p.key) != a.patch_disabled.end();
+    return enabled || (p.default_on && !disabled);
+}
+
+bool VisibleMod(const PatchInfo& p) {
+    if (!p.title.empty() && p.title != Narrow(GameTitle())) return false;
+    if (p.key.find("Online: custom Demonware key") != std::string::npos) return false;
+    return !p.ini_key || std::strcmp(p.ini_key, "patch_pro_1080p") != 0;
+}
+
+void SetModOn(const PatchInfo& p, bool on) {
+    App& a = g_app;
+    if (p.ini_key) { a.game.Set(p.ini_key, on ? "1" : "0"); SaveGameIni(); return; }
+    auto drop = [&](std::vector<std::string>& v) { v.erase(std::remove(v.begin(), v.end(), p.key), v.end()); };
+    drop(a.patch_enabled); drop(a.patch_disabled);
+    if (on) a.patch_enabled.push_back(p.key);
+    else a.patch_disabled.push_back(p.key);
+    WritePatchConfig(a.patch_enabled, a.patch_disabled);
+}
+
+void ModHeading(const char* title) {
+    if (g_font_heading) ImGui::PushFont(g_font_heading, ImGui::GetStyle().FontSizeBase * 1.12f);
+    ImGui::TextUnformatted(title);
+    if (g_font_heading) ImGui::PopFont();
+}
+
+void ModSection(const char* title, bool builtin) {
+    int total = 0, on = 0;
+    for (const auto& p : g_app.patches) if (VisibleMod(p) && (p.ini_key != nullptr) == builtin) {
+        ++total; if (ModIsOn(p)) ++on;
+    }
+    ModHeading(title); ImGui::SameLine(0, 12);
+    ImGui::TextColored(ImVec4(.65f,.72f,.85f,1), T("%d de %d activos", "%d of %d on"),on,total);
+}
+
+struct ModConfigurationDraft {
+    PatchInfo mod;
+    std::string error;
+    bool open=false,advanced=false,ready=false;
+    std::future<Captured> pending;
+};
+ModConfigurationDraft g_mod_configuration;
+
+void ModConfigurationDialog() {
+    auto& draft=g_mod_configuration;
+    const char* title=T("Configurar mod","Mod configuration");
+    if(draft.open) {
+        draft.error.clear();draft.ready=false;
+        const std::string ident=PackagePatchId(draft.mod);
+        // Opening a dialog only reads the existing catalog. Full integrity and
+        // source-hash checks remain in Save; add/reload refreshes the library.
+        g_app.patches=LoadPatches(false);
+        const auto latest=std::find_if(g_app.patches.begin(),g_app.patches.end(),[&](const auto& p){return PackagePatchId(p)==ident;});
+        if(latest!=g_app.patches.end()) {draft.mod=*latest;draft.ready=true;}
+        else draft.error=T("El mod ya no está disponible.","This mod is no longer available.");
+        ImGui::OpenPopup(title);draft.open=false;
+    }
+    const auto* viewport=ImGui::GetMainViewport();
+    const ImVec2 dialog_size{std::min(760.f,viewport->WorkSize.x-48.f),std::min(520.f,viewport->WorkSize.y-48.f)};
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x+viewport->WorkSize.x*.5f,
+                                 viewport->WorkPos.y+viewport->WorkSize.y*.5f),ImGuiCond_Always,ImVec2(.5f,.5f));
+    ImGui::SetNextWindowSize(dialog_size,ImGuiCond_Always);
+    if(!ImGui::BeginPopupModal(title,nullptr,ImGuiWindowFlags_NoResize))return;
+    if(draft.pending.valid()) {
+        if(draft.pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready) {
+            ImGui::TextUnformatted(T("Guardando...","Saving..."));
+            ImGui::EndPopup();return;
+        }
+        const Captured r=draft.pending.get();
+        if(!r.output.empty())AddLog(r.output);
+        const bool success=r.started && r.code==0;
+        if(!success) {
+            draft.error=T("No se pudieron guardar las opciones. Revisa el registro.","Could not update mod options. Check the log.");
+            const auto reason=r.output.rfind("ValueError: ");
+            if(reason!=std::string::npos) {
+                draft.error=r.output.substr(reason+12);
+                const auto end=draft.error.find_first_of("\r\n");
+                if(end!=std::string::npos)draft.error.resize(end);
+            }
+        } else {
+            g_app.patches=LoadPatches(false);
+            g_app.notice=T("Opciones guardadas. Se aplican al iniciar el juego.","Mod options saved. Applied when you start the game.");
+            ImGui::CloseCurrentPopup();ImGui::EndPopup();return;
+        }
+    }
+    ImGui::TextWrapped("%s",draft.mod.mod_name.c_str());
+    ImGui::Separator();
+    ImGui::BeginDisabled(g_app.game_running || !g_app.python || !draft.ready);
+    const auto advanced_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return o.advanced;});
+    const auto grid_count=std::count_if(draft.mod.mod_options.begin(),draft.mod.mod_options.end(),[](const auto& o){return !o.row.empty();});
+    const float footer=(draft.error.empty()?62.f:110.f)+(advanced_count?45.f:0.f)+
+                       (draft.advanced?40.f*static_cast<float>(advanced_count):0.f);
+    const float options_height=std::max(80.f,ImGui::GetContentRegionAvail().y-footer);
+    ImGui::BeginChild("options",ImVec2(0,options_height));
+    auto render_option=[&](ModOption& option) {
+        ImGui::PushID(option.id.c_str());
+        if(option.type=="boolean") {
+            bool on=option.value=="true";
+            if(ImGui::Checkbox("##enabled",&on))option.value=on?"true":"false";
+            ImGui::SameLine();ImGui::TextUnformatted(option.label.c_str());
+        } else {
+            ImGui::TextUnformatted(option.label.c_str());
+            std::string preview=option.value;
+            for(const auto& [value,label]:option.choices)if(value==option.value)preview=label;
+            ImGui::SetNextItemWidth(-1);
+            if(ImGui::BeginCombo("##choice",preview.c_str())) {
+                for(const auto& [value,label]:option.choices) {
+                    bool selected=value==option.value;
+                    if(ImGui::Selectable(label.c_str(),selected))option.value=value;
+                    if(selected)ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        if(!option.description.empty())ImGui::TextWrapped("%s",option.description.c_str());
+        ImGui::Spacing();ImGui::PopID();
+    };
+    for(auto& option:draft.mod.mod_options)if(!option.advanced&&option.row.empty())render_option(option);
+    std::vector<std::string> rows,columns;
+    for(const auto& o:draft.mod.mod_options)if(!o.row.empty()) {
+        if(std::find(rows.begin(),rows.end(),o.row)==rows.end())rows.push_back(o.row);
+        if(std::find(columns.begin(),columns.end(),o.column)==columns.end())columns.push_back(o.column);
+    }
+    ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+    ImGui::PushStyleColor(ImGuiCol_TableBorderLight,ImGui::GetStyleColorVec4(ImGuiCol_Border));
+    ImGui::PushStyleColor(ImGuiCol_TableBorderStrong,ImGui::GetStyleColorVec4(ImGuiCol_Border));
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,ImVec2(10,8));
+    if(!rows.empty()&&ImGui::BeginTable("mod-pieces",static_cast<int>(columns.size()+1),ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersH)) {
+        ImGui::TableSetupColumn(T("Grupo","Group"),ImGuiTableColumnFlags_WidthStretch,1.3f);
+        for(const auto& column:columns)ImGui::TableSetupColumn(column.c_str());
+        ImGui::TableHeadersRow();
+        for(const auto& row:rows) {
+            ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::TextUnformatted(row.c_str());
+            for(const auto& column:columns) {
+                ImGui::TableNextColumn();
+                for(auto& o:draft.mod.mod_options)if(o.row==row&&o.column==column) {
+                    ImGui::PushID(o.id.c_str());bool on=o.value=="true";
+                    if(ImGui::Checkbox("##piece",&on))o.value=on?"true":"false";
+                    if(!o.description.empty()&&ImGui::IsItemHovered())ImGui::SetTooltip("%s",o.description.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar();ImGui::PopStyleColor(3);
+    if(advanced_count) {
+        draft.advanced=ImGui::CollapsingHeader(T("Opciones avanzadas","Advanced settings"));
+        if(draft.advanced)for(auto& option:draft.mod.mod_options)if(option.advanced)render_option(option);
+    }
+    ImGui::EndChild();
+    if(!draft.error.empty())ImGui::TextWrapped("%s",draft.error.c_str());
+    if(ImGui::Button(T("Restablecer valores","Reset to defaults")))
+        for(auto& option:draft.mod.mod_options)option.value=option.default_value;
+    ImGui::SameLine();
+    if(ImGui::Button(T("Guardar","Save"))) {
+        draft.error.clear();
+        const std::string ident=PackagePatchId(draft.mod);
+        const bool valid=!ident.empty() && std::all_of(ident.begin(),ident.end(),[](unsigned char c){return std::isalnum(c)||c=='-';});
+        if(valid && g_app.python) {
+            const auto& a=g_app;
+            std::wstring cmd=Quote(a.python->exe)+L" "+a.python->args+L"-X utf8 "+
+                Quote((a.root/L"scripts"/L"mod_packages.py").wstring())+L" --scan "+Quote(a.root.wstring())+
+                L" --configure "+Quote(Widen(ident))+L" --expected-sha "+Quote(Widen(draft.mod.mod_hash));
+            for(const auto& o:draft.mod.mod_options)cmd+=L" --option "+Quote(Widen(o.id+"="+o.value));
+            const auto exe=a.python->exe;
+            const auto root=a.root;
+            draft.pending=std::async(std::launch::async,[exe,cmd,root]{return RunCaptured(exe,cmd,root,120000);});
+        }
+    }
+    ImGui::EndDisabled();ImGui::SameLine();
+    if(ImGui::Button(T("Cancelar","Cancel")))ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+bool ModConfigureIcon() {
+    bool clicked=ImGui::Button("##configure",ImVec2(32,25));
+    const ImVec2 q=ImGui::GetItemRectMin();auto* d=ImGui::GetWindowDrawList();
+    const ImU32 ink=ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 c{q.x+16,q.y+12};
+    // Thin outline and the same button frame/ink as the adjacent trash icon.
+    const ImVec2 outline[]={{c.x-6,c.y+7},{c.x-8,c.y+5},{c.x-1,c.y-2},
+        {c.x-2,c.y-5},{c.x+1,c.y-8},{c.x+1,c.y-4},{c.x+4,c.y-2},
+        {c.x+7,c.y-4},{c.x+6,c.y+1},{c.x+3,c.y+3},{c.x,c.y+2}};
+    d->AddPolyline(outline,IM_ARRAYSIZE(outline),ink,1.0f,ImDrawFlags_Closed);
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",T("Configurar mod","Configure mod"));
+    return clicked;
+}
+
+bool ModCard(const PatchInfo& p) {
+    const bool package = !PackagePatchId(p).empty();
+    bool on = ModIsOn(p), remove = false;
+    ImGui::PushID(p.key.c_str());
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, on ? ImVec4(.075f,.19f,.38f,1) : ImVec4(.065f,.14f,.29f,1));
+    ImGui::PushStyleColor(ImGuiCol_Border, on ? ImVec4(.12f,.36f,.57f,1) : ImVec4(.12f,.21f,.36f,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 11);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(17,10));
+    ImGui::BeginChild("card", ImVec2(0,0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginDisabled(g_app.game_running || (package && !g_app.python));
+    if (ModEnableToggle(on)) SetModOn(p,on);
+    ImGui::EndDisabled();
+    ImGui::SameLine(0,18);
+    const float text_x = ImGui::GetCursorPosX();
+    const float top = ImGui::GetCursorPosY();
+    const float right = ImGui::GetWindowContentRegionMax().x;
+    static std::set<std::string> expanded;
+    const bool details = expanded.count(p.key) != 0;
+    const float action_width = package ? (p.mod_options.empty()?76.0f:112.0f) : 32.0f;
+    // A separate text child wraps long names/metadata without colliding with actions.
+    ImGui::BeginChild("summary", ImVec2(std::max(80.0f,right-text_x-action_width-12),0), ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (g_font_heading) ImGui::PushFont(g_font_heading, 0);
+    ImGui::TextWrapped("%s", package ? p.mod_name.c_str() : p.name.c_str());
+    if (g_font_heading) ImGui::PopFont();
+    std::string meta;
+    const char* region = RegionOf(p.title);
+    if (*region && !package) meta = std::string(region) + "   ";
+    meta += p.author;
+    if (!p.version.empty()) meta += "  · v" + p.version;
+    if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize(meta.c_str()).x + 12) ImGui::SameLine(0,10);
+    ImGui::TextColored(ImVec4(.65f,.73f,.87f,1), "%s",meta.c_str());
+    const char* description = nullptr;
+    if (p.ini_key && std::strcmp(p.ini_key,"patch_60fps")==0)
+        description = T("Ejecuta el juego a 60 FPS. La versión 2.0 también elimina el vsync de doble búfer.",
+                        "Runs the game at 60 FPS. Version 2.0 also removes double-buffer vsync.");
+    if (p.ini_key && std::strcmp(p.ini_key,"patch_no_motion_blur")==0)
+        description = T("Desactiva el desenfoque de movimiento: el de la cámara y el de los objetos que se mueven (público, plantas).",
+                        "Turns off the motion blur: the camera's and that of moving objects (crowd, plants).");
+    const bool unlock = p.ini_key && std::strcmp(p.ini_key,"patch_unlock_all")==0;
+    if (unlock) description = T("Desbloquea el contenido que el juego concede al cumplir sus condiciones, con el interruptor de las demos E3/PAX.",
+                               "Unlocks what the game normally grants for meeting its unlock conditions, using the same switch as the E3/PAX demos.");
+    if (details && description) ImGui::TextWrapped("%s",description);
+    if (unlock && details) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(.20f,.23f,.30f,1));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(10,7));
+        ImGui::BeginChild("save_warning",ImVec2(0,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::TextColored(kYellow,"%s",T("Copia antes tu partida.","Back up your save first.")); ImGui::SameLine();
+        if (ImGui::TextLink(T("Abrir Guardados", "Open Saves tab"))) g_app.active_page=6;
+        ImGui::EndChild(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
+    }
+    if (details && package) {
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", p.mod_description.empty()
+            ? T("El creador no ha añadido una descripción.","The creator has not provided a description.")
+            : p.mod_description.c_str());
+        ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"mods/%s",p.mod_source.c_str());
+        if (!p.mod_versions.empty()) ImGui::TextWrapped("%s",p.mod_versions.c_str());
+    }
+    if (details && !package) {
+        ImGui::Spacing();
+        if (!p.note.empty()) ImGui::TextWrapped("%s",p.note.c_str());
+        ImGui::TextColored(ImVec4(.65f,.73f,.87f,1),"%s",p.key.c_str());
+    }
+    ImGui::EndChild();
+    const float end_y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPos(ImVec2(right-action_width,top));
+    if (package) {
+        ImGui::BeginDisabled(g_app.game_running || !g_app.python);
+        if (!p.mod_options.empty()) {
+            if(ModConfigureIcon()){g_mod_configuration.mod=p;g_mod_configuration.open=true;g_mod_configuration.advanced=false;}
+            ImGui::SameLine(0,4);
+        }
+        if (ImGui::Button("##remove",ImVec2(32,25))) remove=true;
+        const ImVec2 q=ImGui::GetItemRectMin();
+        const ImVec2 c{q.x+16,q.y+12};
+        auto* d=ImGui::GetWindowDrawList(); const ImU32 ink=ImGui::GetColorU32(ImGuiCol_Text);
+        d->AddRect({c.x-4,c.y-3},{c.x+4,c.y+6},ink,1);
+        d->AddLine({c.x-6,c.y-5},{c.x+6,c.y-5},ink);
+        d->AddLine({c.x-2,c.y-7},{c.x+2,c.y-7},ink);
+        d->AddLine({c.x-1,c.y-1},{c.x-1,c.y+4},ink);
+        d->AddLine({c.x+2,c.y-1},{c.x+2,c.y+4},ink);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",T("Quitar: se conserva una copia y las partidas.","Remove: keeps a recoverable copy and saves."));
+        ImGui::EndDisabled();
+    }
+    // Reserve the same top-right slot regardless of expansion or card height.
+    ImGui::SetCursorPos(ImVec2(right-32,top));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+    ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,ImVec4(0,0,0,0));
+    if (ImGui::Button("##details",ImVec2(32,25))) {
+        if (details) expanded.erase(p.key); else expanded.insert(p.key);
+    }
+    const bool hovered=ImGui::IsItemHovered();
+    if (hovered) ImGui::SetTooltip("%s",details ? T("Ocultar detalles","Hide details") : T("Mostrar detalles","Show details"));
+    const ImVec2 origin=ImGui::GetItemRectMin();
+    const ImVec2 center{origin.x+16,origin.y+12.5f};
+    ImGuiStorage* storage=ImGui::GetStateStorage();
+    const ImGuiID rotation_id=ImGui::GetID("chevron_rotation");
+    const float target=expanded.count(p.key) ? 3.14159265f : 0.0f;
+    float angle=storage->GetFloat(rotation_id,details ? 3.14159265f : 0.0f);
+    angle+=(target-angle)*std::min(1.0f,ImGui::GetIO().DeltaTime*20.0f);
+    storage->SetFloat(rotation_id,angle);
+    const auto rotated=[&](float x,float y) {
+        return ImVec2(center.x+x*std::cos(angle)-y*std::sin(angle),center.y+x*std::sin(angle)+y*std::cos(angle));
+    };
+    auto* draw=ImGui::GetWindowDrawList();
+    const ImU32 ink=ImGui::GetColorU32(hovered ? ImVec4(.85f,.95f,1,1) : ImVec4(.65f,.77f,.91f,1));
+    draw->AddLine(rotated(-5,-2.5f),rotated(0,2.5f),ink,1.8f);
+    draw->AddLine(rotated(0,2.5f),rotated(5,-2.5f),ink,1.8f);
+    ImGui::PopStyleColor(3); ImGui::PopStyleVar();
+    ImGui::SetCursorPosY(std::max(end_y,top+26));
+    ImGui::Dummy(ImVec2(0,0));
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2); ImGui::PopStyleColor(2); ImGui::PopID();
+    return remove;
+}
+
+bool ModActionIcon(const char* id, const char* tooltip, bool folder, float size) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0,0,0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,6);
+    const bool clicked=ImGui::Button(id,ImVec2(size,size));
+    ImGui::PopStyleVar(); ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s",tooltip);
+    const ImVec2 a=ImGui::GetItemRectMin();
+    const ImVec2 c{a.x+size*.5f,a.y+size*.5f};
+    const ImU32 ink=ImGui::GetColorU32(ImVec4(.70f,.80f,.94f,1));
+    ImDrawList* draw=ImGui::GetWindowDrawList();
+    if (folder) {
+        draw->PathLineTo({c.x-8,c.y-5}); draw->PathLineTo({c.x-2,c.y-5});
+        draw->PathLineTo({c.x,c.y-2}); draw->PathLineTo({c.x+8,c.y-2});
+        draw->PathLineTo({c.x+8,c.y+6}); draw->PathLineTo({c.x-8,c.y+6});
+        draw->PathStroke(ink,ImDrawFlags_Closed,1.5f);
+    } else {
+        draw->PathArcTo(c,7,.65f,6.0f,24); draw->PathStroke(ink,0,1.5f);
+        draw->AddLine({c.x+6.8f,c.y-2},{c.x+6.8f,c.y-8},ink,1.5f);
+        draw->AddLine({c.x+6.8f,c.y-2},{c.x+1,c.y-2},ink,1.5f);
+    }
+    return clicked;
+}
+
+void ModsTab() {
+    App& a = g_app;
+    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));
+    ModSection(T("Mods incluidos","Built-in mods"),true);
+    ImGui::Spacing();
+    for (const auto& p : a.patches) if (VisibleMod(p) && p.ini_key) ModCard(p);
+    ImGui::Dummy(ImVec2(0,14));
+    const float left=ImGui::GetCursorPosX();
+    const float right=ImGui::GetWindowContentRegionMax().x;
+    const float gap=ImGui::GetStyle().ItemSpacing.x;
+    const float icon_size=36.0f;
+    const float folder_width=ImGui::CalcTextSize(T("Añadir carpeta","Add folder")).x+24;
+    const float files_width=ImGui::CalcTextSize(T("+ Añadir archivos","+ Add files")).x+28;
+    const float toolbar_width=icon_size*2+folder_width+files_width+gap*3;
+    ImGui::BeginGroup();
+    ImGui::AlignTextToFramePadding();
+    ModSection(T("Tus mods y parches","Your mods & patches"),false);
+    ImGui::EndGroup();
+    const float heading_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
+    if (heading_end+24+toolbar_width<=right) ImGui::SameLine(right-toolbar_width);
+    else {
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(std::max(left,right-toolbar_width));
+    }
+    ImGui::BeginGroup();
+    ImGui::BeginDisabled(a.game_running || !a.python);
+    if (ModActionIcon("##reload_mods",T("Recargar mods","Reload mods"),false,icon_size)) {
+        a.patches=LoadPatches(); ReadPatchConfig(a.patch_enabled,a.patch_disabled);
     }
     ImGui::SameLine();
-    if (ImGui::Button(T("Recargar", "Reload"))) {
+    if (ModActionIcon("##open_mods",T("Abrir carpeta de mods","Open mods folder"),true,icon_size)) {
+        std::error_code ec; fs::create_directories(a.root/L"mods",ec); OpenInShell(a.root/L"mods");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("Añadir carpeta","Add folder"),ImVec2(folder_width,icon_size)))
+        if (const auto folder=PickFolder(a.hwnd,L"Add mod folder",fs::path())) ImportMods({*folder});
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.17f,.72f,.94f,1));
+    ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.02f,.10f,.20f,1));
+    if (ImGui::Button(T("+ Añadir archivos","+ Add files"),ImVec2(files_width,icon_size)))
+        ImportMods(PickFiles(a.hwnd,L"Add mods or patches",L"Mods (*.pak;*.zip;*.xml)",L"*.pak;*.zip;*.xml"));
+    ImGui::PopStyleColor(2); ImGui::EndDisabled();
+    ImGui::EndGroup();
+    ImGui::Spacing();
+    std::string remove_id, remove_hash;
+    for (const auto& p : a.patches) if (VisibleMod(p) && !p.ini_key) {
+        if (ModCard(p)) { remove_id=PackagePatchId(p); remove_hash=p.mod_hash; }
+    }
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0.015f,0.13f,0.32f,0.82f));
+    ImGui::PushStyleColor(ImGuiCol_Border,ImVec4(.18f,.29f,.44f,1));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,11);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(18,17));
+    ImGui::BeginChild("mod_drop_area",ImVec2(0,0),ImGuiChildFlags_Borders|ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysUseWindowPadding);
+    const auto centered = [](const char* text) {
+        const float available=ImGui::GetContentRegionAvail().x;
+        const float width=ImGui::CalcTextSize(text).x;
+        if (width<available) ImGui::SetCursorPosX(ImGui::GetCursorPosX()+(available-width)*.5f);
+        ImGui::TextWrapped("%s",text);
+    };
+    centered(T("Añade .pak, .zip, .xml o una carpeta con los botones de arriba.",
+               "Use the buttons above to add .pak, .zip or .xml files, or a folder."));
+    centered(T("Se copian a la carpeta mods junto al launcher.","They're copied into the mods folder next to the launcher."));
+    ImGui::Spacing();
+    const char* guide=T("Lee la guía de empaquetado","Read the packaging guide");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(guide).x)*.5f));
+    if (ImGui::TextLink(guide)) OpenInShell(a.root/L"docs"/L"mod-packaging.html");
+    // The game's page on GameBanana, where the community shares its mods.
+    const char* gamebanana=T("Buscar mods en GameBanana","Find mods on GameBanana");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(gamebanana).x)*.5f));
+    if (ImGui::TextLink(gamebanana)) OpenInShell(L"https://gamebanana.com/games/26138");
+    // The modding community's Discord server: help making and packaging mods.
+    const char* modding=T("Discord de modding (ayuda para crear mods)","Modding Discord (help making mods)");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.0f,(ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(modding).x)*.5f));
+    if (ImGui::TextLink(modding)) OpenInShell(L"https://discord.gg/434Rx9hq6T");
+    ImGui::EndChild(); ImGui::PopStyleVar(2); ImGui::PopStyleColor(2);
+    ModConfigurationDialog();
+    if (a.game_running) ImGui::TextColored(kYellow,"%s",T("Cierra el juego para cambiar mods.","Close the game to change mods."));
+    ImGui::PopStyleColor(2);
+    // Reload only after rendering: the loop's references must remain valid.
+    if (!remove_id.empty() && a.python) {
+        const bool valid_id = std::all_of(remove_id.begin(), remove_id.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        });
+        const bool valid_hash = remove_hash.size() == 64 && std::all_of(remove_hash.begin(), remove_hash.end(), [](unsigned char c) {
+            return (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9');
+        });
+        if (!valid_id || !valid_hash) {
+            a.notice = T("Los datos del mod no son válidos. Pulsa Recargar.", "Mod details are invalid. Press Reload.");
+            return;
+        }
+        const std::wstring cmd = Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " +
+            Quote((a.root / L"scripts" / L"mod_packages.py").wstring()) + L" --scan " + Quote(a.root.wstring()) +
+            L" --remove " + Quote(Widen(remove_id)) + L" --expected-sha " + Quote(Widen(remove_hash));
+        const Captured r = RunCaptured(a.python->exe, cmd, a.root, 120000);
+        if (!r.output.empty()) AddLog(r.output);
+        a.notice = r.started && r.code == 0 ? T("Mod quitado. El mod y las partidas se han conservado.",
+                                                                  "Mod removed. The mod and saves have been kept.")
+                                           : T("No se pudo quitar el mod. Revisa el registro y pulsa Recargar.",
+                                               "Could not remove the mod. Check the log and press Reload.");
         a.patches = LoadPatches();
         ReadPatchConfig(a.patch_enabled, a.patch_disabled);
     }
@@ -3857,6 +4798,92 @@ void NickPopup() {
     ImGui::EndPopup();
 }
 
+/// The anonymous performance diagnostic (bbport.ini perf_reports, scripts/perf_report.py): asked
+/// once, while it is neither 1 nor 0. A plain question, no alarm: what is sent and what is not.
+const char* PerfReportsText() {
+    return T("Al cerrar el juego, OCTR puede enviar un resumen anónimo de cómo le fue a tu PC: tarjeta "
+             "gráfica, procesador y memoria, los ajustes gráficos y los FPS de cada pista. Nada personal: ni "
+             "tu apodo, ni tus partidas, ni tus amigos, y tu IP no se guarda. Sirve para saber en qué PCs "
+             "hay que mejorar el juego. Siempre queda una copia en la carpeta perf.",
+             "When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, "
+             "processor and memory, the graphics settings and the FPS of each track. Nothing personal: not "
+             "your nickname, your races or your friends, and your IP is not stored. It shows which PCs the "
+             "game needs to improve on. A copy always stays in the perf folder.");
+}
+
+void PerfReportsPopup() {
+    App& a = g_app;
+    // Shown once per launcher start, after any other question: on the first start of a new folder
+    // the settings import opened in the same frame and replaced it, so it never came back.
+    static bool shown = false;
+    const std::string v = a.game.Get("perf_reports");
+    if (!shown && v != "1" && v != "0" && !a.game_running && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        ImGui::OpenPopup("perf_reports");
+    if (!ImGui::BeginPopupModal("perf_reports", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    shown = true;
+    ImGui::TextUnformatted(T("¿Nos ayudas a mejorar OCTR?", "Help us improve OCTR?"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextColored(kGrey, "%s", PerfReportsText());
+    ImGui::TextColored(kGrey, "%s", T("Puedes cambiarlo cuando quieras en Ajustes.", "You can change it any time in Settings."));
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button(T("Sí, enviar datos anónimos", "Yes, send anonymous data"))) {
+        a.game.Set("perf_reports", "1");
+        SaveGameIni();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("No, gracias", "No, thanks"))) {
+        a.game.Set("perf_reports", "0");
+        SaveGameIni();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+/// While run.py builds the native renderer's shaders (the first start with it, ~4 minutes).
+void ShaderProgressPopup() {
+    App& a = g_app;
+    const int percent = a.shader_percent.load();
+    if (percent >= 0 && !ImGui::IsPopupOpen("native_shaders")) ImGui::OpenPopup("native_shaders");
+    if (!ImGui::BeginPopupModal("native_shaders", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    if (percent < 0 || !a.game_running) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+    std::string stage;
+    {
+        std::scoped_lock lock{a.mutex};
+        stage = a.shader_stage;
+    }
+    const char* step = stage == "extract"     ? T("Leyendo los shaders del juego...", "Reading the game's shaders...")
+                       : stage == "export"    ? T("Preparando los programas...", "Preparing the programs...")
+                       : stage == "translate" ? T("Traduciendo los shaders...", "Translating the shaders...")
+                       : stage == "compile"   ? T("Compilando los shaders...", "Compiling the shaders...")
+                                              : T("Terminando...", "Finishing...");
+    ImGui::TextUnformatted(T("Compilando shaders del motor nativo", "Compiling the native engine's shaders"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+    ImGui::TextColored(kGrey, "%s", T("Solo la primera vez: se preparan a partir de tu copia del juego y tardan unos "
+                                      "minutos. El juego se abre solo al terminar.",
+                                      "Only the first time: they are built from your copy of the game and take a few "
+                                      "minutes. The game opens by itself when they are done."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    char overlay[16];
+    std::snprintf(overlay, sizeof overlay, "%d %%", percent);
+    ImGui::ProgressBar(percent / 100.0f, ImVec2(ImGui::GetFontSize() * 26.0f, 0.0f), overlay);
+    ImGui::TextColored(kGrey, "%s", step);
+    ImGui::Spacing();
+    if (ImGui::Button(T("Cancelar", "Cancel"))) {
+        StopGame();
+        a.shader_percent = -1;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 /// A Discord invite for a server other than ours: switching is the player's call.
 void JoinServerPopup() {
     App& a = g_app;
@@ -3954,10 +4981,10 @@ constexpr KeyInput kKeyInputs[] = {
     {"options", "Options (pausa)", "Options (pause)", "Return"},
     {"touchpad", "Panel táctil", "Touchpad", "Tab"},
     {"touchpad_right", "Panel táctil (derecha)", "Touchpad (right)", "Backspace"},
-    {"up", "Cruceta arriba", "D-pad up", "I"},
-    {"down", "Cruceta abajo", "D-pad down", "K"},
-    {"left", "Cruceta izquierda", "D-pad left", "J"},
-    {"right", "Cruceta derecha", "D-pad right", "L"},
+    {"up", "Cruceta arriba", "D-pad Up", "I"},
+    {"down", "Cruceta abajo", "D-pad Down", "K"},
+    {"left", "Cruceta izquierda", "D-pad Left", "J"},
+    {"right", "Cruceta derecha", "D-pad Right", "L"},
     {"look_up", "Stick derecho arriba", "Right stick up", "Up"},
     {"look_down", "Stick derecho abajo", "Right stick down", "Down"},
     {"look_left", "Stick derecho izquierda", "Right stick left", "Left"},
@@ -3990,6 +5017,15 @@ const char* SdlKeyName(unsigned code) {
     return it == names.end() ? nullptr : it->second;
 }
 
+// Mouse buttons and wheel steps as captured keys: kMouseCode + SDL's button number (wheel 6 and 7),
+// with the names src/runtime_pad.c and tools/gpu_capabilities.c --read-input use.
+constexpr unsigned kMouseCode = 0x1000;
+const char* MouseKeyName(unsigned code) {
+    static const char* const names[] = {"Mouse Left", "Mouse Middle", "Mouse Right", "Mouse X1",
+                                        "Mouse X2",   "Wheel Up",     "Wheel Down"};
+    return code > kMouseCode && code <= kMouseCode + 7 ? names[code - kMouseCode - 1] : nullptr;
+}
+
 // How a key name reads in the launcher.
 std::string KeyLabel(const std::string& name) {
     static const std::map<std::string, std::pair<const char*, const char*>> labels = {
@@ -4004,6 +5040,11 @@ std::string KeyLabel(const std::string& name) {
         {"PageUp", {"Re Pág", "Page Up"}}, {"PageDown", {"Av Pág", "Page Down"}},
         {"`", {"Tecla a la izquierda del 1", "` key"}},
         {"NonUSBackslash", {"Tecla < >", "< > key"}}, {"Keypad Enter", {"Enter (teclado num.)", "Keypad Enter"}},
+        {"Mouse Left", {"Clic izquierdo", "Left click"}}, {"Mouse Right", {"Clic derecho", "Right click"}},
+        {"Mouse Middle", {"Clic central (rueda)", "Middle click (wheel)"}},
+        {"Mouse X1", {"Botón lateral 1 del ratón", "Mouse side button 1"}},
+        {"Mouse X2", {"Botón lateral 2 del ratón", "Mouse side button 2"}},
+        {"Wheel Up", {"Rueda arriba", "Wheel up"}}, {"Wheel Down", {"Rueda abajo", "Wheel down"}},
     };
     const auto it = labels.find(name);
     if (it != labels.end()) return T(it->second.first, it->second.second);
@@ -4041,7 +5082,8 @@ void KeyboardTab() {
             const unsigned code = got - 1;
             if (code == 0x01) {
                 g_key_capture = -1;  // Esc: cancel
-            } else if (const char* name = SdlKeyName(code); name && code != 0x152) {
+            } else if (const char* name = code > kMouseCode ? MouseKeyName(code) : SdlKeyName(code);
+                       name && code != 0x152) {
                 const KeyInput& in = kKeyInputs[capturing];
                 const std::string key = std::string("key.") + in.id;
                 auto keys = g_key_replace ? std::vector<std::string>{} : SplitKeys(a.game.Get(key));
@@ -4080,7 +5122,8 @@ void KeyboardTab() {
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
             if (capturing == i) {
-                ImGui::TextColored(kYellow, "%s", T("Pulsa una tecla... (Esc cancela)", "Press a key... (Esc cancels)"));
+                ImGui::TextColored(kYellow, "%s", T("Pulsa una tecla o un botón del ratón... (Esc cancela)",
+                                                    "Press a key or a mouse button... (Esc cancels)"));
             } else if (keys.empty()) {
                 ImGui::TextColored(kGrey, "%s", T("(sin tecla)", "(none)"));
             } else {
@@ -4144,14 +5187,14 @@ constexpr PadInput kPadInputs[] = {
     {"r1", "R1 / RB (Salto / Derrape)", "R1 / RB (Hop / Drift)", "rightshoulder"},
     {"l2", "L2 / LT (Usar objeto / Ítem)", "L2 / LT (Use item)", "lefttrigger"},
     {"r2", "R2 / RT (Mirar atrás)", "R2 / RT (Look back)", "righttrigger"},
-    {"l3", "L3 (Click stick izq.)", "L3 (Left stick click)", "leftstick"},
-    {"r3", "R3 (Click stick der.)", "R3 (Right stick click)", "rightstick"},
+    {"l3", "L3 (Click stick izq.)", "L3 Click (Left Stick)", "leftstick"},
+    {"r3", "R3 (Click stick der.)", "R3 Click (Right Stick)", "rightstick"},
     {"options", "Options / Start (Pausa)", "Options / Start (Pause)", "start"},
     {"touchpad", "Touchpad / Back / Select", "Touchpad / Back / Select", "back,touchpad"},
-    {"up", "Cruceta arriba", "D-pad up", "dpup"},
-    {"down", "Cruceta abajo", "D-pad down", "dpdown"},
-    {"left", "Cruceta izquierda", "D-pad left", "dpleft"},
-    {"right", "Cruceta derecha", "D-pad right", "dpright"},
+    {"up", "Cruceta arriba", "D-pad Up", "dpup"},
+    {"down", "Cruceta abajo", "D-pad Down", "dpdown"},
+    {"left", "Cruceta izquierda", "D-pad Left", "dpleft"},
+    {"right", "Cruceta derecha", "D-pad Right", "dpright"},
 };
 
 std::string PadButtonLabel(const std::string& name) {
@@ -4215,7 +5258,7 @@ const char* PollGamepadButton() {
             s_getState = (PFN_LauncherXInputGetState)GetProcAddress(s_xinput, "XInputGetState");
         }
     }
-    if (!s_getState) return nullptr;
+    if (!s_getState || GetForegroundWindow() != g_app.hwnd) return nullptr;  // only while in front
 
     for (DWORD i = 0; i < 4; ++i) {
         LauncherXInputState state{};
@@ -4283,22 +5326,22 @@ void GamepadTab() {
             ImGui::SameLine();
         };
 
-        AddBtn("a", "Cruz / A");
-        AddBtn("b", "Círculo / B");
-        AddBtn("x", "Cuadrado / X");
-        AddBtn("y", "Triángulo / Y");
+        AddBtn("a", T("Cruz / A", "Cross / A"));
+        AddBtn("b", T("Círculo / B", "Circle / B"));
+        AddBtn("x", T("Cuadrado / X", "Square / X"));
+        AddBtn("y", T("Triángulo / Y", "Triangle / Y"));
         AddBtn("leftshoulder", "L1 / LB");
         AddBtn("rightshoulder", "R1 / RB");
         ImGui::NewLine();
-        AddBtn("lefttrigger", "Gatillo L2 / LT");
-        AddBtn("righttrigger", "Gatillo R2 / RT");
-        AddBtn("dpup", "Cruceta Arriba");
-        AddBtn("dpdown", "Cruceta Abajo");
-        AddBtn("dpleft", "Cruceta Izq.");
-        AddBtn("dpright", "Cruceta Der.");
+        AddBtn("lefttrigger", T("Gatillo L2 / LT", "Trigger L2 / LT"));
+        AddBtn("righttrigger", T("Gatillo R2 / RT", "Trigger R2 / RT"));
+        AddBtn("dpup", T("Cruceta Arriba", "D-pad Up"));
+        AddBtn("dpdown", T("Cruceta Abajo", "D-pad Down"));
+        AddBtn("dpleft", T("Cruceta Izq.", "D-pad Left"));
+        AddBtn("dpright", T("Cruceta Der.", "D-pad Right"));
         ImGui::NewLine();
-        AddBtn("leftstick", "L3 (Stick Izq.)");
-        AddBtn("rightstick", "R3 (Stick Der.)");
+        AddBtn("leftstick", T("L3 (Stick Izq.)", "L3 (Left Stick)"));
+        AddBtn("rightstick", T("R3 (Stick Der.)", "R3 (Right Stick)"));
         AddBtn("start", "Start / Options");
         AddBtn("back", "Select / Back");
         AddBtn("touchpad", "Touchpad");
@@ -4456,7 +5499,7 @@ struct SteamShortcut {
     std::vector<std::string> tags;
 };
 
-[[maybe_unused]] std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
+std::vector<SteamShortcut> ParseShortcuts(const std::vector<uint8_t>& buf) {
     std::vector<SteamShortcut> list;
     size_t i = 0;
     auto read_sz = [&]() -> std::string {
@@ -4522,7 +5565,20 @@ struct SteamShortcut {
     return list;
 }
 
-[[maybe_unused]] std::vector<uint8_t> SerializeShortcuts(const std::vector<SteamShortcut>& list) {
+/// The shortcuts a shortcuts.vdf holds, counted from its raw "appname" keys: a file ParseShortcuts
+/// reads differently is left alone rather than rewritten without the player's other games.
+size_t CountShortcuts(const std::vector<uint8_t>& buf) {
+    static constexpr char key[] = "\x01appname";
+    size_t count = 0;
+    for (size_t i = 0; i + sizeof key <= buf.size(); ++i) {
+        size_t k = 0;
+        while (k < sizeof key - 1 && ::tolower(buf[i + k]) == key[k]) ++k;
+        if (k == sizeof key - 1 && buf[i + k] == 0) ++count;
+    }
+    return count;
+}
+
+std::vector<uint8_t> SerializeShortcuts(const std::vector<SteamShortcut>& list) {
     std::vector<uint8_t> out;
     auto write_byte = [&](uint8_t b) { out.push_back(b); };
     auto write_sz = [&](const std::string& s) {
@@ -4575,7 +5631,8 @@ struct SteamShortcut {
         write_byte(8);
         write_byte(8);
     }
-    write_byte(8);
+    write_byte(8);  // the "shortcuts" map
+    write_byte(8);  // the file's root: Steam discards a file without it
     return out;
 }
 
@@ -4687,7 +5744,10 @@ void MigrateOldLauncher() {
     }
 }
 
-[[maybe_unused]] bool AddToSteam(std::string& out_msg) {
+/// Adds the launcher to Steam as a non-Steam game started with --launch (the game directly, no
+/// launcher window: Steam's recording and overlay see the game) with the steamgrid artwork.
+/// Steam is closed first when it runs, as it rewrites shortcuts.vdf on exit.
+bool AddToSteam(std::string& out_msg) {
     App& a = g_app;
     fs::path steam_path = FindSteamPath();
     if (steam_path.empty()) {
@@ -4701,27 +5761,36 @@ void MigrateOldLauncher() {
         return false;
     }
 
-    bool steam_was_running = false;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe{sizeof pe};
-        if (Process32FirstW(snap, &pe)) {
-            do {
-                if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
-                    steam_was_running = true;
-                    break;
-                }
-            } while (Process32NextW(snap, &pe));
+    const auto steam_running = [] {
+        bool running = false;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe{sizeof pe};
+            if (Process32FirstW(snap, &pe)) {
+                do {
+                    if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
+                        running = true;
+                        break;
+                    }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
         }
-        CloseHandle(snap);
-    }
-
+        return running;
+    };
+    const bool steam_was_running = steam_running();
     if (steam_was_running) {
+        // Steam writes its own list when it exits: the file is changed only once it is gone.
         fs::path steam_exe = steam_path / L"steam.exe";
-        if (fs::is_regular_file(steam_exe, ec)) {
+        if (fs::is_regular_file(steam_exe, ec))
             RunCaptured(steam_exe.wstring(), Quote(steam_exe.wstring()) + L" -shutdown", steam_path, 4000);
-            Sleep(1500);
+        for (int waited = 0; waited < 300 && steam_running(); ++waited) Sleep(100);
+        if (steam_running()) {
+            out_msg = T("Steam no se cerró a tiempo y no se cambió nada. Ciérralo (menú Steam > Salir) y vuelve a intentarlo.",
+                        "Steam did not close in time and nothing was changed. Quit it (Steam menu > Exit) and try again.");
+            return false;
         }
+        Sleep(500);
     }
 
     fs::path assets_dir;
@@ -4753,7 +5822,7 @@ void MigrateOldLauncher() {
     const std::string id32 = std::to_string(appid);
     const std::string id64 = std::to_string(((uint64_t)appid << 32) | 0x02000000);
 
-    int profiles_updated = 0;
+    int profiles_updated = 0, profiles_skipped = 0;
     for (const auto& entry : fs::directory_iterator(userdata, fs::directory_options::skip_permission_denied, ec)) {
         if (!entry.is_directory()) continue;
         const std::string dirname = entry.path().filename().string();
@@ -4784,10 +5853,18 @@ void MigrateOldLauncher() {
         std::vector<SteamShortcut> shortcuts;
         if (fs::is_regular_file(vdf_path, ec)) {
             std::ifstream f(vdf_path, std::ios::binary);
-            if (f) {
-                std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                shortcuts = ParseShortcuts(buf);
+            if (!f) {
+                ++profiles_skipped;
+                continue;
             }
+            std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            shortcuts = ParseShortcuts(buf);
+            if (shortcuts.size() != CountShortcuts(buf)) {
+                ++profiles_skipped;  // not read whole: writing it back would lose the player's other games
+                continue;
+            }
+            // The player's other non-Steam games, as they were, in case anything goes wrong.
+            fs::copy_file(vdf_path, config_dir / L"shortcuts.vdf.octr-backup", fs::copy_options::overwrite_existing, ec);
         }
 
         bool found = false;
@@ -4816,11 +5893,22 @@ void MigrateOldLauncher() {
         }
 
         auto serialized = SerializeShortcuts(shortcuts);
-        std::ofstream out(vdf_path, std::ios::binary | std::ios::trunc);
-        if (out) {
-            out.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
-            profiles_updated++;
+        const fs::path temp = config_dir / L"shortcuts.vdf.octr-new";
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            if (out) out.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
+            if (!out) {
+                fs::remove(temp, ec);
+                ++profiles_skipped;
+                continue;
+            }
         }
+        if (!MoveFileExW(temp.c_str(), vdf_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fs::remove(temp, ec);
+            ++profiles_skipped;
+            continue;
+        }
+        profiles_updated++;
     }
 
     if (profiles_updated > 0) {
@@ -4832,6 +5920,14 @@ void MigrateOldLauncher() {
                         "Successfully added to Steam with custom artwork!\nOpen Steam to see the game in your library.");
         }
         return true;
+    } else if (profiles_skipped > 0) {
+        out_msg = T("No se pudo añadir a Steam: su lista de juegos no-Steam tiene un formato que el launcher no "
+                    "reconoce, y no se tocó. Añádelo a mano: \"Añadir un juego que no es de Steam\", elige "
+                    "este launcher y escribe --launch en Opciones de lanzamiento.",
+                    "Could not add to Steam: its list of non-Steam games has a format the launcher does not "
+                    "recognize, and it was left untouched. Add it by hand: \"Add a Non-Steam Game\", pick this "
+                    "launcher and write --launch in Launch Options.");
+        return false;
     } else {
         out_msg = T("No se encontró ningún perfil de usuario en Steam.", "No user profiles found in Steam.");
         return false;
@@ -4990,23 +6086,8 @@ void PollUpdate() {
     if (g_update.stage == UpdateState::Done && !g_update.restart_sent) {
         g_update.restart_sent = true;
         SaveLauncher();
-        wchar_t self[MAX_PATH * 4]{};
-        GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
-        fs::path exe = self;
-        // The packaged launcher's name, if the running one is an older name next to it.
-        std::error_code ec;
-        const fs::path packaged = a.root / (std::wstring(kLauncherName) + L".exe");
-        if (fs::is_regular_file(packaged, ec)) exe = packaged;
-        std::wstring cmd = Quote(exe.wstring()) + L" --updated";
-        STARTUPINFOW si{sizeof si};
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, a.root.c_str(), &si, &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            PostQuitMessage(0);
-        } else {
+        if (!RestartLauncher(L"--updated"))
             a.notice = T("Actualizado. Cierra y vuelve a abrir el launcher.", "Updated. Close and open the launcher again.");
-        }
     }
 }
 
@@ -5334,6 +6415,7 @@ bool ReadTrophyTsv(const fs::path& file, const std::string& language, TrophySet&
 void WriteTrophyTsv(const TrophySet& t) {
     std::string out = "#lang\t" + t.language + "\n#title\t" + Sanitize(t.title_name) + "\n";
     for (const auto& tr : t.list)
+        if (tr.id < 100)  // OCTR's own (ctr_trophies.h) are not the game's: the runtime counts these
         out += std::to_string(tr.id) + "\t" + std::string(1, tr.grade ? tr.grade : '?') + "\t" + (tr.hidden ? "1" : "0") + "\t" +
                Sanitize(tr.name) + "\t" + Sanitize(tr.detail) + "\n";
     std::error_code ec;
@@ -5452,6 +6534,17 @@ void LoadTrophies() {
                 t.note = T("La clave de trofeos no descifra este juego: revisa que sea la de tu PS4 (32 cifras hexadecimales).",
                            "The trophy key does not decrypt this game: check it is your PS4's (32 hex digits).");
             }
+        }
+    }
+    // OCTR's own trophies, past the game's (src/ctr_trophies.h; the server gives them).
+    if (!t.list.empty() && (t.title_id == "CUSA13795" || t.title_id == "CUSA14876")) {
+        for (const auto& o : octr_trophies) {
+            Trophy tr;
+            tr.id = o.id;
+            tr.grade = o.grade;
+            tr.name = T(o.name_es, o.name_en);
+            tr.detail = T(o.es, o.en);
+            t.list.push_back(std::move(tr));
         }
     }
     ReadUnlocked(t);
@@ -5680,9 +6773,112 @@ void TrophiesTab() {
     }
 }
 
+/// Restarts the launcher (after an update or bringing another installation's settings): the
+/// packaged name when it is next to the running one. False when it could not be started.
+bool RestartLauncher(const std::wstring& args) {
+    App& a = g_app;
+    wchar_t self[MAX_PATH * 4]{};
+    GetModuleFileNameW(nullptr, self, DWORD(std::size(self)));
+    fs::path exe = self;
+    std::error_code ec;
+    const fs::path packaged = a.root / (std::wstring(kLauncherName) + L".exe");
+    if (fs::is_regular_file(packaged, ec)) exe = packaged;
+    std::wstring cmd = Quote(exe.wstring()) + (args.empty() ? L"" : L" " + args);
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, a.root.c_str(), &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    PostQuitMessage(0);
+    return true;
+}
+
+/// Asked on the first start of a new folder when another installation is found (and from the
+/// Tools tab): copies its settings and data here (settings_import.h), then restarts.
+void ImportPopup() {
+    App& a = g_app;
+    if (g_import.ask && !a.game_running) {
+        ImGui::OpenPopup("import_settings");
+        g_import.ask = false;
+    }
+    if (!ImGui::BeginPopupModal("import_settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    const ImportState state = g_import.state;
+    ImGui::TextUnformatted(T("¿Traer tus ajustes de otra instalación?", "Bring your settings from another installation?"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextColored(kGrey, "%s", T("Se copian a esta carpeta tus ajustes, controles, apodo, carpeta del juego, partidas "
+                                      "guardadas, logros y DLC. La otra carpeta no se toca.",
+                                      "Your settings, controls, nickname, game folder, saves, trophies and DLC are copied into "
+                                      "this folder. The other folder is left as it is."));
+    ImGui::PopTextWrapPos();
+    if (g_import.choice >= int(g_import.from.size())) g_import.choice = 0;
+    ImGui::BeginDisabled(state == ImportState::Copying);
+    if (g_import.from.size() == 1) {
+        ImGui::TextUnformatted(PathText(g_import.from[0]).c_str());
+    } else {
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 30.0f);
+        if (ImGui::BeginCombo("##import_from", PathText(g_import.from[size_t(g_import.choice)]).c_str())) {
+            for (int i = 0; i < int(g_import.from.size()); ++i)
+                if (ImGui::Selectable(PathText(g_import.from[size_t(i)]).c_str(), i == g_import.choice)) g_import.choice = i;
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::EndDisabled();
+    if (state == ImportState::Copying) {
+        ImGui::TextColored(kYellow, "%s", T("Copiando...", "Copying..."));
+    } else if (state == ImportState::Failed) {
+        ImGui::TextColored(kRed, T("No se pudo copiar: %s", "Could not copy: %s"), g_import.error.c_str());
+    } else if (state == ImportState::Done) {
+        ImGui::CloseCurrentPopup();
+        if (!RestartLauncher(L""))
+            a.notice = T("Ajustes copiados. Cierra y vuelve a abrir el launcher.", "Settings copied. Close and open the launcher again.");
+    }
+    ImGui::BeginDisabled(state == ImportState::Copying);
+    if (ImGui::Button(T("Traer mis ajustes", "Bring my settings"))) {
+        g_import.state = ImportState::Copying;
+        const fs::path from = g_import.from[size_t(g_import.choice)], to = a.root;
+        std::thread([from, to] {
+            const std::string error = SettingsImport::Copy(from, to);
+            g_import.error = error;
+            g_import.state = error.empty() ? ImportState::Done : ImportState::Failed;
+        }).detach();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("No, empezar de cero", "No, start fresh"))) {
+        a.launcher.Set("import_offered", "no");
+        SaveLauncher();
+        g_import.state = ImportState::Idle;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::EndPopup();
+}
+
 void ToolsTab() {
     App& a = g_app;
     UpdateSection();
+    ImGui::SeparatorText(T("Otra instalación", "Another installation"));
+    ImGui::BeginDisabled(g_import.state == ImportState::Copying || a.game_running);
+    if (ImGui::Button(T("Traer ajustes de otra instalación...", "Bring settings from another installation..."))) {
+        if (const auto dir = PickFolder(a.hwnd, L"Otra instalación del port / Another installation of the port",
+                                        a.root.parent_path())) {
+            std::error_code ec;
+            if (SettingsImport::IsUsedInstall(*dir) && !fs::equivalent(*dir, a.root, ec)) {
+                g_import.from = {*dir};
+                g_import.choice = 0;
+                g_import.ask = true;
+            } else {
+                a.notice = T("Esa carpeta no es otra instalación del port usada (le falta run.py o sus ajustes).",
+                             "That folder is not another used installation of the port (no run.py or settings).");
+            }
+        }
+    }
+    ImGui::EndDisabled();
+    HelpMarker(T("Copia a esta carpeta los ajustes, controles, apodo, carpeta del juego, partidas guardadas, logros y DLC de "
+                 "otra carpeta del port (por ejemplo, la de una versión anterior). La otra carpeta no se toca.",
+                 "Copies the settings, controls, nickname, game folder, saves, trophies and DLC of another folder of the "
+                 "port (an older release's, say) into this one. The other folder is left as it is."));
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
     if (ImGui::Button(T("Abrir last_run.log", "Open last_run.log"))) OpenInShell(a.root / L"last_run.log");
     ImGui::SameLine();
@@ -5698,7 +6894,7 @@ void ToolsTab() {
                  T("Para reportar fallos o tirones: adjunta el archivo de logs\\ en un issue.",
                    "To report crashes or stutter: attach the file from logs\\ to an issue."));
 
-    ImGui::SeparatorText(T("Acceso directo", "Desktop shortcut"));
+    ImGui::SeparatorText(T("Accesos directos", "Shortcuts"));
     if (ImGui::Button(T("Crear acceso directo en el Escritorio", "Create Desktop Shortcut"))) {
         std::string err;
         if (CreateDesktopShortcut(err)) {
@@ -5710,6 +6906,13 @@ void ToolsTab() {
     }
     HelpMarker(T("Crea un acceso directo en tu Escritorio para iniciar directamente el juego con su icono sin abrir la ventana del launcher.",
                  "Creates a shortcut on your Desktop to start the game directly with its icon without the launcher window."));
+    SteamButton();
+    HelpMarker(T("Lo añade a tu biblioteca de Steam como juego no-Steam, con sus portadas. Abre el juego directo, "
+                 "sin la ventana del launcher, así que la grabación y el overlay de Steam ven el juego. Tus "
+                 "ajustes, el online y los mods se mantienen.",
+                 "Adds it to your Steam library as a non-Steam game, with its artwork. It opens the game "
+                 "directly, without the launcher window, so Steam's recording and overlay see the game. Your "
+                 "settings, online and mods still apply."));
 
     ImGui::SeparatorText(T("Caché de shaders", "Shader cache"));
     ImGui::PushTextWrapPos(0.0f);
@@ -5724,11 +6927,12 @@ void ToolsTab() {
 
     ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
     const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
-                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский"};
-    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru"};
+                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский", "Bahasa Indonesia"};
+    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru", "id"};
+    constexpr int language_count = int(sizeof language_codes / sizeof *language_codes);
     int selected_language = 0;
-    for (int i = 0; i < 10; ++i) if (g_language == language_codes[i]) selected_language = i;
-    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 10)) {
+    for (int i = 0; i < language_count; ++i) if (g_language == language_codes[i]) selected_language = i;
+    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, language_count)) {
         g_language = language_codes[selected_language];
         ApplyLauncherLanguage();
         SaveLauncher();
@@ -5759,6 +6963,11 @@ void ToolsTab() {
                                                  "DLSS: files present (needs an NVIDIA RTX card)")
                                              : T("DLSS: archivos no incluidos (se usa FSR 3)",
                                                  "DLSS: files not included (FSR 3 is used)"));
+        ImGui::TextColored(kGrey, "%s", Fsr4FilesPresent()
+                                            ? T("FSR 4: archivos presentes (necesita una gráfica con soporte INT8)",
+                                                "FSR 4: files present (needs a GPU with INT8 support)")
+                                            : T("FSR 4: archivos no incluidos (carpeta fsr4_shaders)",
+                                                "FSR 4: files not included (fsr4_shaders folder)"));
     }
     ImGui::TextLinkOpenURL(kRepoUrl, kRepoUrl);
     if (a.python) ImGui::TextColored(kGrey, "Python: %s", a.python->description.c_str());
@@ -6007,7 +7216,7 @@ void Frame() {
     ImGui::TextColored(ImVec4(0.76f, 0.92f, 1.0f, 0.9f), "%s", T("MENÚ PRINCIPAL", "MAIN MENU"));
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
     const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
-                           T("Teclado", "Keyboard"), T("Parches", "Patches"), T("Guardados", "Saves"), "DLC",
+                           T("Teclado", "Keyboard"), "Mods", T("Guardados", "Saves"), "DLC",
                            T("Logros", "Achievements"), T("Herramientas", "Tools")};
     for (int i=0; i<10; ++i) {
         ImGui::SetCursorPosX(8.0f);
@@ -6024,8 +7233,9 @@ void Frame() {
     ImGui::EndChild();
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.015f, 0.13f, 0.32f, 0.82f));
-    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_None);
-    ImGui::SetCursorPos(ImVec2(22.0f, 17.0f));
+    // Real child padding applies to every row, table, wrap edge and tab.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f, 17.0f));
+    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
     switch (a.active_page) {
     case 0: PlayTab(); break;
@@ -6033,7 +7243,7 @@ void Frame() {
     case 2: OnlineTab(); break;
     case 3: GamepadTab(); break;
     case 4: KeyboardTab(); break;
-    case 5: PatchesTab(); break;
+    case 5: ModsTab(); break;
     case 6: SavesTab(); break;
     case 7: DlcTab(); break;
     case 8: TrophiesTab(); break;
@@ -6041,6 +7251,7 @@ void Frame() {
     }
     ImGui::PopStyleColor();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -6048,6 +7259,9 @@ void Frame() {
     SaveConfirmations();
     NickPopup();
     JoinServerPopup();
+    ImportPopup();  // before the diagnostic's question, which waits for it
+    PerfReportsPopup();
+    ShaderProgressPopup();
     if (a.confirm_clear_cache) {
         ImGui::OpenPopup("clear_cache");
         a.confirm_clear_cache = false;
@@ -6094,12 +7308,22 @@ void LoadState() {
         }
     }
     a.python = FindPython(a.root);
+    // A folder never used (no launcher.ini): another installation's settings are offered once.
+    const bool new_folder = !fs::exists(LauncherIni(), ec);
     // The portable package ships bbport.default.ini (an update unzipped over it keeps bbport.ini).
     if (!fs::exists(GameIni(), ec) && fs::is_regular_file(a.root / L"bbport.default.ini", ec)) {
         fs::copy_file(a.root / L"bbport.default.ini", GameIni(), ec);
     }
     a.launcher.Load(LauncherIni());
     a.game.Load(GameIni());
+    if (const fs::path backup = BackupKeyPath(); !backup.empty()) {
+        const fs::path installs = backup.parent_path() / L"installs.txt";
+        if (new_folder && a.launcher.Get("import_offered").empty()) {
+            g_import.from = SettingsImport::Previous(installs, a.root);
+            g_import.ask = !g_import.from.empty();
+        }
+        SettingsImport::Remember(installs, a.root);
+    }
     SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
     g_language = lang.empty() ? "auto" : lang;
@@ -6234,6 +7458,21 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         const unsigned code = unsigned((lparam >> 16) & 0xff) | ((lparam & (1 << 24)) ? 0x100u : 0u);
         g_key_captured = code + 1;
         return 0;
+    }
+    // ...or the next mouse button or wheel step (kMouseCode + SDL's button number). "Change" acts
+    // on the button's release, so this is the click after it.
+    if (g_key_capture >= 0) {
+        unsigned button = 0;
+        if (msg == WM_LBUTTONDOWN) button = 1;
+        else if (msg == WM_MBUTTONDOWN) button = 2;
+        else if (msg == WM_RBUTTONDOWN) button = 3;
+        else if (msg == WM_XBUTTONDOWN) button = GET_XBUTTON_WPARAM(wparam) == XBUTTON1 ? 4 : 5;
+        else if (msg == WM_MOUSEWHEEL && GET_WHEEL_DELTA_WPARAM(wparam) != 0)
+            button = GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? 6 : 7;
+        if (button) {
+            g_key_captured = kMouseCode + button + 1;
+            return msg == WM_XBUTTONDOWN ? TRUE : 0;
+        }
     }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam)) return true;
     switch (msg) {
@@ -6517,6 +7756,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             g_resize_w = g_resize_h = 0;
             CreateRenderTarget();
         }
+        // The controller drives the launcher only while it is the window in front: XInput is
+        // read whatever window has the focus, so playing moved the launcher's menus too.
+        if (GetForegroundWindow() == hwnd) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();

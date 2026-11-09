@@ -21,9 +21,10 @@ AEROLIB_URL = os.environ.get('BB_AEROLIB_URL',
 
 
 def aerolib_names(path, url=AEROLIB_URL):
-    """NID -> symbol from aerolib.inl, fetched once. Without network (a first start offline) the
-    table is empty: every import is written as "?" and the runtime falls back to its compiled
-    name table, so the game still starts; the next start with network fetches the list."""
+    """NID -> symbol from aerolib.inl, fetched once (the Windows package ships it). Without it and
+    without network the table is empty: every import is written as "?" and only the runtime's
+    compiled name table is left, which does not name every import the game's libc needs; the
+    next start with network fetches the list."""
     if not path.exists():
         print(f'Fetching {url} -> {path}', file=sys.stderr)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,7 +33,8 @@ def aerolib_names(path, url=AEROLIB_URL):
                 data = response.read()
         except (urllib.error.URLError, OSError, ValueError) as error:
             print(f'Import names: could not fetch aerolib.inl ({error}); starting without symbol names '
-                  f'(the runtime uses its compiled table). It is fetched again at the next start.', file=sys.stderr)
+                  f'(only the runtime\'s compiled table, which may stop the game at its first import: '
+                  f'code 20). Check the connection or DNS; it is fetched again at the next start.', file=sys.stderr)
             return {}
         path.write_bytes(data)
     return dict(re.findall(r'STUB\("([^"]+)",\s*([^)\s]+)\s*\)', path.read_text(errors='replace')))
@@ -50,8 +52,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--aerolib', type=Path, default=None)
+    p.add_argument('--boot-dir', type=Path, default=None)
     args = p.parse_args()
-    link = json.loads((args.out / 'link.json').read_text())
+    link = json.loads(((args.boot_dir or args.out) / 'link.json').read_text())
     names = aerolib_names(args.aerolib or args.out / 'aerolib.inl')
     lines = generate(link['unresolved_imports'], names)
     target = args.out / 'import_names.txt'

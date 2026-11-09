@@ -107,6 +107,10 @@ public:
     bool IsGuestMemoryExportSupported() const {
         return guest_memory_export;
     }
+    /// bbport: host memory can be imported as device memory (VK_EXT_external_memory_host).
+    bool IsExternalMemoryHostSupported() const {
+        return external_memory_host;
+    }
 
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
@@ -170,6 +174,11 @@ public:
     /// Returns true if VK_EXT_attachment_feedback_loop_layout is supported
     bool IsAttachmentFeedbackLoopLayoutSupported() const {
         return attachment_feedback_loop;
+    }
+
+    /// bbport: VK_EXT_attachment_feedback_loop_layout is on (without its dynamic state)
+    bool IsFeedbackLoopLayoutEnabled() const {
+        return feedback_loop_layout;
     }
 
     /// Returns true when VK_EXT_custom_border_color is supported
@@ -296,6 +305,12 @@ public:
     /// Returns true if VK_AMD_mixed_attachment_samples is supported
     bool IsMixedAnySamplesSupported() const {
         return amd_mixed_attachment_samples;
+    }
+
+    /// Returns true if VK_NV_coverage_reduction_mode is supported. It allows selecting how the
+    /// coverage of raster samples is mapped to attachments with fewer samples.
+    bool IsCoverageReductionModeSupported() const {
+        return nv_coverage_reduction_mode;
     }
 
     /// Returns true when geometry shaders are supported by the device
@@ -581,6 +596,7 @@ private:
     vk::Queue graphics_queue;
     vk::Queue readback_queue;
     bool guest_memory_export{};
+    bool external_memory_host{};
     u32 readback_family_index = NoFamily;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
@@ -602,6 +618,7 @@ private:
     bool amd_gcn_shader{};
     bool amd_shader_trinary_minmax{};
     bool nv_framebuffer_mixed_samples{};
+    bool nv_coverage_reduction_mode{};
     bool amd_mixed_attachment_samples{};
     bool shader_atomic_float{};
     bool shader_atomic_float2{};
@@ -611,6 +628,7 @@ private:
     bool buffer_marker{};
     bool device_fault{};
     bool attachment_feedback_loop{};
+    bool feedback_loop_layout{}; // bbport: VK_EXT_attachment_feedback_loop_layout alone
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};

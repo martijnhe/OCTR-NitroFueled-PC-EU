@@ -477,7 +477,8 @@ static int Fsr4ModelPreset(float render_width, float output_width) {
     return 4;
 }
 
-void CtrFsr3::EnsureFsr4Pipelines() {    if (fsr4_pack_pipeline) {
+void CtrFsr3::EnsureFsr4Pipelines() {
+    if (fsr4_pack_pipeline) {
         return;
     }
     const auto device = instance.GetDevice();

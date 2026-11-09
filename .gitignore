@@ -11,6 +11,8 @@ pgo/
 !/art/ctr-logo.png
 !/art/ctr-menu-background.png
 !/launcher/io.github.sacredfire.Launcher.png
+# Our Xbox button prompts (tools/make_button_prompts.py draws them).
+!/scripts/button_prompts/*.png
 # The Steam artwork the Windows package ships (SteamGridDB, like art/).
 !/packaging/windows/steamgrid/*.png
 last_run.log
@@ -58,5 +60,9 @@ gpu/shim/bbport_gnm_table.inc
 scripts/ultrawide_*_data/profile-eu-*/
 scripts/ultrawide_*_data/profile-*/view*/
 scripts/ultrawide_*_data/view*/
+/widescreen/
+/mods/
+/mod-state/
+/patches/OCTR-Mod-Library.xml
 /CUSA13795*/
 *.pkg

@@ -1,6 +1,10 @@
 #include "runtime_net.h"
 #include "runtime_net_overrides.h"
 #include "runtime_net_tunnel.h"
+#include "runtime_net_ping.h"
+#include "runtime_ai_catchup.h"
+#include "runtime_friends.h"
+#include "runtime_spectate.h"
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +62,8 @@ int32_t runtime_net_init(void) {
         g_net_initialized = 1;
         runtime_net_trace("sceNetInit completed");
     }
+    runtime_friends_start();
+    runtime_spectate_start(); /* spectator build */
     return ORBIS_OK;
 }
 
@@ -83,12 +89,36 @@ typedef struct {
     SOCKET s;
     int in_use;
     int is_stream;
+    int matchmaking;
     int non_blocking;
     int tunnel; /* the game's UDP socket (port 3074): runtime_net_tunnel.h */
     char name[32];
 } VSocket;
 
 static VSocket g_sockets[MAX_VIRTUAL_SOCKETS];
+static uint64_t now_ms(void);
+static int tunnel_server(struct sockaddr_in *out);
+static int from_server(const struct sockaddr_in *from, const struct sockaddr_in *server);
+/* The WebAPI invitation session can remain active in Arcade. A private race
+ * with another player has game UDP traffic to that peer before track assets
+ * load; Arcade has only server traffic. Let old peer activity expire when the
+ * player leaves the lobby. */
+static uint64_t g_last_game_peer_ms;
+
+int runtime_net_private_lobby_active(void) {
+    const uint64_t last = __atomic_load_n(&g_last_game_peer_ms, __ATOMIC_ACQUIRE);
+    const uint64_t now = now_ms();
+    return last && now >= last && now - last < 5000;
+}
+
+static void note_game_peer(const VSocket *vs, const struct sockaddr_in *peer) {
+    struct sockaddr_in server;
+    if (!vs->tunnel || !peer || !tunnel_server(&server) ||
+        from_server(peer, &server)) return;
+    const uint64_t now = now_ms();
+    const uint64_t old = __atomic_exchange_n(&g_last_game_peer_ms, now, __ATOMIC_RELEASE);
+    if (!old || now - old >= 5000) runtime_net_trace("Speed: game peer active");
+}
 
 static int vsocket_alloc(SOCKET s, int is_stream, const char *name) {
     for (int i = 0; i < MAX_VIRTUAL_SOCKETS; i++) {
@@ -184,6 +214,7 @@ int32_t runtime_net_socket_close(int s) {
     if (!vs) return ORBIS_NET_EBADF;
 
     runtime_net_trace("sceNetSocketClose(fd=%d)", s);
+    if (vs->matchmaking) runtime_public_itemless_reset();
     closesocket(vs->s);
     vsocket_free(s);
     return ORBIS_OK;
@@ -211,6 +242,7 @@ int32_t runtime_net_connect(int s, const OrbisNetSockaddr *addr, uint32_t addrle
     inet_ntop(AF_INET, &sin.sin_addr, ip_str, sizeof(ip_str));
     runtime_net_trace("sceNetConnect(fd=%d, to=%s:%u)", s, ip_str, ntohs(sin.sin_port));
 
+    vs->matchmaking = vs->is_stream && ntohs(sin.sin_port) >= 3074 && ntohs(sin.sin_port) <= 3080;
     int ret = connect(vs->s, (struct sockaddr *)&sin, sizeof(sin));
     if (ret != 0) {
         int err = WSAGetLastError();
@@ -372,6 +404,83 @@ static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
     }
 }
 
+/* RyuNET ping (runtime_net_ping.h): the round trip to the players in the room, on the game
+ * socket of a port with the tunnel. Off with BB_ONLINE_PING=0. */
+static int ping_enabled(void) {
+    static int state = -1;
+    if (state < 0) {
+        const char *v = getenv("BB_ONLINE_PING");
+        state = !(v && strcmp(v, "0") == 0) && tunnel_server(NULL);
+        ping_set_name(getenv("BB_ONLINE_NAME"));
+    }
+    return state;
+}
+
+int runtime_net_ping_view(PingPeer *out, int max) {
+    if (!ping_enabled()) return 0; /* Control traffic must not re-enable the optional ping display. */
+    return ping_view(now_ms(), out, max);
+}
+
+static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to);
+
+/* A ping packet the way the game's packets to that peer go: direct, and through the tunnel
+ * while the direct path is not proven. */
+static void ping_send(VSocket *vs, const uint8_t *packet, size_t n, const struct sockaddr_in *to) {
+    sendto(vs->s, (const char *)packet, (int)n, 0, (const struct sockaddr *)to, sizeof(*to));
+    tunnel_copy(vs, packet, n, to);
+}
+
+static int catchup_direct_peer(uint32_t ip) {
+    const uint8_t *b=(const uint8_t *)&ip;
+    return b[0]==10 || b[0]==127 || (b[0]==172 && (b[1]&0xf0)==16) ||
+           (b[0]==192 && b[1]==168) || (b[0]==100 && (b[1]&0xc0)==64) ||
+           (b[0]==169 && b[1]==254);
+}
+
+/* After the game's send to a peer: the pings that are due. */
+static void ping_after_send(VSocket *vs, const struct sockaddr_in *to) {
+    struct sockaddr_in server;
+    if ((!ping_enabled() && !runtime_ai_catchup_discovery()) || !tunnel_server(&server)) return;
+    /* LAN peers need the same control handshake, but never a relay copy.
+     * Discover only actual game destinations during a private catch-up session. */
+    if (from_server(to,&server) || tun_relay_index(to->sin_addr.s_addr,ntohs(to->sin_port))>=0) return;
+    const int direct=catchup_direct_peer(to->sin_addr.s_addr);
+    if (!tun_candidate(to->sin_addr.s_addr,server.sin_addr.s_addr) &&
+        !(direct && runtime_ai_catchup_discovery())) return;
+    const uint64_t now = now_ms();
+    if (direct && runtime_ai_catchup_discovery()) ping_on_capable(to->sin_addr.s_addr,ntohs(to->sin_port),now);
+    ping_on_game_send(to->sin_addr.s_addr, ntohs(to->sin_port), now);
+    char peer_name[PING_NAME];
+    uint8_t catchup[AI_CATCHUP_PACKET];
+    if (ping_peer_name(to->sin_addr.s_addr,ntohs(to->sin_port),now,peer_name)) {
+        size_t n=runtime_ai_catchup_send(peer_name,catchup,now);
+        if (n) ping_send(vs,catchup,n,to);
+    }
+    uint8_t packet[PING_PACKET_MAX];
+    uint32_t ip;
+    uint16_t port;
+    for (size_t n; (n = ping_next(now, packet, sizeof(packet), &ip, &port));) {
+        const struct sockaddr_in peer = addr_of(ip, port);
+        ping_send(vs, packet, n, &peer);
+    }
+}
+
+/* A datagram from a peer (unwrapped): 1 when it was a ping packet, answered here. */
+static int ping_take(VSocket *vs, const uint8_t *data, int len, const struct sockaddr_in *from) {
+    if (len < PING_MAGIC_LEN || memcmp(data, PING_MAGIC, PING_MAGIC_LEN) != 0 ) return 0;
+    char peer_name[PING_NAME];
+    ping_peer_name(from->sin_addr.s_addr,ntohs(from->sin_port),now_ms(),peer_name);
+    if (runtime_ai_catchup_receive(peer_name,data,(size_t)len,now_ms())) return 1;
+    if (!ping_enabled() && !runtime_ai_catchup_discovery()) return 0;
+    uint8_t reply[PING_PACKET_MAX];
+    size_t reply_len = 0;
+    if (!ping_on_packet(data, (size_t)len, from->sin_addr.s_addr, ntohs(from->sin_port), now_ms(), reply,
+                        sizeof(reply), &reply_len))
+        return 0;
+    if (reply_len) ping_send(vs, reply, reply_len, from);
+    return 1;
+}
+
 /* After the game's own send to a peer: a wrapped copy through the nearest relay and/or the
  * server while the direct path is not proven both ways. */
 static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to) {
@@ -384,6 +493,7 @@ static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct s
     int relay = -1;
     const int route = tun_on_send(to->sin_addr.s_addr, ntohs(to->sin_port), now_ms(), &flags, &relay);
     if (!route) return;
+    if (ping_enabled()) flags |= TUN_FLAG_PING;
     uint8_t wrapped[2048 + TUN_HEADER_LEN];
     size_t n = tun_wrap(wrapped, sizeof(wrapped), flags, to->sin_addr.s_addr, ntohs(to->sin_port), msg, len);
     if (!n) return;
@@ -492,6 +602,53 @@ int32_t runtime_net_accept(int s, OrbisNetSockaddr *addr, uint32_t *addrlen) {
     return vfd;
 }
 
+/* The game opens its UDP 3074 on the router through UPnP (AddPortMapping, external port 3074 to
+ * this PC's 3074). On a network with several players every PC asked for the same external port,
+ * and the router gave it to the last one: the others stopped receiving their lobby's traffic
+ * (kicked out of the lobby) or received another PC's (karts under the track, teleports), as the
+ * logs of three PCs behind one router showed (2026-10-19). Each PC now asks for its own external
+ * port, from its address on the network (3075 + the last byte), still to its local 3074; the
+ * server sees that port and gives it to the peers. Same length as "3074": the request's
+ * Content-Length stays right. BB_UPNP_PORT=3074 keeps the game's own. */
+static int upnp_external_port(void) {
+    static int port;
+    if (port) return port;
+    const char *env = getenv("BB_UPNP_PORT");
+    if (env && atoi(env) >= 1024 && atoi(env) <= 9999) return port = atoi(env);
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    port = sscanf(local_ipv4(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && a != 127 ? 3075 + (int)(d & 255) : 3074;
+    return port;
+}
+
+/* A copy of a UPnP SOAP request with <NewExternalPort>3074< replaced, or NULL when there is none. */
+static char *upnp_rewrite(const void *msg, size_t len) {
+    static const char tag[] = "<NewExternalPort>3074<";
+    const char *data = (const char *)msg;
+    if (len < sizeof tag || len > 65536) return NULL;
+    int found = 0;
+    for (size_t at = 0; !found && at + sizeof tag - 1 <= len; ++at)
+        found = data[at] == '<' && memcmp(data + at, tag, sizeof tag - 1) == 0;
+    char *copy = found ? malloc(len) : NULL;
+    if (!copy) return NULL;
+    memcpy(copy, data, len);
+    char port[8];
+    snprintf(port, sizeof port, "%04d", upnp_external_port());
+    int changed = 0;
+    for (size_t at = 0; at + sizeof tag - 1 <= len; ++at) {
+        if (copy[at] == '<' && memcmp(copy + at, tag, sizeof tag - 1) == 0) {
+            memcpy(copy + at + strlen("<NewExternalPort>"), port, 4);
+            ++changed;
+        }
+    }
+    static int logged;
+    if (changed && !logged) {
+        logged = 1;
+        printf("[NET] UPnP: external port 3074 -> %s (one per PC on this network; BB_UPNP_PORT sets it)\n", port);
+        fflush(stdout);
+    }
+    return copy;
+}
+
 int32_t runtime_net_send(int s, const void *msg, size_t len, int flags) {
     VSocket *vs = vsocket_get(s);
     if (!vs) return ORBIS_NET_EBADF;
@@ -500,7 +657,9 @@ int32_t runtime_net_send(int s, const void *msg, size_t len, int flags) {
     if (flags & 0x1) win_flags |= MSG_OOB;
     if (flags & 0x4) win_flags |= MSG_DONTROUTE;
 
-    int ret = send(vs->s, (const char *)msg, (int)len, win_flags);
+    char *upnp = vs->is_stream && upnp_external_port() != 3074 ? upnp_rewrite(msg, len) : NULL;
+    int ret = send(vs->s, upnp ? upnp : (const char *)msg, (int)len, win_flags);
+    free(upnp);
     if (ret < 0) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
@@ -548,7 +707,11 @@ int32_t runtime_net_sendto(int s, const void *msg, size_t len, int flags, const 
         runtime_net_trace("sceNetSendto(fd=%d) failed: win err %d", s, err);
         return -1;
     }
-    if (to && vs->tunnel) tunnel_copy(vs, msg, len, &sin);
+    note_game_peer(vs, to ? &sin : NULL);
+    if (to && vs->tunnel) {
+        tunnel_copy(vs, msg, len, &sin);
+        ping_after_send(vs, &sin);
+    }
     return ret;
 }
 
@@ -569,12 +732,14 @@ int32_t runtime_net_recv(int s, void *buf, size_t len, int flags) {
             return -1;
         }
         g_net_errno = err;
+        if (vs->matchmaking) runtime_public_itemless_reset();
         runtime_net_trace("sceNetRecv(fd=%d, len=%zu, flags=0x%x) -> err %d (wsa %d)", s, len, flags, g_net_errno, err);
         return -1;
     }
     if (ret > 0) {
         runtime_net_trace("sceNetRecv(fd=%d, len=%zu) -> %d bytes (first=0x%02X)", s, len, ret, ((unsigned char *)buf)[0]);
     } else {
+        if (vs->matchmaking) runtime_public_itemless_reset();
         runtime_net_trace("sceNetRecv(fd=%d) -> EOF (0 bytes)", s);
     }
     return ret;
@@ -642,6 +807,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             /* The server's own NAT replies (0x15, 0x1F, 0x0B...) go to the game unchanged. */
             if (tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
                 tun_on_tunnelled(ip, port, tflags, 0, now_ms());
+                if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
                 sin.sin_addr.s_addr = ip;
                 sin.sin_port = htons(port);
                 payload = wrapped + TUN_HEADER_LEN;
@@ -655,6 +821,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
                 goto next_datagram;
             }
             tun_on_tunnelled(ip, port, tflags, 1, now_ms());
+            if (tflags & TUN_FLAG_PING) ping_on_capable(ip, port, now_ms());
             sin.sin_addr.s_addr = ip;
             sin.sin_port = htons(port);
             payload = wrapped + TUN_HEADER_LEN;
@@ -671,6 +838,7 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             if (direct_off && tun_candidate(sin.sin_addr.s_addr, server.sin_addr.s_addr)) goto next_datagram;
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
         }
+        if (ping_take(vs, payload, ret, &sin)) goto next_datagram;
         if ((win_flags & MSG_PEEK) && ret <= (int)sizeof(peeked.data)) {
             peeked.fd = s;
             peeked.len = ret;
@@ -689,6 +857,8 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
         memcpy(&out->sin_addr, &sin.sin_addr, sizeof(out->sin_addr));
         memset(out->sin_zero, 0, sizeof(out->sin_zero));
     }
+
+    if (tunnel) note_game_peer(vs, &sin);
     if (fromlen) *fromlen = sizeof(OrbisNetSockaddrIn);
 
     runtime_net_trace("sceNetRecvfrom(fd=%d, len=%d, from=%s:%u)", s, ret, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port));

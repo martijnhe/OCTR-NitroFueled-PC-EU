@@ -1,9 +1,14 @@
-#include "runtime_http.h"
+/* runtime_net.h first: on Linux it turns on _GNU_SOURCE (getaddrinfo, used by
+ * runtime_ryunet_request), which must come before any system header. */
 #include "runtime_net.h"
+#include "runtime_http.h"
 #include "runtime_net_overrides.h"
+#include "bb_sha256.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -49,6 +54,7 @@ typedef struct {
     char target_ip[64];
     uint16_t port;
     int is_plain_http;
+    int redirected; /* to the RyuNET server (runtime_net_overrides) */
 } HttpConnection;
 
 typedef struct {
@@ -168,9 +174,11 @@ int32_t runtime_http_create_connection(int32_t tmpl, const char *url, int32_t ke
                 strncpy(c->target_ip, target, sizeof(c->target_ip) - 1);
                 if (port_override) c->port = port_override;
                 if (is_http) c->is_plain_http = 1;
+                c->redirected = 1;
                 runtime_net_trace("sceHttpCreateConnectionWithURL('%s') -> override %s:%u (HTTP)",
                                   url, c->target_ip, c->port);
             } else {
+                c->redirected = 0;
                 strncpy(c->target_ip, c->host, sizeof(c->target_ip) - 1);
                 runtime_net_trace("sceHttpCreateConnectionWithURL('%s') -> %s:%u",
                                   url, c->target_ip, c->port);
@@ -308,6 +316,442 @@ int32_t runtime_http_add_request_header(int32_t req, const char *name, const cha
     return ORBIS_OK;
 }
 
+/* Seconds to add to this PC's clock to get the RyuNET server's. Signatures carry the time and
+ * the server takes them only within 5 minutes of its own clock, so a PC whose clock is off could
+ * not log in at all ("nickname signature out of time"). run.py measures it before the game
+ * starts (BB_ONLINE_CLOCK_OFFSET) and every answer of the server corrects it (its Date header):
+ * a login refused for the time goes through on the game's next try. */
+static long long g_clock_offset;
+static int g_clock_offset_read;
+
+static long long ryunet_clock_offset(void) {
+    if (!__atomic_load_n(&g_clock_offset_read, __ATOMIC_ACQUIRE)) {
+        const char *env = getenv("BB_ONLINE_CLOCK_OFFSET");
+        long long offset = 0;
+        if (env && sscanf(env, "%lld", &offset) == 1 && offset > -400000000ll && offset < 400000000ll) {
+            long long unset = 0;
+            __atomic_compare_exchange_n(&g_clock_offset, &unset, offset, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&g_clock_offset_read, 1, __ATOMIC_RELEASE);
+    }
+    return __atomic_load_n(&g_clock_offset, __ATOMIC_RELAXED);
+}
+
+/* Unix time of an HTTP date ("Wed, 22 Oct 2026 00:10:00 GMT"), or -1. */
+static long long http_date_seconds(const char *text) {
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char month[4] = "";
+    int day, year, hour, minute, second;
+    const char *comma = strchr(text, ',');
+    if (!comma || sscanf(comma + 1, " %d %3s %d %d:%d:%d", &day, month, &year, &hour, &minute, &second) != 6)
+        return -1;
+    const char *found = strlen(month) == 3 ? strstr(months, month) : NULL;
+    if (!found || (found - months) % 3 || year < 2000 || year > 2200) return -1;
+    int m = (int)(found - months) / 3 + 1;
+    /* days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's days_from_civil) */
+    long long y = year - (m <= 2);
+    const long long era = y / 400, yoe = y - era * 400;
+    const long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const long long days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    return days * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+/* An answer of the RyuNET server: its Date header sets the clock offset. */
+static void ryunet_note_server_clock(const char *headers) {
+    for (const char *line = headers; line && *line && *line != '\r' && *line != '\n';) {
+        if (!_strnicmp(line, "Date:", 5)) {
+            const long long server = http_date_seconds(line + 5);
+            if (server < 0) return;
+            ryunet_clock_offset(); /* the launcher's value is read first, then replaced */
+            const long long offset = server - (long long)time(NULL);
+            /* The header has whole seconds: a few seconds either way change nothing. */
+            const long long old = __atomic_exchange_n(&g_clock_offset, offset, __ATOMIC_RELAXED);
+            if (llabs(offset - old) > 30) {
+                runtime_net_trace("RyuNET server clock: this PC's clock is %lld s %s the server's%s", llabs(offset),
+                                  offset > 0 ? "behind" : "ahead of",
+                                  llabs(offset) > 240 ? " (signed requests now use the server's time)" : "");
+            }
+            return;
+        }
+        line = strchr(line, '\n');
+        if (line) line++;
+    }
+}
+
+/* X-RyuNET-Proof for one request to the RyuNET server (its nick_proof.go): an HMAC-SHA256,
+ * keyed with the hash of this installation's key for the server (BB_ONLINE_KEYHASH, from
+ * run.py), of the time (the server's: ryunet_clock_offset), a nonce, the method and the
+ * request target. 0 without a key. */
+int runtime_ryunet_proof(const char *method, const char *target, char *out, size_t out_size) {
+    const char *key_hash = getenv("BB_ONLINE_KEYHASH");
+    if (!key_hash || strlen(key_hash) != 64 || strspn(key_hash, "0123456789abcdef") != 64) return 0;
+    static unsigned long long counter;
+    struct timespec now;
+    timespec_get(&now, TIME_UTC);
+    const long long ts = (long long)now.tv_sec + ryunet_clock_offset();
+    char nonce[33], message[1200];
+    snprintf(nonce, sizeof nonce, "%016llx%016llx",
+             (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec,
+             __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) ^ (unsigned long long)(uintptr_t)&now);
+    const int n = snprintf(message, sizeof message, "%lld\n%s\n%s\n%s", ts, nonce, method, target);
+    if (n <= 0 || n >= (int)sizeof message) return 0;
+    uint8_t mac[32];
+    bb_hmac_sha256((const unsigned char *)key_hash, 64, (const unsigned char *)message, (size_t)n, mac);
+    char mac_hex[65];
+    for (int i = 0; i < 32; i++) snprintf(mac_hex + 2 * i, 3, "%02x", mac[i]);
+    const int len = snprintf(out, out_size, "1.%lld.%s.%s", ts, nonce, mac_hex);
+    return len > 0 && (size_t)len < out_size;
+}
+
+/* How requests name the RyuNET server. On some players' networks something on the way (a
+ * router or ISP filter, an antivirus web shield) takes the request for one form and answers in
+ * the server's place: a redirect to its own page ("302" with no body: the server never
+ * redirects these requests) or nothing. The request then goes again in the next form, and the
+ * form that went through is kept for the run:
+ *   0: "POST /auth/", Host: the server's name, as the overrides give it;
+ *   1: the same, Host: the server's address;
+ *   2: as the game names it ("POST https://lavender-ps4-auth3.prod.demonware.net:443/auth/",
+ *      Host: Demonware's), as v0.6 and older sent everything. */
+#define RYUNET_FORMS 3
+static int g_ryunet_form;
+static const char *const ryunet_form_names[RYUNET_FORMS] = {
+    "a plain request for the server's name", "a plain request for the server's address", "the game's own URL"};
+
+/* Whether an answer came from something on the way and not from the RyuNET server: none, not
+ * HTTP, or a redirect. A redirect's Location goes to the log: it names what intercepted it. */
+static int ryunet_intercepted(const char *reply, int len, int form) {
+    int status = 0;
+    const char *space = len > 0 && strncmp(reply, "HTTP/", 5) == 0 ? strchr(reply, ' ') : NULL;
+    if (!space || sscanf(space, "%d", &status) != 1) {
+        runtime_net_trace("RyuNET request as %s: %s", ryunet_form_names[form],
+                          len > 0 ? "an answer that is not HTTP" : "no answer");
+        return 1;
+    }
+    if (status < 300 || status > 399) return 0;
+    char location[200] = "";
+    for (const char *line = reply; *line && *line != '\r' && *line != '\n';) {
+        if (!_strnicmp(line, "Location:", 9)) {
+            sscanf(line + 9, " %199[^\r\n]", location);
+            break;
+        }
+        line = strchr(line, '\n');
+        if (!line) break;
+        line++;
+    }
+    runtime_net_trace("RyuNET request as %s: %d from something on the way, not the server (Location: %s)",
+                      ryunet_form_names[form], status, location[0] ? location : "none");
+    return 1;
+}
+
+/* A form that went through after another was intercepted: the next requests use it. */
+static void ryunet_keep_form(int form) {
+    if (__atomic_exchange_n(&g_ryunet_form, form, __ATOMIC_RELAXED) != form)
+        runtime_net_trace("RyuNET requests now go as %s, which this network lets through", ryunet_form_names[form]);
+}
+
+/* A signed request of the port's own (not the game's) to the RyuNET server's HTTP port
+ * (BB_ONLINE_SERVER, BB_ONLINE_HTTP_PORT): the body goes to body (NUL-terminated, cut to
+ * body_size). The HTTP status, or 0 when the server could not be reached. Blocking, with
+ * 8-second timeouts: for background threads. */
+int runtime_ryunet_request(const char *method, const char *target, char *body, size_t body_size) {
+    if (body_size) body[0] = '\0';
+    const char *host = getenv("BB_ONLINE_SERVER");
+    const char *port = getenv("BB_ONLINE_HTTP_PORT");
+    if (!host || !*host) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in sin;
+    memcpy(&sin, res->ai_addr, sizeof sin);
+    freeaddrinfo(res);
+    char address[INET_ADDRSTRLEN] = "";
+    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    char reply[32768];
+    const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
+    for (int tried = 0; tried < RYUNET_FORMS; tried++) {
+        const int form = (first + tried) % RYUNET_FORMS;
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) return 0;
+#ifdef _WIN32
+        DWORD timeout = 8000;
+#else
+        struct timeval timeout = {8, 0};
+#endif
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+        if (connect(s, (const struct sockaddr *)&sin, sizeof sin) != 0) {
+            closesocket(s);
+            return 0;
+        }
+        char host_header[96];
+        snprintf(host_header, sizeof host_header, "%s", form == 0 ? host
+                                                       : form == 1 && address[0] ? address
+                                                                                 : "lavender-ps4-auth3.prod.demonware.net");
+        char proof[160], request[4096]; /* a report's comment rides in the target */
+        const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
+        const int n = snprintf(request, sizeof request,
+                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n%s%s%s\r\n",
+                               method, target, host_header, signed_ok ? "X-RyuNET-Proof: " : "",
+                               signed_ok ? proof : "", signed_ok ? "\r\n" : "");
+        if (n <= 0 || n >= (int)sizeof request || send(s, request, n, 0) != n) {
+            closesocket(s);
+            return 0;
+        }
+        int got = 0;
+        for (int r; got < (int)sizeof reply - 1 && (r = recv(s, reply + got, (int)sizeof reply - 1 - got, 0)) > 0;)
+            got += r;
+        closesocket(s);
+        reply[got] = '\0';
+        if (!ryunet_intercepted(reply, got, form)) {
+            ryunet_note_server_clock(reply);
+            ryunet_keep_form(form);
+            break;
+        }
+    }
+    int status = 0;
+    if (strncmp(reply, "HTTP/", 5) != 0 || sscanf(strchr(reply, ' ') ? strchr(reply, ' ') : reply, "%d", &status) != 1)
+        return 0;
+    const char *start = strstr(reply, "\r\n\r\n");
+    if (start && body_size) snprintf(body, body_size, "%s", start + 4);
+    return status;
+}
+
+/* A "Transfer-Encoding: chunked" body decoded in place: its length, or the length given when it is not one. */
+static size_t dechunk(char *body, size_t length) {
+    size_t in = 0, out = 0;
+    while (in < length) {
+        char *end = NULL;
+        const unsigned long chunk = strtoul(body + in, &end, 16);
+        const char *line = end ? strstr(end, "\r\n") : NULL;
+        if (!end || end == body + in || !line) return length;
+        in = (size_t)(line + 2 - body);
+        if (!chunk) return out;
+        if (chunk > length - in) return length;
+        memmove(body + out, body + in, chunk);
+        out += chunk;
+        in += chunk + 2;
+    }
+    return out;
+}
+
+static int chunked_reply(const char *headers, const char *body) {
+    for (const char *h = headers; h && h < body; h = strstr(h, "\r\n"), h = h ? h + 2 : NULL)
+        if (!strncasecmp(h, "Transfer-Encoding:", 18) && strstr(h, "chunked") && strstr(h, "chunked") < strstr(h, "\r\n"))
+            return 1;
+    return 0;
+}
+
+int runtime_ryunet_transfer(const char *method, const char *target, const void *data, size_t size,
+                            char **reply, size_t *reply_size, size_t max_reply) {
+    *reply = NULL;
+    *reply_size = 0;
+    const char *host = getenv("BB_ONLINE_SERVER");
+    const char *port = getenv("BB_ONLINE_HTTP_PORT");
+    if (!host || !*host) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port && *port ? port : "8080", &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in sin;
+    memcpy(&sin, res->ai_addr, sizeof sin);
+    freeaddrinfo(res);
+    char address[INET_ADDRSTRLEN] = "";
+    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
+    const size_t cap = max_reply + 4096; /* the answer's headers too */
+    char *buffer = malloc(cap + 1);
+    if (!buffer) return 0;
+    size_t got = 0;
+    const int first = __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED);
+    for (int tried = 0; tried < RYUNET_FORMS; tried++) {
+        const int form = (first + tried) % RYUNET_FORMS;
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) break;
+#ifdef _WIN32
+        DWORD timeout = 30000;
+#else
+        struct timeval timeout = {30, 0};
+#endif
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+        if (connect(s, (const struct sockaddr *)&sin, sizeof sin) != 0) {
+            closesocket(s);
+            break;
+        }
+        char host_header[96];
+        snprintf(host_header, sizeof host_header, "%s", form == 0 ? host
+                                                       : form == 1 && address[0] ? address
+                                                                                 : "lavender-ps4-auth3.prod.demonware.net");
+        char proof[160], request[4096];
+        const int signed_ok = runtime_ryunet_proof(method, target, proof, sizeof proof);
+        const int n = snprintf(request, sizeof request,
+                               "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n"
+                               "Content-Type: application/octet-stream\r\n%s%s%s\r\n",
+                               method, target, host_header, size, signed_ok ? "X-RyuNET-Proof: " : "",
+                               signed_ok ? proof : "", signed_ok ? "\r\n" : "");
+        int sent_ok = n > 0 && n < (int)sizeof request && send(s, request, n, 0) == n;
+        for (size_t done = 0; sent_ok && done < size;) {
+            const size_t chunk = size - done > 65536 ? 65536 : size - done;
+            const int w = send(s, (const char *)data + done, (int)chunk, 0);
+            if (w <= 0) sent_ok = 0;
+            else done += (size_t)w;
+        }
+        if (!sent_ok) {
+            closesocket(s);
+            break;
+        }
+        got = 0;
+        for (int r; got < cap && (r = recv(s, buffer + got, (int)(cap - got > 65536 ? 65536 : cap - got), 0)) > 0;)
+            got += (size_t)r;
+        closesocket(s);
+        buffer[got] = '\0';
+        if (!ryunet_intercepted(buffer, (int)(got > 0x7fffffff ? 0x7fffffff : got), form)) {
+            ryunet_note_server_clock(buffer);
+            ryunet_keep_form(form);
+            break;
+        }
+        got = 0;
+    }
+    int status = 0;
+    if (got < 12 || strncmp(buffer, "HTTP/", 5) != 0 ||
+        sscanf(strchr(buffer, ' ') ? strchr(buffer, ' ') : buffer, "%d", &status) != 1) {
+        free(buffer);
+        return 0;
+    }
+    const char *start = strstr(buffer, "\r\n\r\n");
+    if (start) {
+        start += 4;
+        size_t body = got - (size_t)(start - buffer);
+        if (chunked_reply(buffer, start)) body = dechunk((char *)start, body);
+        if (body > 0) {
+            char *out = malloc(body + 1);
+            if (out) {
+                memcpy(out, start, body);
+                out[body] = '\0';
+                *reply = out;
+                *reply_size = body;
+            }
+        }
+    }
+    free(buffer);
+    return status;
+}
+
+/* One exchange of a request: its answer in resp (NUL-terminated) and its length, or -1 when
+ * the server could not be reached. form is how a request to the RyuNET server names it
+ * (ryunet_form_names); address is the server's. */
+static int http_exchange(const HttpConnection *c, const HttpRequest *r, const struct sockaddr_in *sin, int form,
+                         const char *address, const void *post_data, size_t size, char *resp, int resp_size) {
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return -1;
+    if (connect(s, (const struct sockaddr *)sin, sizeof(*sin)) != 0) {
+        runtime_net_trace("sceHttpSendRequest connect to %s:%u failed: %d", c->target_ip, c->port, WSAGetLastError());
+        closesocket(s);
+        return -1;
+    }
+    if (c->redirected) {
+        /* The RyuNET server answers at once: a request that something on the way holds (a
+         * player's antivirus) ends after 20 s instead of keeping the game waiting. */
+#ifdef _WIN32
+        DWORD timeout = 20000;
+#else
+        struct timeval timeout = {20, 0};
+#endif
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof timeout);
+    }
+
+    /* Build HTTP request: prefer the stored method name (covers CUSTOM). */
+    const char *method_str = r->method_str[0] ? r->method_str : "GET";
+
+    /* The game names its requests by the real servers' URLs (the login's is
+     * "https://lavender-ps4-auth3.prod.demonware.net:443/auth/"). To the RyuNET server they go
+     * first as a plain request for its own host: antivirus web shields and some networks hold a
+     * plain HTTP request that names an https:// URL or Demonware's host, and the login never came
+     * back ("sceHttpSendRequest empty response"). The server reads only the path. */
+    const char *target = r->path;
+    char host_header[96];
+    snprintf(host_header, sizeof host_header, "%s", c->host);
+    if (c->redirected && form != 2) {
+        const char *scheme = strstr(target, "://");
+        if (scheme && scheme - target <= 5) {
+            target = strchr(scheme + 3, '/');
+            if (!target) target = "/";
+        }
+        const char *name = form == 1 && address[0] ? address : c->target_ip;
+        if (c->port == 80) snprintf(host_header, sizeof host_header, "%s", name);
+        else snprintf(host_header, sizeof host_header, "%s:%u", name, (unsigned)c->port);
+    }
+
+    char header_buf[4096];
+    int hlen = snprintf(header_buf, sizeof(header_buf),
+                        "%s %s HTTP/1.1\r\n"
+                        "Host: %s\r\n"
+                        "User-Agent: CTR-NitroFueled/1.21 PS4\r\n"
+                        "Connection: close\r\n"
+                        "Content-Length: %zu\r\n",
+                        method_str, target, host_header, size);
+
+    for (int i = 0; i < r->req_header_count; i++) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
+                         "%s: %s\r\n", r->req_headers[i].name, r->req_headers[i].value);
+    }
+    /* RyuNET nickname ownership: the server lets this installation keep the nickname it first
+     * used. The request is signed (X-RyuNET-Proof, the server's nick_proof.go) with the hash of
+     * the installation's key for this server (BB_ONLINE_KEYHASH, from run.py): the key itself
+     * never crosses the network, and a copied signature is refused. Sent only to hosts
+     * redirected to the RyuNET server, never to a real one. */
+    char proof[160];
+    if (c->is_plain_http && hlen < (int)sizeof(header_buf) - 200 &&
+        runtime_ryunet_proof(method_str, target, proof, sizeof proof)) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Proof: %s\r\n", proof);
+    }
+    /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
+     * launcher's Online tab): the server then leaves the game its save's inventory. */
+    const char *inventory = c->is_plain_http ? getenv("BB_ONLINE_INVENTORY") : NULL;
+    if (inventory && strcmp(inventory, "save") == 0 && hlen < (int)sizeof(header_buf) - 48) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Inventory: save\r\n");
+    }
+    /* v0.8: this port's version (BB_OCTR_VERSION) and the server's item-box rules it plays with
+     * (BB_ITEM_RULES_ID: the id /ryunet/theme gave them, set by run.py/run.sh only once they
+     * were applied; "none" when the server has none). The server can refuse a login without
+     * them (its client_gate.go): older ports, or a game left with its own odds. */
+    if (c->is_plain_http) {
+        const char *version = getenv("BB_OCTR_VERSION"), *items = getenv("BB_ITEM_RULES_ID");
+        if (version && *version && strlen(version) < 48 && !strpbrk(version, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 80)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Client: octr/%s\r\n", version);
+        if (items && *items && strlen(items) < 48 && !strpbrk(items, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 80)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Items: %s\r\n", items);
+        /* This PC's anonymous fingerprint (scripts/machine_id.py, set by run.py/run.sh): a ban
+         * covers the PC, not only the nickname. */
+        const char *machine = getenv("BB_MACHINE_ID");
+        if (machine && *machine && strlen(machine) < 80 && !strpbrk(machine, "\r\n") &&
+            hlen < (int)sizeof(header_buf) - 112)
+            hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Machine: %s\r\n", machine);
+    }
+    hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
+
+    send(s, header_buf, hlen, 0);
+    if (size > 0 && post_data) {
+        send(s, (const char *)post_data, (int)size, 0);
+    }
+
+    /* Read response */
+    int total_read = 0;
+    while (total_read < resp_size - 1) {
+        int n = recv(s, resp + total_read, resp_size - 1 - total_read, 0);
+        if (n <= 0) break;
+        total_read += n;
+    }
+    resp[total_read] = '\0';
+    closesocket(s);
+    return total_read;
+}
+
 int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t size) {
     int idx = req - 1;
     if (idx < 0 || idx >= MAX_HTTP_REQUESTS || !g_requests[idx].in_use) return HTTP_NETWORK;
@@ -325,9 +769,6 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
     runtime_net_trace("sceHttpSendRequest(req=%d, host=%s, target=%s:%u, path='%s', body=%zu bytes)",
                       req, c->host, c->target_ip, c->port, r->path, size);
 
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return HTTP_NETWORK;
-
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
@@ -339,64 +780,26 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         if (he && he->h_addr_list[0]) {
             memcpy(&sin.sin_addr, he->h_addr_list[0], sizeof(sin.sin_addr));
         } else {
-            closesocket(s);
             return HTTP_NETWORK;
         }
     }
+    char address[INET_ADDRSTRLEN] = "";
+    inet_ntop(AF_INET, &sin.sin_addr, address, sizeof address);
 
-    if (connect(s, (struct sockaddr *)&sin, sizeof(sin)) != 0) {
-        runtime_net_trace("sceHttpSendRequest connect to %s:%u failed: %d", c->target_ip, c->port, WSAGetLastError());
-        closesocket(s);
-        return HTTP_NETWORK;
-    }
-
-    /* Build HTTP request: prefer the stored method name (covers CUSTOM). */
-    const char *method_str = r->method_str[0] ? r->method_str : "GET";
-
-    char header_buf[4096];
-    int hlen = snprintf(header_buf, sizeof(header_buf),
-                        "%s %s HTTP/1.1\r\n"
-                        "Host: %s\r\n"
-                        "User-Agent: CTR-NitroFueled/1.21 PS4\r\n"
-                        "Connection: close\r\n"
-                        "Content-Length: %zu\r\n",
-                        method_str, r->path, c->host, size);
-
-    for (int i = 0; i < r->req_header_count; i++) {
-        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
-                         "%s: %s\r\n", r->req_headers[i].name, r->req_headers[i].value);
-    }
-    /* RyuNET nickname ownership: the server lets this installation's secret (BB_ONLINE_KEY,
-     * written by the launcher or run.py) keep the nickname it first used. Sent only to hosts
-     * redirected to the RyuNET server, never to a real one. */
-    const char *key = c->is_plain_http ? getenv("BB_ONLINE_KEY") : NULL;
-    if (key && strlen(key) == 64 && strspn(key, "0123456789abcdefABCDEF") == 64 &&
-        hlen < (int)sizeof(header_buf) - 96) {
-        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Key: %s\r\n", key);
-    }
-    /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
-     * launcher's Online tab): the server then leaves the game its save's inventory. */
-    const char *inventory = c->is_plain_http ? getenv("BB_ONLINE_INVENTORY") : NULL;
-    if (inventory && strcmp(inventory, "save") == 0 && hlen < (int)sizeof(header_buf) - 48) {
-        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Inventory: save\r\n");
-    }
-    hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
-
-    send(s, header_buf, hlen, 0);
-    if (size > 0 && post_data) {
-        send(s, (const char *)post_data, (int)size, 0);
-    }
-
-    /* Read response */
     char resp_buf[65536];
     int total_read = 0;
-    while (total_read < (int)sizeof(resp_buf) - 1) {
-        int n = recv(s, resp_buf + total_read, (int)sizeof(resp_buf) - 1 - total_read, 0);
-        if (n <= 0) break;
-        total_read += n;
+    const int first = c->redirected ? __atomic_load_n(&g_ryunet_form, __ATOMIC_RELAXED) : 0;
+    for (int tried = 0; tried < RYUNET_FORMS; tried++) {
+        const int form = (first + tried) % RYUNET_FORMS;
+        total_read = http_exchange(c, r, &sin, form, address, post_data, size, resp_buf, (int)sizeof resp_buf);
+        if (total_read < 0) return HTTP_NETWORK;
+        if (!c->redirected) break;
+        if (!ryunet_intercepted(resp_buf, total_read, form)) {
+            ryunet_note_server_clock(resp_buf);
+            ryunet_keep_form(form);
+            break;
+        }
     }
-    resp_buf[total_read] = '\0';
-    closesocket(s);
 
     if (total_read <= 0) {
         runtime_net_trace("sceHttpSendRequest empty response");

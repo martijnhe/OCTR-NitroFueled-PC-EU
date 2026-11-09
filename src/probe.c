@@ -297,6 +297,48 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+/* The game's allocators: USA 1.21, or EU 1.21 0x10 earlier, -1 in any other executable. */
+static long allocators_shift(void) {
+    static const unsigned char free_entry[] = {0x48,0x85,0xf6,0x0f,0x84,0xd6,0,0,0,0x41,0x57,0x41,0x56,0x53};
+    static long shift = -2;
+    if (shift == -2) {
+        shift = !memcmp(image + 0x1590e10, free_entry, sizeof free_entry) ? 0
+              : !memcmp(image + 0x1590e00, free_entry, sizeof free_entry) ? 0x10 : -1;
+    }
+    return shift;
+}
+
+/* What a corrupt block and the blocks beside it hold, and who was freeing it: whether something
+ * wrote over the block, it was freed twice or it never was one tells where to look next. */
+static void dump_corrupt_block(const CONTEXT *c, uintptr_t block) {
+    unsigned char bytes[0x300];
+    SIZE_T got = 0;
+    const uintptr_t from = block - 0x100;
+    fprintf(stderr, "  corrupt block %p, thread %lu: rax=%p rbx=%p rcx=%p rdx=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",
+            (void *)block, GetCurrentThreadId(), (void *)c->Rax, (void *)c->Rbx, (void *)c->Rcx, (void *)c->Rdx,
+            (void *)c->Rdi, (void *)c->R8, (void *)c->R9, (void *)c->R10, (void *)c->R11, (void *)c->R12,
+            (void *)c->R13, (void *)c->R14, (void *)c->R15);
+    ReadProcessMemory(GetCurrentProcess(), (void *)from, bytes, sizeof bytes, &got);
+    for (SIZE_T i = 0; i + 16 <= got; i += 16) {
+        unsigned long long first, second;
+        memcpy(&first, bytes + i, 8);
+        memcpy(&second, bytes + i + 8, 8);
+        fprintf(stderr, "  %c%p: %016llx %016llx\n", from + i == (block & ~(uintptr_t)15) ? '>' : ' ',
+                (void *)(from + i), first, second);
+    }
+    uintptr_t stack[256];
+    got = 0;
+    ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)c->Rsp, stack, sizeof stack, &got);
+    fprintf(stderr, "  callers:");
+    for (SIZE_T i = 0, shown = 0; i < got / sizeof stack[0] && shown < 32; ++i)
+        if (stack[i] - (uintptr_t)image < image_bytes && stack[i] > (uintptr_t)image + 0x80) {
+            fprintf(stderr, " 0x%" PRIxPTR, stack[i] - (uintptr_t)image);
+            ++shown;
+        }
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
@@ -409,15 +451,24 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
-        /* TLSF free() coalescing unlink */
-        if (image && ((c->Rip >= (uintptr_t)image + 0x1590f46 && c->Rip <= (uintptr_t)image + 0x1590f70) ||
-                      (c->Rip >= (uintptr_t)image + 0x159101b && c->Rip <= (uintptr_t)image + 0x1591040))) {
-            static int count = 0;
-            if (!count) fprintf(stderr, "Runtime: bailing corrupt TLSF free (rip=%p, next=%p, prev=%p, pool=%p)\n",
-                (void *)c->Rip, (void *)c->Rcx, (void *)c->Rbx, (void *)c->Rdi);
-            ++count;
-            c->Rip = (uintptr_t)image + 0x1590eea;
-            return EXCEPTION_CONTINUE_EXECUTION;
+        /* A corrupt block given to the game's allocators: it stays allocated and the game goes on,
+         * where the free would have ended it. v0.8.2 meets these online, in the menus after a race:
+         * the block's size is gone before it is freed (guest offset 0x1590e5d, 0x14af64c). */
+        const long shift = image ? allocators_shift() : -1;
+        if (shift >= 0) {
+            const uintptr_t at = c->Rip - (uintptr_t)image + (uintptr_t)shift;
+            const int tlsf = (at >= 0x1590e1e && at <= 0x1590e65) || (at >= 0x1590f46 && at <= 0x1590f70) ||
+                             (at >= 0x159101b && at <= 0x1591040);
+            const int wrapper = at >= 0x14af62e && at <= 0x14af64f;
+            if (tlsf || wrapper) {
+                static int count = 0;
+                if (!count) fprintf(stderr, "Runtime: bailing corrupt free at guest offset 0x%llx (block %p, r8=%p, pool=%p)\n",
+                    (unsigned long long)(c->Rip - (uintptr_t)image), (void *)(wrapper ? c->R15 : c->Rsi), (void *)c->R8, (void *)c->Rdi);
+                if (count < 4) dump_corrupt_block(c, wrapper ? c->R15 : c->Rsi);
+                ++count;
+                c->Rip = (uintptr_t)image + (tlsf ? 0x1590eea : 0x14af709) - (uintptr_t)shift;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
         if (image && c->Rip==(uintptr_t)image+0x40e5f9) {
             static int count=0;
@@ -598,6 +649,7 @@ static ssize_t read_self_memory(void *out, uintptr_t address, size_t size) {
 /* ucontext gregs of IsaRegs.gpr (x86 numbering). */
 static const int isa_gregs[16]={REG_RAX,REG_RCX,REG_RDX,REG_RBX,REG_RSP,REG_RBP,REG_RSI,REG_RDI,
                                 REG_R8,REG_R9,REG_R10,REG_R11,REG_R12,REG_R13,REG_R14,REG_R15};
+static void dump_frames(ucontext_t *uc);
 static void fault(int sig, siginfo_t *info, void *context) {
     if (sig == SIGTRAP && isa_table) {
         /* An int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
@@ -644,20 +696,29 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
-    if (!rip) {
-        /* An indirect call to zero leaves its return address at RSP. A jump or return to zero
-         * may leave something else there, so report this as a candidate call site. */
-        uintptr_t rsp=(uintptr_t)uc->uc_mcontext.gregs[REG_RSP], caller=0;
-        if (rsp && read_self_memory(&caller,rsp,sizeof(caller))==(ssize_t)sizeof(caller)) {
+    /* Native code has frame pointers but no host unwind metadata. */
+    if (rip - (uintptr_t)image < 0x10000000) dump_frames(uc);
+    /* RIP in no mapping at all (zero, or a pointer like 0xffffffff): nothing there to name, and
+     * the unwinder cannot start from it. An indirect call leaves its return address at RSP; a
+     * jump or return may leave something else, so the first stack slots that point into code
+     * are reported as candidate call sites. */
+    const int nowhere = !rip || (site < 0 && rip - (uintptr_t)image >= 0x10000000 &&
+                                 !(dladdr((void *)rip, &where) && where.dli_fname));
+    if (nowhere) {
+        uintptr_t rsp=(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+        int reported=0;
+        for (int slot=0; rsp && slot<64 && reported<6; ++slot) {
+            uintptr_t caller=0;
+            if (read_self_memory(&caller,rsp+(uintptr_t)slot*8,sizeof(caller))!=(ssize_t)sizeof(caller)) break;
             if (caller-(uintptr_t)image<0x10000000)
-                snprintf(line,sizeof(line),"  stack return candidate: guest offset 0x%lx\n",
+                snprintf(line,sizeof(line),"  stack [rsp+0x%x] return candidate: guest offset 0x%lx\n",slot*8,
                          (unsigned long)(caller-(uintptr_t)image));
-            else if (dladdr((void *)caller,&where) && where.dli_fname)
-                snprintf(line,sizeof(line),"  stack return candidate: %s+0x%lx (%s)\n",where.dli_fname,
+            else if (caller>0x10000 && dladdr((void *)caller,&where) && where.dli_fname)
+                snprintf(line,sizeof(line),"  stack [rsp+0x%x] return candidate: %s+0x%lx (%s)\n",slot*8,where.dli_fname,
                          (unsigned long)(caller-(uintptr_t)where.dli_fbase),where.dli_sname ? where.dli_sname : "?");
-            else
-                snprintf(line,sizeof(line),"  stack return candidate: %p\n",(void *)caller);
+            else continue;
             { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+            ++reported;
         }
         snprintf(line,sizeof(line),"  rsp=%p rbp=%p rax=%p rbx=%p rcx=%p rdx=%p\n",
                  (void *)rsp,(void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RBP],
@@ -693,9 +754,10 @@ static void fault(int sig, siginfo_t *info, void *context) {
             { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
         }
     }
-    /* Host call chain (frames with unwind info; guest frames end it). */
+    /* Host call chain (frames with unwind info; guest frames end it). Not from a RIP in no
+     * mapping: the stack candidates above stand for it. */
     void *frames[32];
-    int depth = backtrace(frames, 32);
+    int depth = nowhere ? 0 : backtrace(frames, 32);
     for (int i = 2; i < depth; ++i) {
         if (dladdr(frames[i], &where) && where.dli_fname)
             snprintf(line, sizeof(line), "  #%d %s+0x%lx (%s)\n", i, where.dli_fname,
@@ -856,6 +918,14 @@ void runtime_restart(void) {
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
+    /* The launch supervisor (scripts/launch_lock.py) holds the launch lock and starts run.sh again
+     * on this exit code; an exec below would lose the lock's descriptor and be refused. */
+    const char *restart_code=getenv("BB_RESTART_EXIT_CODE");
+    if (restart_code && *restart_code) {
+        puts("Runtime: restarting (the launch supervisor starts run.sh again)");
+        fflush(NULL);
+        _exit(atoi(restart_code));
+    }
     puts("Runtime: restarting through run.sh");
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
@@ -866,6 +936,10 @@ void runtime_restart(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && !strcmp(argv[1], "--mod-capabilities")) {
+        puts("{\"file_overlays\":1}");
+        return 0;
+    }
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
@@ -1174,6 +1248,7 @@ int main(int argc, char **argv) {
         runtime_set_report_hook(isa_report_hook);
         protect(stubs, stub_area, 5);
     }
+    runtime_lzma_patch(image, size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
@@ -1213,6 +1288,14 @@ int main(int argc, char **argv) {
     runtime_unlock_all_start(image);
     runtime_cinematic_start(image);
     runtime_frontend_start(image);
+    if (!runtime_friends_native_start(image, size)) fail("native Friends refresh callback could not be installed");
+    if (!runtime_online_mode_start(image, size)) fail("native Online mode callback could not be installed");
+    if (!runtime_race_options_start(image, size)) fail("native race option callback could not be installed");
+    runtime_meta_dump_start(image, size); /* BB_META_DUMP=1 (lab) */
+    if (!runtime_public_itemless_start(image, size)) fail("native public Itemless callbacks could not be installed");
+    if (!runtime_time_trial_start(image, size)) fail("Time Trial challenge callback could not be installed");
+    if (!runtime_itemless_start(image, size)) fail("native Itemless collision callback could not be installed");
+    runtime_replay_start(image, size); /* spectator build: native race recording (BB_REPLAY=0 off) */
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};

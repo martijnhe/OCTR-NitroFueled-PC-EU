@@ -36,6 +36,7 @@ typedef struct stat HostStat;
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
 #define MAX_MOUNTS 16
+#include "runtime_mod_files.h"
 
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 typedef struct {
@@ -125,8 +126,17 @@ static int fullscreen_video(const char *guest) {
  * the game sees the archive that much longer. A patch applies only to an archive of the size it was
  * made for. scripts/online_playlist.py makes one (every track in the online race playlist), and
  * scripts/widescreen.py one per archive of a 21:9 or 32:9 layout; one archive has one patch. */
-typedef struct { uint64_t offset; uint32_t length; const uint8_t *data; } PatchRange;
-typedef struct { char guest[256]; uint64_t size, virtual_size; int count; PatchRange *ranges; } ArchivePatch;
+/* A range's bytes: in memory (data) when small, such as an entry's 16-byte record; otherwise read
+ * from the patch file (fd) at file_at when the game reads them, so mods with large assets need no
+ * copy of them in memory. */
+typedef struct { uint64_t offset, file_at; uint32_t length; const uint8_t *data; } PatchRange;
+typedef struct ArchivePatch {
+    char guest[256]; uint64_t size, virtual_size;
+    int count, slot, fd, in_order;
+    PatchRange *ranges;
+    const struct ArchivePatch *private_view;
+} ArchivePatch;
+extern int runtime_private_room_active(void); /* runtime_services.c */
 typedef struct { int used, host, dirty, save_logged, video, overlay; Listing *dir; size_t position; char path[512]; char *commit, *temp; const ArchivePatch *patch; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
@@ -187,6 +197,13 @@ void runtime_file_unmount(const char *guest) {
 }
 static char user_root[512]="user";
 const char *runtime_file_user_dir(void) { return user_root; }
+/* Saves and trophies: BB_PROGRESS_DIR when set, else the user folder. A mod session has its own
+ * user folder (its shader cache is never the vanilla one) but plays on the player's own saves and
+ * trophies (scripts/mod_packages.py), so progress made with mods stays when they are turned off. */
+const char *runtime_file_progress_dir(void) {
+    const char *dir=getenv("BB_PROGRESS_DIR");
+    return dir && *dir ? dir : user_root;
+}
 void runtime_file_configure(const char *app0,const char *user) {
     char path[600];
     snprintf(user_root,sizeof(user_root),"%s",user);
@@ -202,6 +219,22 @@ void runtime_file_configure(const char *app0,const char *user) {
     }
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
+/* The Options menu's Graphics tab and the main menu's Quit Game (PR #117): their relabelled menu
+ * files are an extra archive, archives/update3.pak (scripts/graphics_tab.py, path in
+ * BB_GRAPHICS_TAB_ARCHIVE), which the game loads after update2.pak. Served here instead of a copy
+ * of the game folder, and only when the engine hooks are in (gpu/shim/bbport_graphics_tab.cpp
+ * sets the flag) and the game has no update3.pak of its own. */
+int runtime_graphics_tab_ready;
+static void graphics_tab_archive(const char *guest,char *out,size_t size) {
+    if (!__atomic_load_n(&runtime_graphics_tab_ready,__ATOMIC_ACQUIRE) ||
+        strcasecmp(guest,"/app0/archives/update3.pak")) return;
+    const char *archive=getenv("BB_GRAPHICS_TAB_ARCHIVE");
+    struct stat s;
+    if (!archive || !*archive || !stat(out,&s) || stat(archive,&s)) return;
+    if ((size_t)snprintf(out,size,"%s",archive)>=size) return;
+    static int logged;
+    if (!__atomic_exchange_n(&logged,1,__ATOMIC_ACQ_REL)) printf("Runtime: Graphics tab menus from %s\n",archive);
+}
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
@@ -249,6 +282,11 @@ static int translate(const char *guest,char *out,size_t size) {
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
+    if (!result) {
+        int redirected=mod_file_translate(buffer,out,size);
+        if (redirected<0) result=-redirected;
+    }
+    if (!result) graphics_tab_archive(buffer,out,size);
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;
@@ -307,7 +345,7 @@ static int host_flags(int flags) {
     return r|O_CLOEXEC;
 }
 static void free_listing(Listing *l) { if (l) { free(l->names); free(l->offsets); free(l->types); free(l); } }
-static Listing *list_directory(const char *path) {
+static Listing *list_directory(const char *path,const char *guest) {
     DIR *d=opendir(path);
     if (!d) return NULL;
     Listing *l=calloc(1,sizeof(*l));
@@ -342,6 +380,29 @@ static Listing *list_directory(const char *path) {
         ++l->count; bytes+=n;
     }
     closedir(d);
+    const char *relative=mod_relative(guest);
+    if (l && relative) {
+        pthread_once(&mod_files_once,load_mod_files);
+        size_t prefix=strlen(relative);
+        for (uint32_t i=0;i<mod_file_count;++i) {
+            const char *p=mod_files[i].guest;
+            if (prefix) {
+                if (strncasecmp(p,relative,prefix) || p[prefix]!='/') continue;
+                p+=prefix+1;
+            }
+            const char *slash=strchr(p,'/');size_t n=slash ? (size_t)(slash-p) : strlen(p);
+            int found=0;
+            for (size_t j=0;j<l->count;++j) if (strlen(l->names+l->offsets[j])==n && !strncasecmp(p,l->names+l->offsets[j],n)) {
+                l->types[j]=slash ? 4 : 8;found=1;break;
+            }
+            if (found) continue;
+            l->offsets=realloc(l->offsets,(l->count+1)*sizeof(size_t));
+            l->types=realloc(l->types,l->count+1);l->names=realloc(l->names,bytes+n+1);
+            if (!l->offsets || !l->types || !l->names) { fputs("Out of memory listing mod files\n",stderr);exit(1); }
+            l->offsets[l->count]=bytes;l->types[l->count]=slash ? 4 : 8;
+            memcpy(l->names+bytes,p,n);l->names[bytes+n]=0;bytes+=n+1;++l->count;
+        }
+    }
     return l;
 }
 static void convert_stat(const HostStat *s,GuestStat *g) {
@@ -374,61 +435,159 @@ static File *get(int fd) {
 #define MAX_ARCHIVE_PATCHES 32 /* the widescreen layouts patch 13 archives (scripts/widescreen.py) */
 static ArchivePatch archive_patches[MAX_ARCHIVE_PATCHES];
 static int archive_patch_count;
+static ArchivePatch private_archive_patches[MAX_ARCHIVE_PATCHES];
+static int private_archive_patch_count;
 static pthread_once_t archive_patches_once=PTHREAD_ONCE_INIT;
 
 static uint64_t le64(const uint8_t *p) { uint64_t v=0; for (int i=7;i>=0;--i) v=v<<8|p[i]; return v; }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
 
-/* "BBPAK001" u64 size, u32 n, path[n], u32 count, count x {u64 offset, u32 length, bytes}. */
-static int parse_archive_patch(const uint8_t *b,size_t len,ArchivePatch *out) {
-    if (len<24 || memcmp(b,"BBPAK001",8)) return 0;
-    size_t at=8;
-    out->size=le64(b+at); at+=8;
-    uint32_t n=le32(b+at); at+=4;
-    if (n==0 || n>=sizeof(out->guest) || at+n+4>len) return 0;
-    memcpy(out->guest,b+at,n); out->guest[n]=0; at+=n;
-    uint32_t count=le32(b+at); at+=4;
-    if (count==0 || count>4096) return 0; /* a layout replaces up to 152 entries of an archive: 2 ranges each */
+/* "BBPAK001" u64 size, u32 n, path[n], u32 count, count x {u64 offset, u32 length, bytes}.
+ * Mods replace many entries of one archive (a track pack: thousands, hundreds of MB): up to 65536
+ * ranges, 2 per replaced entry (scripts/mod_overlays.py checks the same bound). */
+#define MAX_PATCH_RANGES 65536
+#define PATCH_RANGE_IN_MEMORY 4096
+static int read_exact(int fd,void *buffer,size_t size,uint64_t at) {
+    for (size_t done=0; done<size;) {
+        ssize_t n=pread(fd,(char *)buffer+done,size-done,(int64_t)(at+done));
+        if (n<=0) return 0;
+        done+=(size_t)n;
+    }
+    return 1;
+}
+static void free_archive_patch(ArchivePatch *p) {
+    if (p->ranges) for (int i=0;i<p->count;++i) free((void *)p->ranges[i].data);
+    free(p->ranges);
+    if (p->fd>=0) close(p->fd);
+    memset(p,0,sizeof(*p)); p->fd=-1;
+}
+static int parse_archive_patch(int fd,uint64_t len,ArchivePatch *out) {
+    uint8_t head[20];
+    out->fd=fd;
+    if (len<24 || !read_exact(fd,head,sizeof(head),0) || memcmp(head,"BBPAK001",8)) return 0;
+    out->size=le64(head+8);
+    uint32_t n=le32(head+16);
+    uint64_t at=20;
+    if (n==0 || n>=sizeof(out->guest) || at+n+4>len || !read_exact(fd,out->guest,n,at)) return 0;
+    out->guest[n]=0; at+=n;
+    uint8_t word[12];
+    if (!read_exact(fd,word,4,at)) return 0;
+    uint32_t count=le32(word); at+=4;
+    if (count==0 || count>MAX_PATCH_RANGES) return 0;
     out->ranges=calloc(count,sizeof(PatchRange));
     if (!out->ranges) return 0;
     out->virtual_size=out->size;
+    out->in_order=1;
     for (uint32_t i=0;i<count;++i) {
-        if (at+12>len) return 0;
+        if (at+12>len || !read_exact(fd,word,12,at)) return 0;
         PatchRange *r=&out->ranges[i];
-        r->offset=le64(b+at); r->length=le32(b+at+8); at+=12;
-        if (r->length>len-at) return 0;
-        r->data=b+at; at+=r->length;
+        r->offset=le64(word); r->length=le32(word+8); at+=12;
+        if (r->length>len-at || r->offset+r->length<r->offset) return 0;
+        r->file_at=at;
+        if (r->length<=PATCH_RANGE_IN_MEMORY) {
+            uint8_t *data=malloc(r->length ? r->length : 1);
+            if (!data) return 0;
+            r->data=data; out->count=(int)i+1; /* freed with the patch if a later range fails */
+            if (!read_exact(fd,data,r->length,at)) return 0;
+        }
+        at+=r->length;
+        if (i && r->offset<out->ranges[i-1].offset+out->ranges[i-1].length) out->in_order=0;
         if (r->offset+r->length>out->virtual_size) out->virtual_size=r->offset+r->length;
     }
     out->count=(int)count;
     return 1;
 }
 
-static void load_archive_patches(void) {
-    const char *list=getenv("BB_ARCHIVE_PATCHES");
+static void load_archive_patch_list(const char *key,ArchivePatch *patches,int *count,int slot_base) {
+    const char *list=getenv(key);
     if (!list || !*list) return;
     char *copy=strdup(list), *save=NULL;
-    for (char *item=strtok_r(copy,"|",&save); item && archive_patch_count<MAX_ARCHIVE_PATCHES; item=strtok_r(NULL,"|",&save)) {
-        FILE *fp=fopen(item,"rb");
-        if (!fp) { printf("Runtime: archive patch %s not readable\n",item); continue; }
-        uint8_t *blob=NULL; size_t len=0;
-        if (!fseek(fp,0,SEEK_END)) {
-            long size=ftell(fp);
-            if (size>0 && size<(64L<<20) && !fseek(fp,0,SEEK_SET) && (blob=malloc((size_t)size)))
-                len=fread(blob,1,(size_t)size,fp);
+    for (char *item=strtok_r(copy,"|",&save); item && *count<MAX_ARCHIVE_PATCHES; item=strtok_r(NULL,"|",&save)) {
+        int fd=open(item,O_RDONLY|O_BINARY|O_CLOEXEC);
+        HostStat st;
+        if (fd<0 || host_fstat(fd,&st)) {
+            printf("Runtime: archive patch %s not readable\n",item);
+            if (fd>=0) close(fd);
+            continue;
         }
-        fclose(fp);
-        ArchivePatch *p=&archive_patches[archive_patch_count];
-        if (blob && parse_archive_patch(blob,len,p)) {
-            ++archive_patch_count; /* the blob stays: the ranges point into it */
+        ArchivePatch *p=&patches[*count];
+        if (parse_archive_patch(fd,(uint64_t)st.st_size,p)) {
+            p->slot=slot_base+(*count)++;
+            /* The file stays open: the large ranges are read from it. */
             printf("Runtime: archive patch for %s (%d ranges, the game sees %llu bytes)\n",p->guest,p->count,
                    (unsigned long long)p->virtual_size);
         } else {
             printf("Runtime: archive patch %s is damaged: not used\n",item);
-            free(p->ranges); memset(p,0,sizeof(*p)); free(blob);
+            free_archive_patch(p);
         }
     }
     free(copy);
+}
+
+static void load_archive_patches(void) {
+    load_archive_patch_list("BB_ARCHIVE_PATCHES",archive_patches,&archive_patch_count,0);
+    load_archive_patch_list("BB_PRIVATE_ARCHIVE_PATCHES",private_archive_patches,
+                            &private_archive_patch_count,MAX_ARCHIVE_PATCHES);
+    for (int i=0;i<archive_patch_count;++i) {
+        ArchivePatch *normal=&archive_patches[i];
+        for (int j=0;j<private_archive_patch_count;++j) {
+            const ArchivePatch *speed=&private_archive_patches[j];
+            if (strcasecmp(normal->guest,speed->guest) || normal->size!=speed->size) continue;
+            if (normal->virtual_size!=speed->virtual_size) {
+                printf("Runtime: Speed archive size differs for %s: private view disabled\n",normal->guest);
+            } else {
+                normal->private_view=speed;
+            }
+            break;
+        }
+    }
+}
+
+static int speed_mode_enabled;
+
+void runtime_speed_mode_set(int enabled) {
+    __atomic_store_n(&speed_mode_enabled, !!enabled, __ATOMIC_RELEASE);
+}
+
+int runtime_speed_mode_enabled(void) {
+    return __atomic_load_n(&speed_mode_enabled, __ATOMIC_ACQUIRE);
+}
+
+/* A private room's race: the game's persistent private session (CPartyManager, which holds
+ * across scene changes), the lobby scene's own private flag (v0.7.5: the RyuNET session flag
+ * outlived a private menu, so a remembered Itemless choice reached public races), or a private
+ * CUP's race (v0.8: the lobby's flag does not hold during it). */
+static int private_race_session(void) {
+    return runtime_private_match_active() || runtime_online_mode_in_private() ||
+           runtime_online_mode_private_cup_race();
+}
+
+int runtime_speed_race_active(void) {
+    /* A server-confirmed public Itemless lobby, or Itemless chosen for the private room. This
+     * predicate gates both archive assets and seasonal pickup spawning; a remembered private
+     * selection alone never enables it outside an active eligible room. */
+    return runtime_public_itemless_active() ||
+           (runtime_speed_mode_enabled() &&
+            (runtime_private_match_active() ||
+             (runtime_private_room_active() && private_race_session())));
+}
+
+static const ArchivePatch *active_archive_patch(const ArchivePatch *normal) {
+    if (!normal || !normal->private_view) return normal;
+    const int selected = runtime_speed_mode_enabled();
+    const int room = runtime_private_room_active();
+    const int private = private_race_session();
+    const int public = runtime_public_itemless_active();
+    /* a replay of a race without crates (Time Trial, Itemless) loads the track without them too */
+    const int replay = runtime_replay_no_crates();
+    const int active = runtime_speed_race_active() || replay;
+    /* Log the actual asset decision, not just the menu's selected label. */
+    static int previous = -1;
+    const int state = selected | (room << 1) | (private << 2) | (public << 3) | (replay << 4);
+    if (__atomic_exchange_n(&previous, state, __ATOMIC_RELAXED) != state)
+        fprintf(stderr, "ITEMLESS assets: selected=%d session_peer=%d private_session=%d public_confirmed=%d replay=%d view=%s archive=%s\n",
+                selected, room, private, public, replay, active ? "ITEMLESS" : "NORMAL", normal->guest);
+    return active ? normal->private_view : normal;
 }
 
 /* The patch for this guest file, when there is one made for an archive of this size. */
@@ -539,7 +698,44 @@ static int commit_file(const File *f) {
     return 0;
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
+/* bbport.ini skip_intro=1 (the launcher's "Skip intro videos"): the two logo videos at start,
+ * Activision's (octane_intro_logo_atvi.bk2) and Beenox's (openinglogo.bk2), are reported missing
+ * and the game goes on without them. Read once from BB_CONFIG. */
+static int skip_intro(void) {
+    static int v=-1;
+    if (v>=0) return v;
+    v=0;
+    const char *config=getenv("BB_CONFIG");
+    FILE *f=config && *config ? fopen(config,"r") : NULL;
+    char line[256];
+    while (f && fgets(line,sizeof(line),f)) {
+        const char *p=line;
+        while (*p==' '||*p=='\t') ++p;
+        if (!strncmp(p,"skip_intro",10)) {
+            p+=10;
+            while (*p==' '||*p=='\t') ++p;
+            if (*p=='=') { ++p; while (*p==' '||*p=='\t') ++p; v=*p=='1'; }
+        }
+    }
+    if (f) fclose(f);
+    return v;
+}
+
+static int intro_video(const char *guest) {
+    static const char *const names[]={"octane_intro_logo_atvi.bk2","openinglogo.bk2"};
+    size_t n=strlen(guest);
+    for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) {
+        size_t k=strlen(names[i]);
+        if (n>=k && !strcasecmp(guest+n-k,names[i]) && (n==k || guest[n-k-1]=='/')) return 1;
+    }
+    return 0;
+}
+
 static int64_t do_open(const char *guest,int flags,int mode) {
+    if (intro_video(guest) && skip_intro()) {
+        printf("Runtime: open(%s) -> skipped (skip_intro)\n",guest);
+        return -ENOENT;
+    }
     if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
     char path[1024];
     int e=translate(guest,path,sizeof(path));
@@ -555,7 +751,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int host=-1;
     if (!host_stat(current,&s) && S_ISDIR(s.st_mode)) {
         if (flags&3) return -EISDIR;
-        if (!(dir=list_directory(current))) return -EACCES;
+        if (!(dir=list_directory(current,guest))) return -EACCES;
     } else if (flags&0x20000) {
         e=errno==ENOENT ? ENOENT : ENOTDIR;
         if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
@@ -597,7 +793,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     }
     struct stat s;
     Listing *dir=NULL;
-    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
+    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path,guest);
 #endif
     pthread_mutex_lock(&lock);
     int fd=-1;
@@ -706,15 +902,25 @@ static int64_t patched_read(const ArchivePatch *p,int h,void *buffer,uint64_t si
         if ((uint64_t)n<from_archive) total=from_archive=(uint64_t)n;
     }
     if (total>from_archive) memset((char *)buffer+from_archive,0,total-from_archive);
-    for (int i=0;i<p->count;++i) {
+    int first=0;
+    if (p->in_order) { /* the first range that ends past off (scripts/archive_patch.py sorts them) */
+        int hi_index=p->count;
+        while (first<hi_index) {
+            int mid=first+(hi_index-first)/2;
+            if (p->ranges[mid].offset+p->ranges[mid].length<=off) first=mid+1; else hi_index=mid;
+        }
+    }
+    for (int i=first;i<p->count;++i) {
         const PatchRange *r=&p->ranges[i];
+        if (p->in_order && r->offset>=off+total) break;
         uint64_t lo=r->offset>off ? r->offset : off, hi=r->offset+r->length<off+total ? r->offset+r->length : off+total;
         if (lo<hi) {
-            memcpy((char *)buffer+(lo-off),r->data+(lo-r->offset),hi-lo);
+            if (r->data) memcpy((char *)buffer+(lo-off),r->data+(lo-r->offset),hi-lo);
+            else if (!read_exact(p->fd,(char *)buffer+(lo-off),hi-lo,r->file_at+(lo-r->offset))) return -EIO;
             /* The log says once that the game read each range (the patch is in use). */
-            static unsigned char seen[MAX_ARCHIVE_PATCHES][64];
-            const int k=(int)(p-archive_patches);
-            if (k>=0 && k<MAX_ARCHIVE_PATCHES && i<64 && !seen[k][i]) {
+            static unsigned char seen[MAX_ARCHIVE_PATCHES*2][64];
+            const int k=p->slot;
+            if (k>=0 && k<MAX_ARCHIVE_PATCHES*2 && i<64 && !seen[k][i]) {
                 seen[k][i]=1;
                 printf("Runtime: archive patch %s: the game read range %d (%u bytes at %llu)\n",p->guest,i,r->length,(unsigned long long)r->offset);
             }
@@ -730,7 +936,7 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     File *pf=get(fd);
     if (pf && pf->patch) {
         int64_t at=host_lseek(h,0,SEEK_CUR);
-        int64_t got=at<0 ? -errno : patched_read(pf->patch,h,buffer,size,at);
+        int64_t got=at<0 ? -errno : patched_read(active_archive_patch(pf->patch),h,buffer,size,at);
         if (got>0 && pf->overlay) overlay_apply(pf->path,buffer,(uint64_t)at,(uint64_t)got);
         if (got>0) { host_lseek(h,at+got,SEEK_SET); runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); }
         if (got>0) { __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
@@ -750,7 +956,7 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     touch_for_write(buffer,size);
     File *pf=get(fd);
     if (pf && pf->patch) {
-        int64_t got=patched_read(pf->patch,h,buffer,size,offset);
+        int64_t got=patched_read(active_archive_patch(pf->patch),h,buffer,size,offset);
         if (got>0 && pf->overlay) overlay_apply(pf->path,buffer,(uint64_t)offset,(uint64_t)got);
         if (got>0) { runtime_memory_note_write((uintptr_t)buffer,(uint64_t)got); __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)got,__ATOMIC_RELAXED); }
         return got;

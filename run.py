@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,11 +33,35 @@ PORT = Path(__file__).resolve().parent
 TITLE_ID = 'CUSA13795'
 APP_VERSION = '01.21'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
+RANGE_TAKEN_CODE = 25  # a program took part of the PS4 address range, a different place each start
+RANGE_TAKEN_TRIES = 8
+START_FAULT_CODE = 3  # a fault the game could not go on from (probe.c)
+START_FAULT_SECONDS = 45  # the title screen comes later than this
+START_FAULT_TRIES = 2
+UNSUPPORTED_GPU_CODE = 24  # no Vulkan 1.3 or no sparse buffers: GPU, driver or loader (gpu/.../vk_platform.h)
 
 sys.path.insert(0, str(PORT / 'scripts'))
+import archive_patch  # noqa: E402  (scripts/)
+import button_prompts  # noqa: E402
+import speed_mode  # noqa: E402
+import item_rules  # noqa: E402
+import online_mode  # noqa: E402
+import perf_report  # noqa: E402
+import native_shaders  # noqa: E402
+import aspect_ratio  # noqa: E402
+import patches  # noqa: E402
+import boot_cache  # noqa: E402
+import launch_lock  # noqa: E402
+import ryunet_session  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
+PERF = None  # the performance diagnostic's collector (scripts/perf_report.py), fed the game's lines
+# Vulkan's start-up, from the game's lines: when its window opened, whether the GPU was opened
+# ("GPU: <name>, <n> MiB VRAM"), the layers installed. A player's game sat on a black window between
+# the two (an overlay's Vulkan layer or a driver hanging): see watch_vulkan_start.
+VULKAN_START = {'window': 0.0, 'ready': False, 'layers': ''}
+VULKAN_START_SECONDS = 20
 
 
 def fail(message, code=1):
@@ -45,6 +70,17 @@ def fail(message, code=1):
         LOG.write(message + '\n')
         LOG.flush()
     sys.exit(code)
+
+
+def blocked(exe, error):
+    """Windows refused to start the game (WinError 5): an antivirus or Smart App Control blocked
+    or quarantined it, usually right after an update replaced it with a new build."""
+    fail(f'Windows did not let {exe.name} start ({error.strerror or error}). An antivirus or Smart App '
+         f'Control blocked it, or moved it to quarantine. Restore it from the quarantine if needed, add '
+         f'the game folder ({exe.parent.parent}) as an exclusion, and start the game again.\n'
+         f'Windows no dejó iniciar {exe.name}. Un antivirus o el Control inteligente de aplicaciones lo '
+         f'bloqueó o lo puso en cuarentena. Restáuralo si hace falta, agrega la carpeta del juego como '
+         f'exclusión y vuelve a iniciar el juego.')
 
 
 def wait_for(pid):
@@ -89,17 +125,39 @@ def emit(text):
             LOG.flush()
         except Exception:
             pass
+    if PERF:
+        try:
+            PERF.feed(text)
+        except Exception:
+            pass
+    for line in text.splitlines():
+        if line.startswith('Window: ') and not VULKAN_START['window']:
+            VULKAN_START['window'] = time.time()
+        elif line.startswith('GPU: ') and ' MiB VRAM' in line:
+            VULKAN_START['ready'] = True
+        elif line.startswith('Vulkan: starting'):
+            VULKAN_START['layers'] = line.partition('layers installed: ')[2].strip()
 
 
 def say(message):
     emit(message + '\n')
 
 
+def startup_call(label, function, *args, **kwargs):
+    if os.environ.get('BB_STARTUP_TIMING') != '1':
+        return function(*args, **kwargs)
+    started = time.perf_counter()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        say(f'Startup: {label} {time.perf_counter() - started:.3f} s')
+
+
 def run_python(script, *args, capture=False, check=True):
     # -X utf8: the embeddable Python of the portable package ignores PYTHONUTF8, and the scripts
     # print the game's title (with its trademark sign) to a pipe.
     command = [sys.executable, '-X', 'utf8', str(PORT / script), *map(str, args)]
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    result = startup_call(script, subprocess.run, command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=None if capture else subprocess.STDOUT, text=True,
                             encoding='utf-8', errors='replace', creationflags=no_console())
     if not capture and result.stdout:
@@ -107,6 +165,18 @@ def run_python(script, *args, capture=False, check=True):
     if check and result.returncode:
         sys.exit(result.returncode)
     return result if capture else None
+
+
+def retry_failed_start(code, seconds, tries):
+    """Whether to start the game again because it stopped on a fault while starting. Two such faults
+    (a global object not there yet) are races: the same PCs start the next time."""
+    return code == START_FAULT_CODE and seconds < START_FAULT_SECONDS and tries < START_FAULT_TRIES
+
+
+def retry_taken_range(code, tries):
+    """Whether to start the game again because the PS4 address range was taken: it fails in an
+    instant, before the window opens, and the next start usually finds the range free."""
+    return code == RANGE_TAKEN_CODE and tries < RANGE_TAKEN_TRIES
 
 
 def find_executable(name):
@@ -176,27 +246,79 @@ def nick_ok(name):
             and name.lower() not in RESERVED_NICKS)
 
 
+def key_store():
+    """Where this PC keeps its keys outside the game folders, so that a deleted, moved or
+    re-downloaded folder keeps the nicknames: %APPDATA% on Windows (as the launcher keeps them),
+    the XDG data folder (~/.local/share) on Linux. None when there is no such folder."""
+    if os.name == 'nt':
+        base = os.environ.get('APPDATA')
+    else:
+        base = os.environ.get('XDG_DATA_HOME') or (os.path.join(os.path.expanduser('~'), '.local', 'share')
+                                                   if os.environ.get('HOME') else None)
+    return Path(base) / 'CTR-NitroFueled-PC' if base else None
+
+
+def valid_key(k):
+    return len(k) == 64 and all(c in '0123456789abcdef' for c in k)
+
+
+def known_keys():
+    """Every key used on this PC (ryunet_online_keys.txt next to the backup; the Windows
+    launcher's KnownKeys): a nickname this folder's key does not own may be another folder's."""
+    store = key_store()
+    try:
+        lines = (store / 'ryunet_online_keys.txt').read_text(encoding='ascii', errors='replace').split()
+    except (OSError, TypeError):
+        return []
+    keys = []
+    for k in (line.strip().lower() for line in lines):
+        if valid_key(k) and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def remember_key(key):
+    store = key_store()
+    if not store or not valid_key(key) or key in known_keys():
+        return
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        with open(store / 'ryunet_online_keys.txt', 'a', encoding='ascii') as f:
+            f.write(key + '\n')
+    except OSError:
+        pass
+
+
+def use_key(data, key):
+    """This folder plays with another of this PC's keys from now on. True when saved."""
+    try:
+        (Path(data) / 'ryunet_online.key').write_text(key + '\n', encoding='ascii')
+    except OSError:
+        return False
+    return True
+
+
 def online_key(data):
     """This installation's secret: the server lets the first key to use a nickname keep it, so
     nobody else can play under it. Created once, next to run.py; the launcher reads the same
     file. Copying the folder to another PC keeps the nicknames; losing the file loses them."""
     path = Path(data) / 'ryunet_online.key'
-    # A second copy outside the game folder (as the launcher keeps it), so that a deleted, moved
-    # or re-downloaded folder on the same PC keeps the nicknames.
-    appdata = os.environ.get('APPDATA')
-    backup = Path(appdata) / 'CTR-NitroFueled-PC' / 'ryunet_online.key' if appdata else None
-    if backup is None and os.name != 'nt':  # Linux, Steam Deck: ~/.config/CTR-NitroFueled-PC
-        config_home = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-        backup = Path(config_home) / 'CTR-NitroFueled-PC' / 'ryunet_online.key'
+    # A second copy outside the game folder (key_store).
+    store = key_store()
+    backup = store / 'ryunet_online.key' if store else None
 
     def read(p):
         try:
             k = p.read_text(encoding='ascii', errors='replace').strip().lower() if p else ''
         except OSError:
             return ''
-        return k if len(k) == 64 and all(c in '0123456789abcdef' for c in k) else ''
+        return k if valid_key(k) else ''
 
-    key = read(path) or read(backup) or secrets.token_hex(32)
+    legacy = None
+    if os.name != 'nt':  # earlier EU editions kept the backup here
+        config_home = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+        legacy = Path(config_home) / 'CTR-NitroFueled-PC' / 'ryunet_online.key'
+    key = read(path) or read(backup) or read(legacy) or secrets.token_hex(32)
     if read(path) != key:
         try:
             path.write_text(key + '\n', encoding='ascii')
@@ -209,6 +331,8 @@ def online_key(data):
             backup.write_text(key + '\n', encoding='ascii')
         except OSError:
             pass
+    remember_key(read(backup))
+    remember_key(key)
     return key
 
 
@@ -219,19 +343,200 @@ def server_key(key, host):
     return hmac.new(bytes.fromhex(key), host.strip().lower().encode('utf-8'), hashlib.sha256).hexdigest()
 
 
-def season_theme(host, port):
-    """The season theme the server announces (GET /ryunet/theme), or None when it does not answer.
-    scripts/patches.py loads it in every level (THEME_VALUES)."""
+def key_hash(skey):
+    """What the server stores of a server key (nick_claims.go keyHash): the key of signatures."""
+    return hashlib.sha256(skey.strip().lower().encode('ascii')).hexdigest()
+
+
+# Seconds to add to this PC's clock to get the RyuNET server's. Signatures carry the time and the
+# server takes them only within 5 minutes of its own clock: with the PC's clock off, every signed
+# request was refused ("nickname signature out of time") and the nickname read as taken.
+SERVER_CLOCK_OFFSET = 0
+
+
+def note_server_clock(reply):
+    """An answer of the RyuNET server (a urllib response or HTTPError): its Date header sets
+    SERVER_CLOCK_OFFSET."""
+    global SERVER_CLOCK_OFFSET
+    import email.utils
+    try:
+        server = email.utils.parsedate_to_datetime(reply.headers.get('Date', '')).timestamp()
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return
+    offset = round(server - time.time())
+    # The header has whole seconds: a few seconds either way change nothing.
+    SERVER_CLOCK_OFFSET = offset if abs(offset) > 5 else 0
+
+
+def proof_header(khash, method, target):
+    """X-RyuNET-Proof for one request (the server's nick_proof.go): signed with the key's hash, so
+    the key never crosses the network, and good once, for a few minutes of the server's time."""
+    ts, nonce = str(int(time.time()) + SERVER_CLOCK_OFFSET), secrets.token_hex(16)
+    mac = hmac.new(khash.encode('ascii'), f'{ts}\n{nonce}\n{method}\n{target}'.encode('utf-8'),
+                   hashlib.sha256).hexdigest()
+    return f'1.{ts}.{nonce}.{mac}'
+
+
+HTTPS_PORT = 443      # the server's nginx: /ryunet/ by HTTPS (tests point it elsewhere)
+HTTPS_FAILED = set()  # servers whose HTTPS failed this run: their next requests go to the port
+
+
+def machine_header():
+    """This PC's anonymous fingerprint for the server's bans (scripts/machine_id.py), once."""
+    global MACHINE
+    if MACHINE is None:
+        try:
+            import machine_id
+            MACHINE = machine_id.header()
+        except Exception:  # never stops a launch
+            MACHINE = ''
+    return MACHINE
+
+
+MACHINE = None
+
+
+def ryunet_json(host, port, target, timeout, method='GET', headers=None, body=None, session=None):
+    """A request to the RyuNET server and its JSON answer, with the reply (for its Date header).
+    By HTTPS on the server's name first (443, where its nginx passes /ryunet/ to the server): a
+    filter on the way cannot rewrite it, and networks that only let 80/443 out reach it. Then by
+    plain HTTP on the port, by name and by address when something on the way answers for the
+    name: an ISP's filter that redirects to its own warning page (Spectrum's Security Shield) or
+    serves one. The game's own requests do the same (src/runtime_http.c). headers(method, target)
+    makes each attempt's headers, so a signature is never sent twice. OSError when none works."""
+    import ipaddress
+    import socket
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None  # the server never redirects: a redirect comes from something on the way
+
+    opener = urllib.request.build_opener(NoRedirect)
+    def urls():
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:  # a certificate can vouch for a name, never a bare address
+            if host not in HTTPS_FAILED:
+                yield f'https://{host}' + (f':{HTTPS_PORT}' if HTTPS_PORT != 443 else '') + target, True
+        yield f'http://{host}:{port}{target}', False
+        # Resolve the filter-bypass address only if the named endpoints did not work.
+        try:
+            address = socket.gethostbyname(host)
+            if address != host:
+                yield f'http://{address}:{port}{target}', False
+        except OSError:
+            pass
+    failure = OSError(f'{host}: no answer')
+    for url, secure in urls():
+        name = url.split('/')[2]
+        request = urllib.request.Request(url, method=method,
+                                         data=body if body is not None else (b'' if method == 'POST' else None),
+                                         headers={**(headers(method, target) if headers else {}),
+                                                  **({'X-RyuNET-Machine': machine_header()} if machine_header() else {}),
+                                                  **({'Content-Type': 'application/json'} if body is not None else {})})
+        try:
+            response = session.open(request, timeout, opener) if session else opener.open(request, timeout=timeout)
+            with response as reply:
+                if 'json' not in (reply.headers.get('Content-Type') or ''):
+                    failure = OSError(f'{name}: answered by something on the way, not the server')
+                    HTTPS_FAILED.update([host] if secure else [])
+                    continue
+                return json.loads(reply.read(1 << 16)), reply  # the theme carries the item rules
+        except urllib.error.HTTPError as error:
+            if secure and 'json' not in (error.headers.get('Content-Type') or ''):
+                HTTPS_FAILED.add(host)  # not the server's answer (no /ryunet/ there yet): the port
+                failure = OSError(f'{name}: HTTPS answered {error.code}')
+                continue
+            if 300 <= error.code < 400:
+                failure = OSError(f'{name}: redirected to {error.headers.get("Location")}')
+                continue
+            raise
+        except OSError as error:  # no 443, a certificate that does not verify, a clock far off
+            if not secure:
+                raise
+            HTTPS_FAILED.add(host)
+            failure = OSError(f'{name}: HTTPS failed ({error})')
+    raise failure
+
+
+def claim_nick(host, port, name, khash, session=None):
+    """Registers this installation for a free nickname, before the game logs in with it (the
+    game's own requests are signed and cannot register). The key's hash crosses the network only
+    here, once. Nothing happens when the server cannot be reached or is older."""
+    import urllib.parse
+    q = urllib.parse.urlencode({'name': name})
+    try:
+        status, _ = ryunet_json(host, port, f'/ryunet/nick?{q}', 4, session=session,
+                                headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t)})
+        if status.get('status') != 'free':
+            return
+        claimed, _ = ryunet_json(host, port, f'/ryunet/nick/claim?{q}', 4, method='POST', session=session,
+                                 headers=lambda m, t: {'X-RyuNET-Proof': proof_header(khash, m, t),
+                                                       'X-RyuNET-Key-Hash': khash})
+        say(f'Nickname {name}: {claimed.get("status")} on {host}')
+    except (OSError, ValueError) as error:
+        say(f'Nickname {name}: could not register it on {host} ({error})')
+
+
+def server_settings(host, port, session=None):
+    """What the server announces for every player (GET /ryunet/theme): the season theme, which
+    scripts/patches.py loads in every level (THEME_VALUES), and the seconds an online race goes on
+    after the first player finishes (end_race_patches). {} when it does not answer."""
+    try:
+        settings, reply = ryunet_json(host, port, '/ryunet/theme', 3, session=session)
+    except (OSError, ValueError):
+        return {}
+    note_server_clock(reply)
+    return settings if isinstance(settings, dict) else {}
+
+
+RELEASES_API = 'https://api.github.com/repos/Ryu7w7/OCTR-NitroFueled-PC/releases/latest'
+
+
+def parse_version(text):
+    """(major, minor, patch, stage) as the launchers compare versions (launcher/appimage_update.py,
+    launcher/windows/port_update.cpp): stage 0 a pre-release, 1 the release, 2 commits after it."""
+    m = re.match(r'^\s*[vV]?(\d{1,5})\.(\d{1,5})(?:\.(\d{1,5}))?(.*?)\s*$', text or '')
+    if not m:
+        return None
+    suffix = m.group(4)
+    while True:
+        for drop in ('-dirty', '-windows', '-linux'):
+            if suffix.endswith(drop):
+                suffix = suffix[:-len(drop)]
+                break
+        else:
+            break
+    stage = 1 if not suffix else 2 if re.fullmatch(r'-\d+-g[0-9a-fA-F]+', suffix) else 0
+    return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), stage
+
+
+def update_notice(env, version):
+    """A release newer than this one: BB_UPDATE_AVAILABLE=<tag>, which the game shows as a notice
+    (gpu/shim/bbport_overlay.cpp). Off with BB_UPDATE_CHECK=0; nothing when GitHub does not answer."""
+    have = parse_version(version)
+    if env.get('BB_UPDATE_CHECK') == '0' or not have:
+        return
     import urllib.request
     try:
-        with urllib.request.urlopen(f'http://{host}:{port}/ryunet/theme', timeout=3) as reply:
-            theme = json.loads(reply.read(4096)).get('theme')
+        request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
+                                                                'User-Agent': 'SacredFire-run.py'})
+        with urllib.request.urlopen(request, timeout=3) as reply:
+            tag = json.loads(reply.read(1 << 20)).get('tag_name', '')
     except (OSError, ValueError, AttributeError):
-        return None
-    return theme if theme in ('default', 'halloween', 'golden') else None
+        return
+    latest = parse_version(tag)
+    if latest and latest > have:
+        env['BB_UPDATE_AVAILABLE'] = tag
+        say(f'A newer release is available: {tag} (update from the launcher)')
 
 
 def setup_online(env, config, data):
+    # The item-box rules come only from the server (below): items are drawn on each player's PC,
+    # so a local setting would let one player pick their own odds.
+    env.pop('BB_ITEM_RULES', None)
     ini_values = {}
     try:
         for l in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
@@ -240,6 +545,10 @@ def setup_online(env, config, data):
                 ini_values[k.strip()] = v.strip()
     except OSError:
         pass
+
+    # Ignore the retired launcher toggle; the native selector owns this session's mode.
+    env.pop('BB_SPEED_MODE', None)
+    env['BB_PUBLIC_ITEMLESS'] = '0'
 
     name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
@@ -267,10 +576,27 @@ def setup_online(env, config, data):
             auth_port = p
 
     env['BB_ONLINE_SERVER'] = host
+    env['BB_ONLINE_HTTP_PORT'] = auth_port  # the runtime's own requests (Friends tab)
     env['BB_ONLINE_NAME'] = name
-    key = online_key(data)
-    if key:
-        env['BB_ONLINE_KEY'] = server_key(key, host)
+    # The server's announcements (used below); its answer also tells its clock, before anything
+    # is signed.
+    with ryunet_session.Session() as session:
+        announced = startup_call('online.server_settings', server_settings, host, auth_port, session=session)
+        if announced.get('itemless_matchmaking') == 1:
+            env['BB_PUBLIC_ITEMLESS'] = '1'
+        if SERVER_CLOCK_OFFSET:
+            env['BB_ONLINE_CLOCK_OFFSET'] = str(SERVER_CLOCK_OFFSET)
+            if abs(SERVER_CLOCK_OFFSET) > 60:
+                minutes = round(abs(SERVER_CLOCK_OFFSET) / 60)
+                say(f"This PC's clock is {minutes} min {'behind' if SERVER_CLOCK_OFFSET > 0 else 'ahead of'} "
+                    "the server's: online uses the server's time, but sync it (Windows: Settings > Time > Sync now).")
+        else:
+            env.pop('BB_ONLINE_CLOCK_OFFSET', None)
+        key = online_key(data)
+        env.pop('BB_ONLINE_KEY', None)  # the key is not sent any more: requests are signed with its hash
+        if key:
+            env['BB_ONLINE_KEYHASH'] = key_hash(server_key(key, host))
+            startup_call('online.claim_nick', claim_nick, host, auth_port, name, env['BB_ONLINE_KEYHASH'], session=session)
     # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
     # instead of the ones bought on the server, which are tied to the nickname.
     if env.get('BB_ONLINE_INVENTORY', ini_values.get('online_inventory', 'server')).strip().lower() == 'save':
@@ -317,96 +643,107 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
-    # Every player loads the theme the server announces (bbport.ini theme= only applies offline).
-    if not env.get('BB_THEME'):
-        theme = season_theme(host, auth_port)
-        if theme:
-            env['BB_THEME'] = theme
-            if theme != 'default':
-                say(f'Season theme from the server: {theme}')
+    # Every player loads the theme the server announces (bbport.ini theme= only applies offline),
+    # and the server's race-end countdown.
+    theme = announced.get('theme')
+    if not env.get('BB_THEME') and theme in ('default', 'halloween', 'golden'):
+        env['BB_THEME'] = theme
+        if theme != 'default':
+            say(f'Season theme from the server: {theme}')
+    end_race = announced.get('end_race_timeout')
+    if not env.get('BB_END_RACE_TIMEOUT') and isinstance(end_race, (int, float)) and 10 <= end_race <= 120:
+        env['BB_END_RACE_TIMEOUT'] = str(end_race)
+        say(f'Online race end countdown from the server: {end_race} s')
+    # The item-box rules (odds, cooldowns) the server's administrators chose, for every player
+    # (scripts/item_rules.py); none: the game's own.
+    items = announced.get('items')
+    rules_file = data / 'out' / 'item_rules' / 'server.json'
+    # The rules' id (server client_gate.go): the game sends it at login once they are applied
+    # (BB_ITEM_RULES_ID, set where they are); "none": the server has no rules to apply.
+    items_id = announced.get('items_id')
+    env['BB_ITEM_RULES_SERVER_ID'] = items_id if isinstance(items_id, str) and items_id.isalnum() else ''
+    if not (isinstance(items, dict) and items) and env['BB_ITEM_RULES_SERVER_ID']:
+        env['BB_ITEM_RULES_SERVER_ID'] = 'none'
+    if isinstance(items, dict) and items:
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
+        rules_file.write_text(json.dumps(items, sort_keys=True), encoding='utf-8')
+        env['BB_ITEM_RULES'] = str(rules_file)
+        say(f'Item rules from the server: {items.get("name") or "custom"}')
 
 
-def uw_disabled(game, config):
-    """Fallback when the ultrawide helpers are absent: 16:9, nothing to do."""
-    from types import SimpleNamespace
-    return SimpleNamespace(enabled=False, game=Path(game), config=str(config),
-                           render_config=str(config))
+def keep_corrupt_free_log():
+    """The game goes on past a corrupt free (probe.c) and the next start writes over this log, the
+    only record of what the block held: a copy stays beside it, the last one."""
+    if LOG and PERF.corrupt_free:
+        LOG.flush()
+        log = Path(LOG.name)
+        kept = log.with_name(f'{log.stem}_corrupt_free.log')
+        shutil.copyfile(log, kept)
+        say(f'A corrupt memory block was caught: the log is kept in {kept.name}')
 
 
-def uw_prepare_native(port, data, env, game, config):
-    """v0.3 native ultrawide dispatch (Settings > Display > Aspect ratio).
-
-    bbport.ini aspect_ratio=16:9|21:9|32:9 drives scripts/ultrawide_dispatch.py;
-    a legacy patches.json toggle still applies when the aspect is 16:9/unset.
-    Missing helpers mean 16:9 (never a fatal error for normal launches).
-    """
-    sys.path.insert(0, str(Path(port) / 'scripts'))
+def finish_perf_report(env, config, data, version, title_id, code):
+    """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
+    RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
+    launcher). Never stops anything: a failure is one line in the log."""
+    if not PERF:
+        return
     try:
-        from ultrawide_dispatch import prepare as dispatch_prepare
-    except Exception as error:
-        print(f'Ultrawide: helpers not available ({error}); running 16:9', flush=True)
-        return uw_disabled(game, config)
-    try:
-        return dispatch_prepare(Path(port), Path(data), env, Path(game), str(config))
-    finally:
+        keep_corrupt_free_log()
+        report = PERF.report({
+            'octr': version[:40],
+            'edition': title_id,
+            'renderer': 'native' if env.get('BB_VK_NATIVE_ONLY') == '1' else 'shadps4',
+            'online': env.get('BB_ONLINE') == '1',
+            'settings': perf_report.settings_of(config),
+            'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
+            'mods': perf_report.mods_in_use(data, env),
+        })
+        if not report.get('overall') and not report.get('fault'):
+            return  # nothing drawn and no crash (a start stopped early): nothing to say
+        path = perf_report.keep(report, data / 'perf')
+        if perf_report.consent(config) != '1':
+            return
+        host = env.get('BB_ONLINE_SERVER') or perf_report.settings_value(config, 'online_server') or 'octr.ryu7w7.xyz'
+        port = env.get('BB_ONLINE_HTTP_PORT', '8080')
+        if ':' in host and not host.startswith('['):
+            host, _, p = host.partition(':')
+            port = p if p.isdigit() else port
+        ryunet_json(host, port, '/ryunet/perf', 4, method='POST',
+                    body=json.dumps(report, separators=(',', ':')).encode())
+        say(f'Performance report sent (anonymous; a copy: {path.name} in perf/)')
+    except Exception as error:  # no network, an old server: the report stays local
+        say(f'Performance report not sent ({type(error).__name__}); a copy stays in perf/')
+
+
+def watch_vulkan_start(process, env):
+    """Waits for the game; True when Vulkan never finished starting (no GPU opened
+    VULKAN_START_SECONDS after the window) and the game was closed to start again without the
+    overlay layers. Once without them, a hang is only reported."""
+    reported = False
+    while True:
         try:
-            sys.path.remove(str(Path(port) / 'scripts'))
-        except ValueError:
+            process.wait(timeout=1)
+            return False
+        except subprocess.TimeoutExpired:
             pass
-
-
-def uw_refresh_native(mode, env, config):
-    try:
-        sys.path.insert(0, str(PORT / 'scripts'))
-        from ultrawide_dispatch import refresh as dispatch_refresh
-        return dispatch_refresh(mode, env, config)
-    except Exception as error:
-        if getattr(mode, 'enabled', False):
-            raise
-        print(f'Ultrawide refresh skipped: {error}', flush=True)
-    finally:
-        try:
-            sys.path.remove(str(PORT / 'scripts'))
-        except ValueError:
-            pass
-
-
-def uw_shaders_native(mode, user_dir, out):
-    try:
-        sys.path.insert(0, str(PORT / 'scripts'))
-        from ultrawide_dispatch import shaders as dispatch_shaders
-        return dispatch_shaders(mode, user_dir, out)
-    except Exception as error:
-        if getattr(mode, 'enabled', False):
-            raise
-        print(f'Ultrawide shaders skipped: {error}', flush=True)
-    finally:
-        try:
-            sys.path.remove(str(PORT / 'scripts'))
-        except ValueError:
-            pass
-
-
-# Short names match the v1.0 external installer hook so its rewrite() can still
-# strip and re-apply cleanly on a v0.3 tree (backward compatibility).
-uw_prepare = uw_prepare_native
-uw_refresh = uw_refresh_native
-uw_shaders = uw_shaders_native
-
-
-def uw_aspect(config):
-    """bbport.ini aspect_ratio: 16:9, 21:9 or 32:9 (GetLostIn's native ultrawide)."""
-    sys.path.insert(0, str(PORT / 'scripts'))
-    try:
-        from ultrawide_dispatch import aspect_setting
-        return aspect_setting(Path(config))
-    except Exception:
-        return '16:9'
-    finally:
-        try:
-            sys.path.remove(str(PORT / 'scripts'))
-        except ValueError:
-            pass
+        opened = VULKAN_START['window']
+        if not opened or VULKAN_START['ready'] or time.time() - opened < VULKAN_START_SECONDS:
+            continue
+        layers = VULKAN_START['layers'] or 'not listed'
+        if not env.get('VK_LOADER_LAYERS_DISABLE'):
+            say(f'--- Vulkan did not finish starting in {VULKAN_START_SECONDS} s (black window). Usually a '
+                f'program that hooks into games (an overlay or recorder: OBS, RivaTuner/Afterburner, Overwolf, '
+                f'Discord, ...) or a broken driver. Starting again without the overlay layers '
+                f'(installed: {layers}).')
+            process.kill()
+            process.wait()
+            return True
+        if not reported:
+            reported = True
+            say('--- Vulkan still did not start without the overlay layers: the graphics driver is the likely '
+                'cause. Reinstall the latest driver for your GPU (on a laptop, the one from its maker too), '
+                'and close overlay and recording programs.')
 
 
 def pump(stream):
@@ -422,6 +759,14 @@ def main():
         wait_for(int(args[1]))
         args = args[2:]
     os.chdir(PORT)  # as run.sh: relative paths are from the port
+    try:
+        with launch_lock.session(Path(os.environ.get('BB_DATA_DIR', PORT))):
+            return launch(args, restarted)
+    except (OSError, ValueError, RuntimeError, boot_cache.prepare.GameCheckError) as error:
+        fail('Launch failed: ' + str(error))
+
+
+def launch(args, restarted=False):
     env = os.environ
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
@@ -460,8 +805,11 @@ def main():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
     # Instruction sets this CPU lacks (MOVBE, BMI1, LZCNT): the ISA rewrite covers them; exit 20
     # is a set nothing covers.
-    features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              text=True, creationflags=no_console())
+    try:
+        features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, text=True, creationflags=no_console())
+    except PermissionError as error:
+        blocked(probe, error)
     if features.returncode == 20:
         print(features.stdout, end='', flush=True)
         sys.exit(20)
@@ -503,7 +851,7 @@ def main():
             fail(f'{game} has the PS4 PKG Tool layout (Image0 and Sc0): prepare it in the launcher first.')
         fail(f'No eboot.bin in {game} (set BB_GAME_DIR to your {TITLE_ID} folder).')
     # The game check compares the executable image with the supported one (CTR NF 1.21).
-    check = subprocess.run([sys.executable, '-X', 'utf8', str(PORT / 'scripts' / 'game_check.py'), str(game)],
+    check = startup_call('game_check', subprocess.run, [sys.executable, '-X', 'utf8', str(PORT / 'scripts' / 'game_check.py'), str(game)],
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, encoding='utf-8', errors='replace', creationflags=no_console())
     if check.returncode:
@@ -516,44 +864,53 @@ def main():
     if 'BB_LANGUAGE' in env:
         say(f'Game language ID: {env["BB_LANGUAGE"]}')
 
-    # GetLostIn's native ultrawide (UltraWide v1.0 by tcosi): the selected aspect ratio
-    # (bbport.ini aspect_ratio, Settings > Display). The European edition uses GetLostIn's port
-    # (scripts/ultrawide_eu.py).
+    import mod_packages
     try:
-        if title_id not in (TITLE_ID, 'CUSA14876'):
-            if uw_aspect(config) in ('21:9', '32:9'):
-                say(f'Ultrawide: made for {TITLE_ID} and CUSA14876; {title_id} runs at 16:9')
-            uw_mode = uw_disabled(game, config)
-        else:
-            uw_mode = uw_prepare(PORT, data, env, game, config)
-    except RuntimeError as error:
-        fail(f'Ultrawide: {error}')
-    game, config = uw_mode.game, uw_mode.config
-
+        game, config = startup_call('mod_packages.prepare', mod_packages.prepare, PORT, data, env, game, config,log=say)
+    except (ValueError, RuntimeError, OSError) as error:
+        fail('Mod launch blocked: ' + str(error) + '\nChoose compatible settings or disable the indicated mod in Mods.')
     original_game = game.resolve()
+    import mod_file_paths
+    mod_file_paths.configure(env)
+    # The Options menu's Graphics tab and the main menu's Quit Game (scripts/graphics_tab.py): an
+    # extra archive of relabelled menus, served by the runtime as archives/update3.pak (no copy of
+    # the game folder). USA/EU 1.21: the engine validates the region's hooks
+    # (gpu/shim/bbport_graphics_tab.cpp), and without them the runtime leaves the menus alone.
+    env.pop('BB_GRAPHICS_TAB_ARCHIVE', None)
+    if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
+        result = run_python('scripts/graphics_tab.py', game, '--out', out, '--settings', config,
+                            capture=True, check=False)
+        for line in result.stdout.splitlines():
+            if line.startswith('archives/update3.pak='):
+                env['BB_GRAPHICS_TAB_ARCHIVE'] = line.partition('=')[2].strip()
+            elif line.strip():
+                say(line.strip())
+        if result.returncode:
+            say(f'Graphics tab: off (scripts/graphics_tab.py stopped with code {result.returncode})')
     game = Path(run_python('scripts/mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'), capture=True).stdout.strip())
     mod_view = game if game.resolve() != original_game else None
     try:
-        run_python('scripts/prepare.py', game, '--out', out)
-        run_python('scripts/link_libc.py', game, '--out', out)
-        run_python('scripts/link_modules.py', game, '--out', out, '--modules',
-                   'libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx')
+        try:
+            boot = startup_call('boot_cache.ensure', boot_cache.ensure, game, out, log=say)
+        except (StopIteration, KeyError, IndexError) as error:
+            fail('Boot preparation failed: ' + str(error))
         # A failed rewrite prints its reason and the game starts without the table.
         isa_args = []
         if isa_rewrite_wanted(missing, env):
-            result = run_python('scripts/isa_rewrite.py', out / 'boot-linked.bin', '--out', out,
+            isa_out = boot / 'isa'
+            result = run_python('scripts/isa_rewrite.py', boot / 'boot-linked.bin', '--out', isa_out,
                                 capture=True, check=False)
             emit(result.stdout)
             if result.returncode == 0:
-                isa_args = ['--isa-rewrite', str(out / 'isa-rewrite.bin')]
+                isa_args = ['--isa-rewrite', str(isa_out / 'isa-rewrite.bin')]
         # Symbol names for the eboot's host-side imports (shadPS4's aerolib list, fetched once).
-        run_python('tools/gen_import_names.py', '--out', out)
+        run_python('tools/gen_import_names.py', '--out', out, '--boot-dir', boot)
         # DLC (optional): the player's add-on packages in dlc\ (BB_DLC_DIR), reported installed.
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
-                   '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
+                   '--dlc-dir', env.get('BB_DLC_DIR') or data / 'dlc')  # empty: dlc\, as run.sh
         # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the
         # game's own shaders, so new tracks and racers do not stop the game to compile them.
         # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
@@ -573,9 +930,94 @@ def main():
         run_python('scripts/online_playlist.py', game, '--out', out)
         playlist_patch = out / 'online_playlist.bbpatch'
         if playlist_patch.is_file():
-            env['BB_ARCHIVE_PATCHES'] = str(playlist_patch)
+            base_patches[archive_patch.read(playlist_patch)[1]] = playlist_patch
+        # Xbox button prompts (bbport.ini button_prompts, scripts/button_prompts.py): the fonts'
+        # button image through archive patches, each keeping the playlist's for the same archive.
+        try:
+            base_patches.update(startup_call('button_prompts.prepare', button_prompts.prepare, game, out, config, env, base_patches))
+        except (OSError, ValueError) as error:
+            say(f'Button prompts: {error}; PlayStation buttons')
         env.setdefault('BB_NEO', '0')
-        settings = uw_mode.render_config if uw_mode.enabled else config
+        # The aspect ratio (bbport.ini aspect_ratio, scripts/aspect_ratio.py): the render
+        # path and the patches read its settings (the player's, with the ones it was made for),
+        # and it adds its archive patches, executable patch and HUD scale. Read again at a restart.
+        layout_saved = {}
+
+        def apply_layout():
+            env.pop('BB_SPEED_MODE', None)
+            for key, value in layout_saved.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
+            layout_saved.clear()
+            layout = startup_call('aspect_ratio.prepare', aspect_ratio.prepare, game, out, config, env, title_id, app_version, base_patches, boot_dir=boot)
+            if mod_packages.ACTIVE and aspect_ratio.selection(aspect_ratio.read_ini(config)) and not layout:
+                raise ValueError('The selected mods cannot use this aspect ratio; see the preparation message above.')
+            if layout:
+                layout_saved.update({key: env.get(key) for key in layout['env']})
+                env.update(layout['env'])
+            archives = aspect_ratio.archive_list(base_patches, layout)
+            if env.get('BB_MOD_ARCHIVE_PLAN'):
+                from mod_overlays import for_launch
+                builtins = {archive_patch.read(p)[1]: Path(p) for p in archives.split('|') if p} if archives else {}
+                composed = for_launch(game, out / 'mod-overlays', env['BB_MOD_ARCHIVE_PLAN'], builtins)
+                archives = '|'.join(str(p) for p in composed.values())
+            # Item-box rules (scripts/item_rules.py): the server's, which setup_online saved, last:
+            # over every systemData.igz copy the game loads, a mod's included.
+            env.pop('BB_ITEM_RULES_ID', None)
+            try:
+                rules_path = env.get('BB_ITEM_RULES')
+                rules = json.loads(Path(rules_path).read_text(encoding='utf-8')) if rules_path else None
+                before = archives
+                archives = startup_call('item_rules.with_rules', item_rules.with_rules, game, out, rules, archives, log=say)
+                server_id = env.get('BB_ITEM_RULES_SERVER_ID', '')
+                if server_id == 'none' or (server_id and rules and archives != before):
+                    env['BB_ITEM_RULES_ID'] = server_id
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                say(f"Item rules: {error}; the game's own odds")
+            env.pop('BB_PRIVATE_ARCHIVE_PATCHES', None)
+            env.pop('BB_ONLINE_MODE_HOOK', None)
+            # Private Itemless AI follows the game's own Time Trial ghosts (scripts/tt_reference.py,
+            # src/runtime_race_options.c); without them it keeps the native route guidance.
+            env.pop('BB_TT_REFERENCE', None)
+            if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
+                tt = run_python('scripts/tt_reference.py', game, '--out', out / 'tt-reference',
+                                capture=True, check=False)
+                if tt.returncode == 0 and (out / 'tt-reference/reference.bin').is_file():
+                    env['BB_TT_REFERENCE'] = str((out / 'tt-reference/reference.bin').resolve())
+                else:
+                    say('Time Trial references not prepared: the AI keeps its native route guidance')
+            if env.get('BB_ONLINE') == '1' or env.get('BB_SPEED_SOLO_TEST') == '1':
+                if title_id in ('CUSA13795', 'CUSA14876') and app_version == '01.21':
+                    base = [Path(p) for p in archives.split('|') if p]
+                    if env.get('BB_ONLINE') == '1':
+                        base, env['BB_ONLINE_MODE_HOOK'] = startup_call('online_mode.prepare', online_mode.prepare,
+                            game, out / 'online-mode', boot / 'eboot.elf', base)
+                        env['BB_MOD_FILE_MAP'] = str((out / 'online-mode/cup-files.map').resolve())
+                        env.setdefault('BB_MOD_SOURCE_GAME', str(game))
+                        env['BB_KNOWN_HEROES'] = startup_call('online_mode.known_heroes', online_mode.known_heroes, game)
+                    try:
+                        normal_patches, speed_patches, track_count = startup_call('speed_mode.prepare', speed_mode.prepare,
+                            game, out / 'speed-mode', base)
+                    except (ValueError, OSError, KeyError, IndexError) as error:
+                        # a damaged game file stops Speed Mode only: online plays as before
+                        say(f'ITEMLESS not available: {error}')
+                        archives = '|'.join(map(str, base))
+                    else:
+                        archives = '|'.join(map(str, normal_patches))
+                        env['BB_PRIVATE_ARCHIVE_PATCHES'] = '|'.join(map(str, speed_patches))
+                        say(f'ITEMLESS: HUD prepared; native Time Trial track rules cover {track_count} tracks')
+            if archives:
+                env['BB_ARCHIVE_PATCHES'] = archives
+            else:
+                env.pop('BB_ARCHIVE_PATCHES', None)
+            return (layout['config'], layout['patches_dir']) if layout else (config, None)
+
+        settings, layout_patches = apply_layout()
+        if mod_packages.ACTIVE:
+            startup_call('mod_packages.preflight', mod_packages.preflight, Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
+                                   [layout_patches] if layout_patches else [], title_id, app_version, game=game)
         apply_render_res(env, settings)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')
         user_dir = Path(env.get('BB_USER_DIR', data / 'user')).resolve()
@@ -598,6 +1040,34 @@ def main():
                 version = candidate.read_text().strip()
                 break
         say(f'SacredFire {version or "unknown version"}')
+        update_notice(env, version)
+        env['BB_OCTR_VERSION'] = version.removeprefix('v').split('-')[0] if version else ''  # the game's login says it
+        env['BB_MACHINE_ID'] = machine_header()  # this PC's anonymous fingerprint, for bans
+        # The graphics engine (bbport.ini renderer): the native Vulkan renderer is experimental; its
+        # shaders are built from this game the first time (scripts/native_shaders.py, ~5 minutes).
+        # Anything that stops it starts the game with shadPS4's Vulkan, as before.
+        if (ini_value(config, 'renderer') or 'shadps4') == 'native' and 'BB_NATIVE_VK' not in env:
+            if not native_shaders.supported(title_id, app_version):
+                say(f'Native Vulkan: only the USA or EU 1.21 game (CUSA13795, CUSA14876) for now; this is {title_id} '
+                    f'{app_version}, so the game starts with Vulkan (shadPS4)')
+            else:
+                shaders = native_shaders.shader_dir(data, title_id, app_version)
+                if not native_shaders.ready(shaders):
+                    say('Native Vulkan: preparing its shaders from your game (only the first time, a few minutes)')
+                    # "@progress" lines: the launchers show a window with a progress bar meanwhile
+                    last = [-1]
+
+                    def progress(percent, stage):
+                        if percent != last[0]:
+                            last[0] = percent
+                            emit(f'@progress native-shaders {percent} {stage}\n')
+                    built = native_shaders.build(PORT, game, shaders, say, progress=progress)
+                    emit(f'@progress native-shaders done {"ok" if built else "failed"}\n')
+                if native_shaders.ready(shaders):
+                    env.update(native_shaders.environment(shaders, ini_value(config, 'temporal') or ''))
+                    say('Graphics engine: native Vulkan (experimental)')
+                else:
+                    say('Native Vulkan: its shaders are not ready, so the game starts with Vulkan (shadPS4)')
         # The GPU library builds its path table when it loads: the user directory must exist.
         user_dir.mkdir(parents=True, exist_ok=True)
         env['BB_GPU_USER_DIR'] = str(user_dir)
@@ -605,20 +1075,26 @@ def main():
         # here, with the patches chosen in the menu, in the same console and log.
         env['BB_RESTART_EXIT_CODE'] = str(RESTART_CODE)
         env.pop('BB_RESTART_COMMAND', None)
-        command = [str(probe), str(out / 'boot-linked.bin'), '--import-names', str(out / 'import_names.txt'),
+        command = [str(probe), str(boot / 'boot-linked.bin'), '--import-names', str(out / 'import_names.txt'),
                    '--content-profile', str(out / 'content.bin'), '--patches', str(out / 'patches.bin'),
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
+        range_tries = start_tries = 0
+        global PERF
+        PERF = perf_report.Collector()
         while True:
-            uw_refresh(uw_mode, env, config)
-            uw_shaders(uw_mode, user_dir, out)
             if not first:  # the in-game menu may have changed render_res
                 apply_render_res(env, settings)
+                if mod_packages.ACTIVE:
+                    startup_call('mod_packages.preflight', mod_packages.preflight, Path(env['BB_PATCHES_DIR']).parent, settings, Path(env['BB_PATCHES_CONFIG']),
+                                           [layout_patches] if layout_patches else [], title_id, app_version, game=game)
             first = False
             run_python('scripts/patches.py', '--patches-dir', env.get('BB_PATCHES_DIR', 'patches'),
+                       *(['--strict-overlap'] if mod_packages.ACTIVE else []),
+                       *(['--patches-dir', layout_patches] if layout_patches else []),
                        '--patches-config', env.get('BB_PATCHES_CONFIG', data / 'patches.json'),
-                       '--app-version', app_version, '--title-id', title_id, '--out', out,
+                       '--app-version', app_version, '--title-id', title_id, '--out', out, '--boot-dir', boot,
                        '--settings', settings)
             # Ultrawide: videos and cutscenes at 16:9 (src/runtime_cinematic.c) unless turned off.
             for key in ('BB_CINEMATIC_16X9', 'BB_CUTSCENE'):
@@ -626,12 +1102,12 @@ def main():
             plan = render_plan_of(settings)
             if plan and plan.get('output') and not ini_has(settings, 'ultrawide_cinematics=0'):
                 env['BB_CINEMATIC_16X9'] = '1'
-                env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out,
+                env['BB_CUTSCENE'] = run_python('scripts/patches.py', '--print-cutscene', '--out', out, '--boot-dir', boot,
                                                 capture=True).stdout.strip()
             # Ultrawide: the title and customization screens fill the width (src/runtime_frontend.c).
             env.pop('BB_FRONTEND_FOV', None)
             if plan and plan.get('output') and not ini_has(settings, 'ultrawide_frontend=0'):
-                env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out,
+                env['BB_FRONTEND_FOV'] = run_python('scripts/patches.py', '--print-frontend', '--out', out, '--boot-dir', boot,
                                                     capture=True).stdout.strip()
             # CTR TV in place of the opening video: every start (ctrtv_at_start=1) or once (ctrtv_next=1,
             # the in-game menu's "Watch CTR TV", removed here).
@@ -683,27 +1159,75 @@ def main():
             # unlock_all (default off; unlock_all=1 starts it on, the in-game menu switches it at any
             # time): the runtime sets the build setups' _unlockAll flag.
             env.pop('BB_UNLOCK_ALL_VTABLE', None)
-            vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, capture=True).stdout.strip()
+            vt = run_python('scripts/patches.py', '--print-unlock-vtable', '--out', out, '--boot-dir', boot, capture=True).stdout.strip()
             if vt:
                 env['BB_UNLOCK_ALL_VTABLE'] = vt
             env['BB_UNLOCK_ALL'] = '1' if ini_has(config, 'unlock_all=1') else '0'
+            # Disable Motion Blur: the eboot patch stops the camera's blur; the blur shaders go too
+            # (objects moving on their own: the crowd, plants; bb_motion_blur.h)
+            env['BB_NO_MOTION_BLUR'] = '1' if ini_has(config, 'patch_no_motion_blur=1') else '0'
+            # Started from Steam (a non-Steam shortcut), Steam turns on its Fossilize layer, which
+            # records every pipeline the game builds: thousands at start, so the window stayed
+            # black for minutes. Steam never ships a shader cache for a shortcut, so it only costs.
+            # The overlay layer (Shift+Tab) stays.
+            env['DISABLE_VK_LAYER_VALVE_steam_fossilize_1'] = '1'
+            applied = patches.applied_game_patches(out)  # None: an older compile, trusted
             if user_vblank:
                 env['BB_VBLANK_HZ'] = user_vblank
-            elif ini_has(config, 'patch_60fps=1'):
+            elif ini_has(config, 'patch_60fps=1') and (applied is None or 'patch_60fps' in applied):
                 # The game's own limiter paces frames; a 60 Hz vblank would quantize late frames.
                 env['BB_VBLANK_HZ'] = '480'
                 say('60 FPS patch on: virtual vblank 480 Hz')
+            elif ini_has(config, 'patch_60fps=1'):
+                # The patch was skipped (its code is not in this build of the update): the game
+                # still waits for vblanks at 30 FPS, and a 480 Hz vblank would run it 8 times fast.
+                env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
+                say('60 FPS patch: not applied (see "Patches: skipped" above); the game runs at '
+                    'its own 30 FPS with a 60 Hz vblank')
             else:
                 env['BB_VBLANK_HZ'] = {'uncap': '480', '90': '90'}.get(fps, '60')
             # No stdin: an inherited pipe (Git Bash, MSYS2) cost the game its console output.
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, creationflags=no_console())
+            try:
+                start_time = time.monotonic()
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, creationflags=no_console())
+            except PermissionError as error:
+                blocked(probe, error)
             reader = threading.Thread(target=pump, args=(process.stdout,), daemon=True)
+            VULKAN_START.update(window=0.0, ready=False)
             reader.start()
+            hung = watch_vulkan_start(process, env)
             code = process.wait()
             reader.join(timeout=5)
+            if hung:
+                # the loader's own switch: no implicit layer this time (the system is not changed)
+                env['VK_LOADER_LAYERS_DISABLE'] = '~implicit~'
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (without overlay layers)')
+                continue
+            if retry_taken_range(code, range_tries):
+                range_tries += 1
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
+                    f'(the memory the game needs was taken: try {range_tries + 1} of {RANGE_TAKEN_TRIES + 1})')
+                continue
+            if retry_failed_start(code, time.monotonic() - start_time, start_tries):
+                start_tries += 1
+                finish_perf_report(env, config, data, version, title_id, code)  # each failed start is counted
+                PERF = perf_report.Collector()
+                say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} '
+                    f'(the game stopped while starting: try {start_tries + 1} of {START_FAULT_TRIES + 1})')
+                continue
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
+                finish_perf_report(env, config, data, version, title_id, code)
+                if code == RANGE_TAKEN_CODE:
+                    say('--- Another program keeps taking the memory the game needs (see the "Module from '
+                        'outside" lines above): close overlays and tuning tools, and exclude the game folder '
+                        'from your antivirus.')
+                if code == UNSUPPORTED_GPU_CODE:
+                    say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
+                        'sparse buffers; the STOP line above says which). Update the graphics driver; if it '
+                        'is already the latest, the GPU is too old for this system.')
+                mod_packages.finish(code)
                 return code
             say(f'--- SacredFire launch {time.strftime("%Y-%m-%d %H:%M:%S")} (restart from the menu)')
     finally:

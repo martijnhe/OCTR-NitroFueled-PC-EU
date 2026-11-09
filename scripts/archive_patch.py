@@ -11,12 +11,14 @@ end (anything between is zeros), and the game sees the archive that much longer.
 import os
 import struct
 from pathlib import Path
+from mod_file_paths import resolve
 
 MAGIC = b'BBPAK001'
 SECTOR = 0x800
 
 
 def write(target, archive, guest, ranges):
+    archive = resolve(archive)
     size = Path(archive).stat().st_size
     path = guest.encode('utf-8')
     out = bytearray(MAGIC + struct.pack('<QI', size, len(path)) + path + struct.pack('<I', len(ranges)))
@@ -54,11 +56,15 @@ def write_entry_patch(target, archive, guest, index, payload):
     write_entries_patch(target, archive, guest, {index: payload})
 
 
-def write_entries_patch(target, archive, guest, entries, base=None):
+def write_entries_patch(target, archive, guest, entries, base=None, override=()):
     """A patch that replaces entries {index: payload} of an IGA v13 archive, each stored
     uncompressed after the end of the archive (on sector boundaries). base, another patch for the
     same archive (path), is kept in it: its ranges first, these entries after its data. The
-    runtime takes one patch per archive, so two features changing one archive share a file."""
+    runtime takes one patch per archive, so two features changing one archive share a file.
+    override names entries among them that base may already replace (its own old record and
+    payload are dropped): the caller already read base's current bytes for those into its own
+    payload, so this is a deliberate second replacement, not an accidental collision."""
+    archive = resolve(archive)
     size = Path(archive).stat().st_size
     ranges, end = [], size
     if base is not None:
@@ -75,6 +81,9 @@ def write_entries_patch(target, archive, guest, entries, base=None):
                 raise ValueError('no such entry')
             f.seek(0x38 + 4 * count + 16 * index)
             records[index] = struct.unpack('<4I', f.read(16))
+    if override:
+        drop = {0x38 + 4 * count + 16 * index for index in override}
+        ranges = [(o, d) for o, d in ranges if o not in drop]
     taken = {o for o, d in ranges if len(d) == 16}
     for index in sorted(entries):
         record_at = 0x38 + 4 * count + 16 * index
@@ -92,6 +101,7 @@ def write_entries_patch(target, archive, guest, entries, base=None):
 
 def view(archive, patch, offset, length):
     """What the game reads (for tests): the archive with the patch applied."""
+    archive = resolve(archive)
     size, _guest, ranges = read(patch)
     end_virtual = max([size] + [o + len(d) for o, d in ranges])
     length = max(0, min(length, end_virtual - offset))

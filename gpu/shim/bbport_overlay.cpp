@@ -25,7 +25,14 @@
 #include <memory>
 #include <vector>
 #include <miniz.h>
+#include "bbport_perf.h"
 #include "bbport_settings.h"
+#include "../../src/runtime_friends.h"
+#include "../../src/runtime_spectate.h"
+#include "../../src/runtime_chat.h"
+#include "../../src/runtime_name_colors.h"
+#include "../../src/runtime_replay_list.h"
+#include "../../src/runtime_net_ping.h"
 #include "imgui.h"
 #include "imgui_internal.h" // RegisterUserTexture: the trophy pictures
 #include "imgui_impl_vulkan.h"
@@ -67,6 +74,8 @@ namespace {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+// OpenMenu (a game thread): opened on the window thread.
+std::atomic<bool> open_request{false};
 // SacredFire: the ultrawide question at start (first start, or every start with ultrawide_ask).
 std::atomic<bool> ultrawide_prompt{false};
 bool unlock_confirm = false; // SacredFire: "Unlock everything" asks before it turns on
@@ -88,6 +97,13 @@ void SetOnline(bool on, const char* name);
 void RestartWithSettings();
 bool ultrawide_prompt_checked = false;
 std::atomic<bool> pad_rescan_requested{false}; // SacredFire: the menu's "Rescan controllers"
+// SacredFire: what each controller port plays with now (runtime_pad.c's pad thread, SetPadStatus).
+struct PadStatus {
+    std::string name; // "" none, "keyboard", or the gamepad's name
+    bool pressing = false;
+};
+std::mutex pad_status_mutex;
+PadStatus pad_status[4];
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
 float base_scale = 1.0f;
@@ -287,6 +303,9 @@ void MenuSection(const char* label) {
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+// Heights of the corner counters last drawn (the ping counter goes under the FPS one, notices
+// under both); the ping one is 0 while it is not shown.
+float corner_fps_height = 0.0f, corner_ping_height = 0.0f;
 
 float PixelDensity(SDL_WindowID id);
 
@@ -393,6 +412,797 @@ void Hint(const char* text) {
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
     }
+}
+
+// RyuNET friends (src/runtime_friends.c): the Friends tab and its notices.
+
+const char* FriendResultText(const std::string& action, const char* word) {
+    const std::string w = word;
+    if (w == "sent") {
+        return action == "invite" ? BbSettings::MenuText("Invitation sent to %s", "Приглашение отправлено: %s")
+                                  : BbSettings::MenuText("Friend request sent to %s", "Запрос отправлен: %s");
+    }
+    if (w == "friends") return BbSettings::MenuText("%s is now your friend", "%s теперь ваш друг");
+    if (w == "removed") return BbSettings::MenuText("Removed: %s", "Удалено: %s");
+    if (w == "busy") return BbSettings::MenuText("%s has too many pending requests", "У %s слишком много запросов");
+    if (w == "full") return BbSettings::MenuText("The friend list is full", "Список друзей заполнен");
+    if (w == "unknown") return BbSettings::MenuText("No registered player is called %s", "Нет игрока с ником %s");
+    if (w == "not_friends") return BbSettings::MenuText("%s is not your friend", "%s не ваш друг");
+    if (w == "none") return BbSettings::MenuText("That request is gone", "Этого запроса больше нет");
+    if (w == "refused") return BbSettings::MenuText("The server refused it", "Сервер отказал");
+    return BbSettings::MenuText("Could not reach the server", "Сервер недоступен");
+}
+
+/// Friend notices: checked every frame. The menu's options leave out friends coming online, or
+/// every notice from friends (the Invite button's own result still shows).
+void PollFriends() {
+    const auto& s = BbSettings::Get();
+    // A newer release (run.py update_notice: BB_UPDATE_AVAILABLE), once, after the boot screens.
+    static const auto started = std::chrono::steady_clock::now();
+    static bool update_told = false;
+    if (!update_told && std::chrono::steady_clock::now() - started > std::chrono::seconds(15)) {
+        update_told = true;
+        if (const char* tag = std::getenv("BB_UPDATE_AVAILABLE"); tag && *tag) {
+            Notify(BbSettings::MenuText("Update available", "Доступно обновление"), tag,
+                   BbSettings::MenuText("Update from the launcher", "Обновите через лаунчер"), 6, nullptr, 0);
+        }
+    }
+    static bool privacy_sent = false;
+    if (!privacy_sent) { // the server learns "appear offline" once per game
+        privacy_sent = true;
+        runtime_friends_set_hidden(s.friends_hide_me);
+        runtime_spectate_set_share(s.spectate_share);
+        runtime_chat_set_enabled(s.chat_enabled);
+        runtime_chat_set_public(s.chat_public);
+        runtime_chat_start();
+        runtime_name_colors_start();
+    }
+    // The server administrators' messages: always shown, whatever the
+    // friends options say.
+    char message[RF_MESSAGE];
+    while (runtime_friends_take_message(message)) {
+        Notify(BbSettings::MenuText("Message from the server", "Сообщение сервера"), message, "", 7, nullptr, 0);
+    }
+    char name[RF_NAME];
+    for (int kind; (kind = runtime_friends_take_event(name));) {
+        const bool own = kind == RF_EVENT_INVITED || kind == RF_EVENT_NO_ONE_ONLINE;
+        if ((s.friends_no_notices && !own) || (s.friends_hide_activity && kind == RF_EVENT_ONLINE)) {
+            continue;
+        }
+        const char *title = "", *detail = "";
+        std::string shown = name;
+        switch (kind) {
+        case RF_EVENT_ONLINE:
+            title = BbSettings::MenuText("Friend online", "Друг в сети");
+            detail = BbSettings::MenuText("has come online", "в сети");
+            break;
+        case RF_EVENT_REQUEST:
+            title = BbSettings::MenuText("Friend request", "Запрос в друзья");
+            detail = BbSettings::MenuText("Menu (Insert / L3+R3) > Friends to accept",
+                                          "Меню (Insert / L3+R3) > Друзья, чтобы принять");
+            break;
+        case RF_EVENT_INVITE:
+            title = BbSettings::MenuText("Invitation", "Приглашение");
+            detail = BbSettings::MenuText("invites you to their room: Menu > Friends > Join",
+                                          "зовёт вас в свою комнату: Меню > Друзья > Войти");
+            break;
+        case RF_EVENT_INVITED: {
+            // The game's Invite button: every friend online ("+N" for several).
+            title = BbSettings::MenuText("Invitation sent", "Приглашение отправлено");
+            if (name[0] == '+') {
+                char count[64];
+                std::snprintf(count, sizeof count, BbSettings::MenuText("%d friends", "друзей: %d"), std::atoi(name + 1));
+                shown = count;
+            }
+            break;
+        }
+        case RF_EVENT_NO_ONE_ONLINE:
+            title = BbSettings::MenuText("Invitation", "Приглашение");
+            shown = BbSettings::MenuText("No friend online", "Нет друзей в сети");
+            detail = BbSettings::MenuText("Add friends in Menu (Insert / L3+R3) > Friends",
+                                          "Добавьте друзей: Меню (Insert / L3+R3) > Друзья");
+            break;
+        case RF_EVENT_ACCEPTED:
+            title = BbSettings::MenuText("New friend", "Новый друг");
+            detail = BbSettings::MenuText("accepted your request", "принял ваш запрос");
+            break;
+        default: continue;
+        }
+        Notify(title, shown, detail, 5, nullptr, 0);
+    }
+}
+
+constexpr ImVec4 kFriendGreen{0.36f, 0.85f, 0.47f, 1.0f};
+
+/// A filled green dot (online) or a grey ring (offline), the height of a line of text.
+void StatusDot(bool online) {
+    const float size = ImGui::GetFontSize();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 centre(p.x + size * 0.5f, p.y + ImGui::GetFrameHeight() * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (online) {
+        dl->AddCircleFilled(centre, size * 0.3f, ImGui::GetColorU32(kFriendGreen));
+    } else {
+        dl->AddCircle(centre, size * 0.28f, ImGui::GetColorU32(kMenuGrey), 0, 1.5f * base_scale);
+    }
+    ImGui::Dummy(ImVec2(size, ImGui::GetFrameHeight()));
+}
+
+// The community's Discord server: bug reports, questions, ban appeals.
+constexpr const char* kCommunityDiscord = "https://discord.gg/PAT5SJzdXw";
+
+void CommunityDiscordLine(const char* why) {
+    ImGui::TextDisabled("%s", why);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(kCommunityDiscord + 8); // without https://
+    ImGui::SameLine();
+    if (ImGui::SmallButton(BbSettings::MenuText("Open", "Открыть"))) SDL_OpenURL(kCommunityDiscord);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(BbSettings::MenuText("Copy link", "Копировать"))) SDL_SetClipboardText(kCommunityDiscord);
+}
+
+// The Report tab's player (filled in by a search result's Report button in the Friends tab, which
+// also brings that tab up).
+char g_report_who[RF_NAME] = "";
+bool g_show_report_tab = false;
+
+// Report tab: a player, to the server's administrators.
+void ReportSection(const RfView& view, char (&who)[RF_NAME]) {
+    static int reason = 0;
+    static char comment[RF_REPORT_COMMENT] = "";
+    static bool sent_here = false;
+    static const char* const reasons[] = {"cheating", "name", "chat", "behavior", "other"};
+    MenuSection(BbSettings::MenuText("Report a player", "Пожаловаться на игрока"));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    ImGui::InputTextWithHint("##report_who", BbSettings::MenuText("Nickname", "Ник"), who, sizeof who);
+    ImGui::SameLine();
+    const char* labels[] = {BbSettings::MenuText("Cheating / hacks", "Читы / взлом"),
+                            BbSettings::MenuText("Offensive name", "Оскорбительный ник"),
+                            BbSettings::MenuText("Offensive chat", "Оскорбления в чате"),
+                            BbSettings::MenuText("Behavior", "Поведение"), BbSettings::MenuText("Other reason", "Другое")};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    ImGui::Combo("##report_reason", &reason, labels, 5);
+    ImGui::TextDisabled("%s", BbSettings::MenuText("Comment (optional): what happened, which track, when",
+                                                   "Комментарий (необязательно): что случилось, трасса, когда"));
+    ImGui::InputTextMultiline("##report_comment", comment, 301,
+                              ImVec2(ImGui::GetFontSize() * 23.0f, ImGui::GetTextLineHeight() * 3.5f));
+    ImGui::BeginDisabled(view.reporting || std::strlen(who) < 3);
+    if (ImGui::Button(BbSettings::MenuText("Send report", "Отправить жалобу"))) {
+        runtime_friends_report(who, reasons[reason], comment);
+        sent_here = true;
+    }
+    ImGui::EndDisabled();
+    const std::string result = view.report_result;
+    if (view.reporting) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Sending...", "Отправка..."));
+    } else if (sent_here && !result.empty()) {
+        if (result == "sent") {
+            ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("Report sent. Thank you: the administrators will review it.",
+                                                                       "Жалоба отправлена. Спасибо: администраторы её рассмотрят."));
+            who[0] = '\0';
+            comment[0] = '\0';
+            reason = 0;
+        } else {
+            const char* why = result == "already"   ? BbSettings::MenuText("You already reported this player today.", "Вы уже жаловались на этого игрока сегодня.")
+                              : result == "limit"   ? BbSettings::MenuText("You have sent the most reports for today.", "Лимит жалоб на сегодня исчерпан.")
+                              : result == "unknown" ? BbSettings::MenuText("No registered player has that nickname.", "Нет игрока с таким ником.")
+                              : result == "self"    ? BbSettings::MenuText("You cannot report yourself.", "Нельзя пожаловаться на себя.")
+                                                    : BbSettings::MenuText("The report could not be sent; try again later.", "Не удалось отправить жалобу; попробуйте позже.");
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", why);
+        }
+        if (result == "sent") sent_here = false; // the fields are cleared; the next report starts anew
+    }
+    ImGui::Spacing();
+    CommunityDiscordLine(BbSettings::MenuText("Bugs, questions or a ban appeal: our Discord",
+                                              "Ошибки, вопросы или обжалование бана: наш Discord"));
+}
+
+/// The players in the room the game talks to, with their round trip (src/runtime_net_ping.h), as
+/// lines of text: in the Room tab and in the corner counter (show_ping). Their count.
+int PingLines() {
+    PingPeer peers[PING_MAX_PEERS];
+    const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
+    int older = 0;
+    for (int i = 0; i < count; ++i) {
+        const PingPeer& p = peers[i];
+        if (p.ms == PING_OLDER_PORT) {
+            ++older;
+            continue;
+        }
+        const char* name = p.name[0] ? p.name : "...";
+        if (p.ms == PING_NO_ANSWER) {
+            ImGui::TextColored(kMenuGrey, "%s  -", name);
+            continue;
+        }
+        const ImVec4 color = p.ms < 80 ? kFriendGreen : p.ms < 150 ? kMenuYellow : ImVec4{1.0f, 0.42f, 0.38f, 1.0f};
+        ImGui::Text("%s", name);
+        ImGui::SameLine();
+        ImGui::TextColored(color, "%d ms", p.ms);
+    }
+    if (older) {
+        ImGui::TextColored(kMenuGrey, BbSettings::MenuText("+%d with an older version (no ping)",
+                                                           "+%d со старой версией (без пинга)"),
+                           older);
+    }
+    return count;
+}
+
+bool InOnlineRoom() {
+    PingPeer peers[PING_MAX_PEERS];
+    return runtime_net_ping_view(peers, PING_MAX_PEERS) > 0;
+}
+
+// The chat of a room (src/runtime_chat.c).
+std::atomic<bool> chat_typing{false}; // the keyboard is the chat's, with no menu open
+std::atomic<bool> chat_closing{false}; // it was, and the key that closed it may still be down
+bool chat_focus = false;
+char chat_input[RC_SEND] = "";
+RcLine chat_lines[RC_LINES];
+int chat_line_count = 0, chat_status = RC_STATUS_OK;
+unsigned chat_seen = 0;
+
+bool ChatShowing() {
+    return BbSettings::Get().chat_enabled && runtime_chat_available();
+}
+
+/// New lines since the last look; true when there are.
+bool ChatRefresh() {
+    if (const unsigned serial = runtime_chat_serial(); serial != chat_seen) {
+        chat_seen = runtime_chat_view(chat_lines, RC_LINES, &chat_line_count, &chat_status);
+        return true;
+    }
+    return false;
+}
+
+const char* ChatOwnName() {
+    const char* me = std::getenv("BB_ONLINE_NAME");
+    return me ? me : "";
+}
+
+void ChatLine(const RcLine& line) {
+    const bool mine = !SDL_strcasecmp(line.nick, ChatOwnName());
+    float own[3];
+    const ImVec4 color = runtime_name_color(line.nick, own) ? ImVec4(own[0], own[1], own[2], 1.0f)
+                         : mine                             ? kFriendGreen
+                                                            : kMenuYellow;
+    ImGui::TextColored(color, "%s:", line.nick);
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", line.text);
+}
+
+/// The lines over the lobby and the results, with no menu open. T writes (HandleEvent).
+void ChatBox() {
+    ChatRefresh();
+    constexpr int kShown = 6;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float em = ImGui::GetFontSize();
+    const bool typing = chat_typing;
+    ImGui::SetNextWindowPos(ImVec2(em, io.DisplaySize.y * 0.86f), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(typing ? 0.80f : 0.40f);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings;
+    if (!typing) {
+        flags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav;
+    }
+    ImGui::Begin("##chat", nullptr, flags);
+    ImGui::PushTextWrapPos(em * 26.0f);
+    for (int i = std::max(0, chat_line_count - kShown); i < chat_line_count; ++i) {
+        ChatLine(chat_lines[i]);
+    }
+    ImGui::PopTextWrapPos();
+    if (typing) {
+        if (chat_focus) {
+            ImGui::SetKeyboardFocusHere();
+            chat_focus = false;
+        }
+        ImGui::SetNextItemWidth(em * 26.0f);
+        const bool enter = ImGui::InputTextWithHint("##chat_input", BbSettings::MenuText("Write a message", "Введите сообщение"),
+                                                    chat_input, sizeof chat_input, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (enter && chat_input[0]) {
+                runtime_chat_send(chat_input);
+            }
+            chat_input[0] = '\0';
+            chat_typing = false;
+        }
+    } else {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("T: write   L3+R3 > Room", "T: написать   L3+R3 > Комната"));
+    }
+    ImGui::End();
+}
+
+/// In the Room tab: the same chat for a controller, muting and reporting.
+void ChatSection() {
+    auto& s = BbSettings::Get();
+    MenuSection(BbSettings::MenuText("Room chat", "Чат комнаты"));
+    bool on = s.chat_enabled;
+    if (ImGui::Checkbox(BbSettings::MenuText("Show the chat", "Показывать чат"), &on)) {
+        Store(s.chat_enabled, on, true);
+        runtime_chat_set_enabled(on);
+    }
+    if (!on) {
+        return;
+    }
+    bool open_rooms = s.chat_public;
+    if (ImGui::Checkbox(BbSettings::MenuText("Also in public lobbies", "Также в публичных лобби"), &open_rooms)) {
+        Store(s.chat_public, open_rooms, true);
+        runtime_chat_set_public(open_rooms);
+    }
+    if (!runtime_chat_available()) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("It works in rooms: in the lobby, and once you finish the race in private ones.",
+                                                       "Работает в комнатах: в лобби, а в приватных и после финиша."));
+        return;
+    }
+    const bool fresh = ChatRefresh();
+    const float em = ImGui::GetFontSize();
+    ImGui::BeginChild("##chat_log", ImVec2(em * 27.0f, ImGui::GetTextLineHeightWithSpacing() * 8.0f), ImGuiChildFlags_Borders);
+    for (int i = 0; i < chat_line_count; ++i) {
+        ChatLine(chat_lines[i]);
+    }
+    if (fresh) {
+        ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+    ImGui::SetNextItemWidth(em * 21.0f);
+    bool send = ImGui::InputTextWithHint("##chat_menu", BbSettings::MenuText("Write a message", "Введите сообщение"), chat_input,
+                                         sizeof chat_input, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (send) {
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+    ImGui::SameLine();
+    send |= ImGui::Button(BbSettings::MenuText("Send", "Отправить"));
+    if (send && chat_input[0]) {
+        runtime_chat_send(chat_input);
+        chat_input[0] = '\0';
+    }
+    if (chat_status != RC_STATUS_OK) {
+        const char* why =
+            chat_status == RC_STATUS_WAIT      ? BbSettings::MenuText("Too fast: wait a moment.", "Слишком быстро: подождите.")
+            : chat_status == RC_STATUS_REFUSED ? BbSettings::MenuText("The chat does not let you in this room right now.",
+                                                                      "Сейчас чат этой комнаты вам недоступен.")
+                                               : BbSettings::MenuText("The message could not be sent.", "Не удалось отправить сообщение.");
+        ImGui::TextColored(kMenuYellow, "%s", why);
+    }
+    ImGui::Spacing();
+    // Who can be muted or reported: the players of the room and who wrote.
+    std::vector<std::string> players;
+    const auto add = [&](const char* nick) {
+        if (nick[0] && SDL_strcasecmp(nick, ChatOwnName()) &&
+            std::find(players.begin(), players.end(), nick) == players.end()) {
+            players.emplace_back(nick);
+        }
+    };
+    PingPeer peers[PING_MAX_PEERS];
+    const int count = runtime_net_ping_view(peers, PING_MAX_PEERS);
+    for (int i = 0; i < count; ++i) {
+        add(peers[i].name);
+    }
+    for (int i = 0; i < chat_line_count; ++i) {
+        add(chat_lines[i].nick);
+    }
+    if (!players.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Players in the chat", "Игроки в чате"));
+    }
+    for (const std::string& nick : players) {
+        ImGui::PushID(nick.c_str());
+        ImGui::TextUnformatted(nick.c_str());
+        ImGui::SameLine(em * 11.0f);
+        const bool muted = runtime_chat_muted(nick.c_str());
+        if (ImGui::SmallButton(muted ? BbSettings::MenuText("Unmute", "Включить звук") : BbSettings::MenuText("Mute", "Заглушить"))) {
+            runtime_chat_mute(nick.c_str(), !muted);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(BbSettings::MenuText("Report", "Пожаловаться"))) {
+            std::snprintf(g_report_who, sizeof g_report_who, "%s", nick.c_str());
+            g_show_report_tab = true;
+        }
+        ImGui::PopID();
+    }
+    ImGui::Spacing();
+}
+
+void RoomTab() {
+    auto& s = BbSettings::Get();
+    ChatSection();
+    MenuSection(BbSettings::MenuText("Players in the room", "Игроки в комнате"));
+    if (!InOnlineRoom()) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("You are not in an online room right now.",
+                                                       "Сейчас вы не в онлайн-комнате."));
+    } else {
+        PingLines();
+    }
+    ImGui::Spacing();
+    bool ping = s.show_ping;
+    if (ImGui::Checkbox(BbSettings::MenuText("Ping counter in corner", "Счётчик пинга в углу"), &ping)) {
+        s.show_ping = ping;
+        BbSettings::Save();
+    }
+    ImGui::TextDisabled("%s", BbSettings::MenuText("Round trip to each player in your online room, in ms. Players with an "
+                                                   "older version show no ping.",
+                                                   "Задержка до каждого игрока в вашей онлайн-комнате, в мс. У игроков "
+                                                   "со старой версией пинга нет."));
+}
+
+void ReportTab() {
+    static RfView view;
+    static unsigned seen = ~0u;
+    if (const unsigned serial = runtime_friends_serial(); serial != seen) {
+        runtime_friends_view(&view);
+        seen = view.serial;
+    }
+    if (view.state == RF_OFF) {
+        ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                     "Reporting a player needs online play on and a nickname of your own (launcher > Online).",
+                                     "Для жалобы нужен онлайн и свой ник (лаунчер > Онлайн)."));
+        return;
+    }
+    ReportSection(view, g_report_who);
+}
+
+// Spectator build: the races in RaceReplay (src/runtime_replay.c records them), newest first.
+void ReplaysTab() {
+    static RrListEntry list[RR_LIST_MAX];
+    static int listed = -1;
+    static double listed_at = -100.0;
+    const double now = ImGui::GetTime();
+    if (listed < 0 || now - listed_at > 3.0) {
+        listed = runtime_replay_list(list, RR_LIST_MAX);
+        listed_at = now;
+    }
+    ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                 "Every race is recorded. Watch one from the main menu: L1 / R1 lap, L2 / R2 racer, "
+                                 "Square pause, Up / Down speed, Left / Right rewind and fast forward; leave with the pause "
+                                 "menu's Quit.",
+                                 "Каждая гонка записывается."));
+    const bool can_start = runtime_replay_can_start() != 0;
+    if (runtime_replay_playing()) {
+        ImGui::TextColored(kFriendGreen, "%s", BbSettings::MenuText("A replay is on.", "Идёт повтор."));
+    } else if (!can_start) {
+        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("Replays start from the menus, not during a race.",
+                                                                   "Повторы запускаются из меню, не во время гонки."));
+    }
+    // managing them: the shared "replays" folder next to bbport.ini (export copies a race there, import takes the
+    // races put there), and deleting one (asked twice)
+    static std::string status;
+    static double status_at = -100.0;
+    static char confirm_delete[64] = "";
+    const auto say = [&](const std::string& text) {
+        status = text;
+        status_at = now;
+    };
+    if (ImGui::Button(BbSettings::MenuText("Import", "Импорт"))) {
+        const int copied = runtime_replay_import();
+        char text[160];
+        if (copied < 0) {
+            std::snprintf(text, sizeof text, "%s",
+                          BbSettings::MenuText("No races in the replays folder: put .crr files there first.",
+                                               "В папке replays нет гонок."));
+        } else {
+            std::snprintf(text, sizeof text, BbSettings::MenuText("%d new race(s) imported.", "Импортировано: %d."), copied);
+        }
+        say(text);
+        listed = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(BbSettings::MenuText("Open folder", "Открыть папку"))) {
+        char folder[700];
+        runtime_replay_folder(folder, sizeof folder);
+        std::string url = "file:///";
+        for (const char* c = folder; *c; ++c) url += *c == '\\' ? '/' : *c;
+        SDL_OpenURL(url.c_str());
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", BbSettings::MenuText("(the replays folder next to the game)", "(папка replays рядом с игрой)"));
+    if (!status.empty() && now - status_at < 6.0) ImGui::TextColored(kFriendGreen, "%s", status.c_str());
+    if (!listed) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("No races recorded yet.", "Записанных гонок пока нет."));
+        return;
+    }
+    if (ImGui::BeginTable("##replays", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        for (int i = 0; i < listed; ++i) {
+            const RrListEntry& e = list[i];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(!can_start);
+            if (ImGui::SmallButton(BbSettings::MenuText("Watch", "Смотреть")) && runtime_replay_play_file(e.file)) {
+                SetOpen(false);
+            }
+            ImGui::EndDisabled();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.track);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.player);
+            ImGui::TableNextColumn();
+            if (e.place) ImGui::Text("#%d", e.place);
+            else ImGui::TextDisabled("-");
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s  %d:%02d", e.when, (int)e.duration / 60, (int)e.duration % 60);
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton(BbSettings::MenuText("Export", "Экспорт"))) {
+                char saved[200] = "", text[300];
+                if (runtime_replay_export(e.file, saved, sizeof saved)) {
+                    std::snprintf(text, sizeof text, BbSettings::MenuText("Exported to the replays folder: %s",
+                                                                          "Сохранено в папку replays: %s"), saved);
+                } else {
+                    std::snprintf(text, sizeof text, "%s", BbSettings::MenuText("Could not export it.", "Не удалось экспортировать."));
+                }
+                say(text);
+            }
+            ImGui::TableNextColumn();
+            if (!std::strcmp(confirm_delete, e.file)) {
+                if (ImGui::SmallButton(BbSettings::MenuText("Sure? Delete", "Точно удалить?"))) {
+                    say(runtime_replay_delete(e.file) ? BbSettings::MenuText("Deleted.", "Удалено.")
+                                                      : BbSettings::MenuText("Could not delete it.", "Не удалось удалить."));
+                    confirm_delete[0] = 0;
+                    listed = -1;
+                }
+            } else if (ImGui::SmallButton(BbSettings::MenuText("Delete", "Удалить"))) {
+                std::snprintf(confirm_delete, sizeof confirm_delete, "%s", e.file);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+}
+
+void FriendsTab() {
+    static RfView view;
+    static unsigned seen = ~0u;
+    static char query[RF_NAME] = "";
+    static std::string last_action;
+    if (const unsigned serial = runtime_friends_serial(); serial != seen) {
+        runtime_friends_view(&view);
+        seen = view.serial;
+    }
+    const ImVec4 green = kFriendGreen;
+    auto act = [](const char* action, const char* who) {
+        last_action = action;
+        runtime_friends_action(action, who);
+    };
+
+    if (view.state == RF_OFF) {
+        ImGui::TextWrapped("%s", BbSettings::MenuText(
+                                     "Friends need online play on and a nickname of your own (launcher > Online).",
+                                     "Для друзей нужен онлайн и свой ник (лаунчер > Онлайн)."));
+        return;
+    }
+    if (view.state == RF_WAITING) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Connecting to the server...", "Подключение к серверу..."));
+        return;
+    }
+    if (view.state == RF_REFUSED) {
+        ImGui::TextColored(kMenuYellow, "%s",
+                           BbSettings::MenuText("The server did not accept this nickname for friends: it must be "
+                                                "registered (it is when you log in once with this launcher).",
+                                                "Сервер не принял этот ник для друзей: он должен быть "
+                                                "зарегистрирован."));
+        return;
+    }
+    if (view.state == RF_UNREACHABLE) {
+        ImGui::TextColored(kMenuYellow, "%s", BbSettings::MenuText("The server is not answering; retrying...",
+                                                                   "Сервер не отвечает; повтор..."));
+    }
+    if (view.result[0] && !last_action.empty()) {
+        char line[160];
+        std::snprintf(line, sizeof line, FriendResultText(last_action, view.result), view.result_who);
+        ImGui::TextColored(kMenuGrey, "%s", line);
+    }
+
+    if (view.invite_count) {
+        MenuSection(BbSettings::MenuText("Invitations", "Приглашения"));
+        for (int i = 0; i < view.invite_count; ++i) {
+            const RfInvite& inv = view.invites[i];
+            ImGui::PushID(i);
+            ImGui::Text(BbSettings::MenuText("%s invites you to their room", "%s зовёт вас в комнату"), inv.from);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Join", "Войти"))) {
+                runtime_friends_join(inv.from);
+                SetOpen(false);
+            }
+            ImGui::PopID();
+        }
+    }
+    if (view.incoming_count) {
+        MenuSection(BbSettings::MenuText("Friend requests", "Запросы в друзья"));
+        for (int i = 0; i < view.incoming_count; ++i) {
+            ImGui::PushID(view.incoming[i]);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(view.incoming[i]);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Accept", "Принять"))) act("accept", view.incoming[i]);
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Decline", "Отклонить"))) act("decline", view.incoming[i]);
+            ImGui::PopID();
+        }
+    }
+
+    MenuSection(BbSettings::MenuText("Add a friend", "Добавить друга"));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+    const bool enter = ImGui::InputTextWithHint("##friend_search", BbSettings::MenuText("Nickname", "Ник"), query,
+                                                sizeof query, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::Button(BbSettings::MenuText("Search", "Найти")) || enter) && std::strlen(query) >= 2) {
+        runtime_friends_search(query);
+    }
+    if (view.searching) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Searching...", "Поиск..."));
+    } else if (view.search_query[0] && !view.search_count) {
+        ImGui::TextDisabled(BbSettings::MenuText("No registered nickname starts with \"%s\"",
+                                                 "Нет ников, начинающихся с \"%s\""),
+                            view.search_query);
+    }
+    for (int i = 0; i < view.search_count; ++i) {
+        const RfPlayer& p = view.search[i];
+        const std::string relation = p.relation;
+        ImGui::PushID(1000 + i);
+        ImGui::AlignTextToFramePadding();
+        StatusDot(p.online);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(p.name);
+        ImGui::SameLine();
+        if (relation == "friend") {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Friend", "Друг"));
+        } else if (relation == "sent") {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Request sent", "Запрос отправлен"));
+        } else if (relation == "received") {
+            if (ImGui::Button(BbSettings::MenuText("Accept", "Принять"))) act("accept", p.name);
+        } else if (ImGui::Button(BbSettings::MenuText("Add", "Добавить"))) {
+            act("request", p.name);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(BbSettings::MenuText("Report", "Пожаловаться"))) {
+            std::snprintf(g_report_who, sizeof g_report_who, "%s", p.name);
+            g_show_report_tab = true;
+        }
+        ImGui::PopID();
+    }
+    if (view.outgoing_count) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Requests you sent:", "Ваши запросы:"));
+        for (int i = 0; i < view.outgoing_count; ++i) {
+            ImGui::PushID(2000 + i);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(view.outgoing[i]);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(BbSettings::MenuText("Cancel", "Отменить"))) act("remove", view.outgoing[i]);
+            ImGui::PopID();
+        }
+    }
+
+    char title[64];
+    std::snprintf(title, sizeof title, BbSettings::MenuText("Friends (%d)", "Друзья (%d)"), view.friend_count);
+    MenuSection(title);
+    if (!view.friend_count) {
+        ImGui::TextDisabled("%s", BbSettings::MenuText("No friends yet: search for a nickname above.",
+                                                       "Друзей пока нет: найдите ник выше."));
+    }
+    static std::string confirm_remove;
+    auto friend_row = [&](const RfFriend& f) {
+        ImGui::PushID(f.name);
+        ImGui::AlignTextToFramePadding();
+        StatusDot(f.online);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(f.name);
+        ImGui::SameLine();
+        if (!f.online) {
+            ImGui::TextDisabled("%s", BbSettings::MenuText("Offline", "Не в сети"));
+        } else if (f.players > 1) {
+            ImGui::TextColored(green, BbSettings::MenuText("In a room (%d/%d)", "В комнате (%d/%d)"), f.players, f.max);
+        } else {
+            ImGui::TextColored(green, "%s", BbSettings::MenuText("Online", "В сети"));
+        }
+        if (f.online) {
+            ImGui::SameLine();
+            if (ImGui::Button(BbSettings::MenuText("Invite", "Пригласить"))) act("invite", f.name);
+            ImGui::SameLine();
+            // Spectator build: the friend's live race (else their newest shared race), then each next race of
+            // theirs by itself until Stop spectating.
+            char followed[32] = "";
+            if (runtime_spectate_following(followed, sizeof followed) && !std::strcmp(followed, f.name)) {
+                if (ImGui::Button(BbSettings::MenuText("Stop spectating", "Не смотреть"))) runtime_spectate_stop();
+            } else if (ImGui::Button(BbSettings::MenuText("Spectate (beta)", "Смотреть (бета)"))) {
+                runtime_spectate_watch(f.name);
+            }
+        }
+        ImGui::SameLine();
+        if (confirm_remove == f.name) {
+            if (ImGui::Button(BbSettings::MenuText("Sure? Remove", "Точно удалить?"))) {
+                act("remove", f.name);
+                confirm_remove.clear();
+            }
+        } else if (ImGui::SmallButton(BbSettings::MenuText("Remove", "Удалить"))) {
+            confirm_remove = f.name;
+        }
+        ImGui::PopID();
+    };
+    {   // Spectator build: the last Spectate request
+        int spectate = RS_IDLE;
+        char who[32] = "";
+        runtime_spectate_status(&spectate, who, sizeof who);
+        const char* line = nullptr;
+        switch (spectate) {
+        case RS_FETCHING: line = BbSettings::MenuText("Looking for %s's live race...", "Ищем гонку %s в эфире..."); break;
+        case RS_READY: line = BbSettings::MenuText("%s's last race is ready: main menu > REPLAYS (top of the list).",
+                                                   "Последняя гонка %s готова: главное меню > REPLAYS (вверху)."); break;
+        case RS_NONE: line = BbSettings::MenuText("%s has no recent race to watch.", "У %s нет недавних гонок."); break;
+        case RS_REFUSED: line = BbSettings::MenuText("%s does not share races with you.", "%s не делится гонками с вами."); break;
+        case RS_FAILED: line = BbSettings::MenuText("Could not download %s's race.", "Не удалось загрузить гонку %s."); break;
+        case RS_LIVE: line = BbSettings::MenuText("Watching %s live.", "Смотрите %s в прямом эфире."); break;
+        case RS_WAITING: line = BbSettings::MenuText("%s is live: waiting for the race to start...", "%s в эфире: ждём старта..."); break;
+        case RS_BUSY: line = BbSettings::MenuText("%s's race loads once you leave the race or the online mode.",
+                                                  "Гонка %s загрузится, когда вы выйдете из гонки или онлайн-режима."); break;
+        case RS_PLAYING: line = BbSettings::MenuText("Playing %s's last race.", "Идёт последняя гонка %s."); break;
+        case RS_FOLLOW: line = BbSettings::MenuText("Spectating %s: their next race loads by itself.",
+                                                    "Смотрите %s: следующая гонка загрузится сама."); break;
+        case RS_OLD: line = BbSettings::MenuText("%s's game is too old to be watched: they need to update it.",
+                                                 "Чтобы смотреть гонки %s, нужно обновить игру."); break;
+        default: break;
+        }
+        if (line) {
+            char text[200];
+            std::snprintf(text, sizeof text, line, who);
+            ImGui::TextColored(spectate == RS_READY || spectate == RS_LIVE || spectate == RS_PLAYING || spectate == RS_FOLLOW
+                                   ? kFriendGreen : kMenuGrey, "%s", text);
+        }
+    }
+    // online friends first and open; offline ones folded (a long list hid everything below it)
+    int online = 0;
+    for (int i = 0; i < view.friend_count; ++i) {
+        online += view.friends[i].online ? 1 : 0;
+    }
+    if (view.friend_count) {
+        char head[64];
+        std::snprintf(head, sizeof head, BbSettings::MenuText("Online (%d)###friends_online", "В сети (%d)###friends_online"), online);
+        if (ImGui::CollapsingHeader(head, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!online) {
+                ImGui::TextDisabled("%s", BbSettings::MenuText("No friends online.", "Нет друзей в сети."));
+            }
+            for (int i = 0; i < view.friend_count; ++i) {
+                if (view.friends[i].online) friend_row(view.friends[i]);
+            }
+        }
+        if (view.friend_count > online) {
+            std::snprintf(head, sizeof head, BbSettings::MenuText("Offline (%d)###friends_offline", "Не в сети (%d)###friends_offline"),
+                          view.friend_count - online);
+            if (ImGui::CollapsingHeader(head)) {
+                for (int i = 0; i < view.friend_count; ++i) {
+                    if (!view.friends[i].online) friend_row(view.friends[i]);
+                }
+            }
+        }
+    }
+
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader(BbSettings::MenuText("Options", "Настройки"))) {
+        auto& s = BbSettings::Get();
+        Checkbox(BbSettings::MenuText("Don't show friends' activity", "Не показывать активность друзей"),
+                 s.friends_hide_activity);
+        Hint(BbSettings::MenuText("No notice when a friend comes online.", "Без уведомлений, когда друг заходит в сеть."));
+        bool hide_me = s.friends_hide_me;
+        if (ImGui::Checkbox(BbSettings::MenuText("Don't show my activity", "Не показывать мою активность"), &hide_me)) {
+            Store(s.friends_hide_me, hide_me, true);
+            runtime_friends_set_hidden(hide_me);
+        }
+        Hint(BbSettings::MenuText("Your friends see you offline and get no notice when you come online.",
+                                  "Друзья видят вас не в сети и не получают уведомлений."));
+        bool share_races = s.spectate_share;
+        if (ImGui::Checkbox(BbSettings::MenuText("Let my friends watch my races", "Друзья могут смотреть мои гонки"),
+                            &share_races)) {
+            Store(s.spectate_share, share_races, true);
+            runtime_spectate_set_share(share_races);
+        }
+        Hint(BbSettings::MenuText("While you race, your race is sent live to the server so your friends can watch it "
+                                  "with Spectate.",
+                                  "Пока вы едете, гонка идёт на сервер в прямом эфире, и друзья могут её смотреть."));
+        Checkbox(BbSettings::MenuText("Don't show notifications", "Не показывать уведомления"), s.friends_no_notices);
+        Hint(BbSettings::MenuText("No friend notices (requests, invitations, friends online). This tab still shows "
+                                  "them.",
+                                  "Без уведомлений от друзей (запросы, приглашения, друзья в сети). Эта вкладка "
+                                  "их по-прежнему показывает."));
+    }
+
 }
 
 void Menu() {
@@ -665,7 +1475,9 @@ void Menu() {
         int current = std::clamp(s.output_res.load(), 0, BbSettings::OutputCount - 1);
         if (BbSettings::OutputAspects[current] != s.aspect_ratio) {
             // aspect_ratio set without its size (by hand): the aspect's first size, 1080p for 16:9.
-            current = s.aspect_ratio == 0 ? BbSettings::OutputDefault : s.aspect_ratio == 1 ? 4 : 6;
+            current = s.aspect_ratio == BbSettings::Aspect21x9   ? 4
+                      : s.aspect_ratio == BbSettings::Aspect32x9 ? 6
+                                                                 : BbSettings::OutputDefault;
         }
         if (ImGui::BeginCombo(BbSettings::MenuText("Aspect / output (restart required)",
                                                    "Соотношение / вывод (после перезапуска)"),
@@ -674,6 +1486,9 @@ void Menu() {
                 if (ImGui::Selectable(entries[i], i == current)) {
                     Store(s.output_res, i, i != current);
                     Store(s.aspect_ratio, BbSettings::OutputAspects[i], BbSettings::OutputAspects[i] != s.aspect_ratio);
+                    const bool wide = BbSettings::OutputAspects[i] != BbSettings::Aspect16x9;
+                    s.aspect_w = wide ? BbSettings::OutputWidths[i] : 0;
+                    s.aspect_h = wide ? BbSettings::OutputHeights[i] : 0;
                 }
             }
             ImGui::EndCombo();
@@ -681,10 +1496,10 @@ void Menu() {
         Hint(BbSettings::MenuText(
             "One choice: the aspect and the output size together. 21:9 and 32:9 (by tcosi) bring menus, "
             "backgrounds and a centred HUD made for them, online too. Upscaling is off with 21:9 / 32:9. The "
-            "first start in 21:9 or 32:9 prepares about 9 GB of patched game archives once; your game files "
+            "first start in 21:9 or 32:9 prepares its patched assets once; your game files "
             "are not changed. Applies after restarting the game.",
             "Одна настройка: соотношение и размер вывода вместе. 21:9 и 32:9 (tcosi) с меню, фонами и HUD по "
-            "центру, и онлайн. Первый запуск готовит около 9 ГБ архивов. Применяется после перезапуска игры."));
+            "центру, и онлайн. Первый запуск один раз готовит файлы. Применяется после перезапуска игры."));
     }
     const char* live_modes[] = {BbSettings::MenuText("Auto (based on GPU)", "Авто (по видеокарте)"),
                                 BbSettings::MenuText("Off (faster)", "Выключена (быстрее)"),
@@ -751,6 +1566,26 @@ void Menu() {
         "From the next start; the launcher has the same switch.",
         "Выкл.: игра запускается сразу. Вкл.: сначала открывается лаунчер. Со следующего запуска."));
 #endif
+    Checkbox(BbSettings::MenuText("Ping counter in corner", "Счётчик пинга в углу"), s.show_ping);
+    {
+        // Where trophy and friend notices show (NoticeBox), in NoticePosition order.
+        const char* places[] = {BbSettings::MenuText("Top right", "Вверху справа"),
+                                BbSettings::MenuText("Top left", "Вверху слева"),
+                                BbSettings::MenuText("Bottom right", "Внизу справа"),
+                                BbSettings::MenuText("Bottom left", "Внизу слева"),
+                                BbSettings::MenuText("Top centre", "Вверху по центру"),
+                                BbSettings::MenuText("Bottom centre", "Внизу по центру")};
+        int place = std::clamp(s.notice_position.load(), 0, int(BbSettings::NoticeCount) - 1);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 13.0f);
+        if (ImGui::Combo(BbSettings::MenuText("Notifications position", "Положение уведомлений"), &place, places,
+                         int(BbSettings::NoticeCount))) {
+            Store(s.notice_position, place, true);
+            Notify(BbSettings::MenuText("Notifications", "Уведомления"), BbSettings::MenuText("They show here", "Они появятся здесь"),
+                   "", 0, nullptr, 0);
+        }
+        Hint(BbSettings::MenuText("Trophies, friends and other notices. Applies at once.",
+                                  "Трофеи, друзья и другие уведомления. Сразу."));
+    }
     {
         // Always readable, whatever the menu's language.
         static const char* languages[] = {"English", "Русский", "Español", "Nederlands"};
@@ -768,6 +1603,27 @@ void Menu() {
         }
     }
     ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Friends", "Друзья"))) {
+        FriendsTab();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Room", "Комната"))) {
+        RoomTab();
+        ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem(BbSettings::MenuText("Replays", "Повторы"))) {
+        ReplaysTab();
+        ImGui::EndTabItem();
+    }
+    {
+        const ImGuiTabItemFlags bring_up = g_show_report_tab ? ImGuiTabItemFlags_SetSelected : 0;
+        g_show_report_tab = false;
+        if (ImGui::BeginTabItem(BbSettings::MenuText("Report", "Пожаловаться"), nullptr, bring_up)) {
+            ReportTab();
+            ImGui::EndTabItem();
+        }
     }
 
     const bool picture_tab = ImGui::BeginTabItem(BbSettings::MenuText("Picture", "Изображение"));
@@ -824,14 +1680,17 @@ void Menu() {
             "выводится в 4K; на экране 1080p это сглаживает края. Для 4K нужна мощная видеокарта."));
     }
     // SacredFire: one upscaler at a time (bbport.ini temporal): FSR 1 (spatial) or the temporal
-    // ones, FSR 3, DLSS and FSR 4 (vk_ctr_fsr3). Live; DLSS's quality mode and output need a restart.
+    // ones, FSR 3, DLSS and FSR 4 (vk_ctr_fsr3). Live; DLSS's quality mode and output need a
+    // restart. FSR 4 is listed only with its model files and an INT8-capable GPU.
     {
         static constexpr const char* labels[BbSettings::TemporalCount] = {
             "Off", "AMD FSR 1", "AMD FSR 3 (experimental)", "NVIDIA DLSS (experimental)",
             "AMD FSR 4 (experimental)"};
         const int current = std::clamp(s.temporal.load(), 0, BbSettings::TemporalCount - 1);
+        const bool fsr4 = BbSettings::Fsr4Available();
         if (ImGui::BeginCombo(BbSettings::MenuText("Upscaling", "Апскейл"), BbSettings::Label(labels[current]))) {
             for (int t = 0; t < BbSettings::TemporalCount; ++t) {
+                if (t == BbSettings::TemporalFsr4 && !fsr4 && t != current) continue;
                 if (ImGui::Selectable(BbSettings::Label(labels[t]), t == current)) {
                     Store(s.temporal, t, t != current);
                 }
@@ -840,10 +1699,10 @@ void Menu() {
         }
         Hint(BbSettings::MenuText(
             "FSR 1 enlarges a smaller scene with sharper edges than the game's plain stretch. "
-            "FSR 3, FSR 4 and DLSS rebuild detail over several frames from the game's depth and motion, "
-            "and smooth edges even at the same resolution. DLSS needs an NVIDIA RTX card (FSR 3 "
-            "runs otherwise); FSR 4 needs INT8 dot-product support and its model files. Applies at once.",
-            "FSR 1 увеличивает сцену чётче простого растяжения. FSR 3, FSR 4 и DLSS восстанавливают "
+            "FSR 3 and DLSS rebuild detail over several frames from the game's depth and motion, "
+            "and smooth edges even at the same resolution. DLSS needs an NVIDIA RTX card and FSR 4 "
+            "a GPU with INT8 support (FSR 3 runs otherwise). Applies at once.",
+            "FSR 1 увеличивает сцену чётче простого растяжения. FSR 3 и DLSS восстанавливают "
             "детали за несколько кадров. DLSS нужна видеокарта RTX. Применяется сразу."));
     }
     // SacredFire: frame generation (bbport.ini framegen=off|fsr3): one interpolated frame
@@ -917,7 +1776,7 @@ void Menu() {
             "Transformer: текущая модель NVIDIA. CNN: старая, легче. Применяется сразу."));
     }
     if (s.temporal == BbSettings::TemporalFsr3 || s.temporal == BbSettings::TemporalFsr4) {
-        Slider(BbSettings::MenuText("FSR 3 sharpness", "Резкость FSR 3"), s.fsr3_sharpness, 0.0f, 1.0f);
+        Slider(BbSettings::MenuText("FSR sharpness", "Резкость FSR"), s.fsr3_sharpness, 0.0f, 1.0f);
     }
 
     // SacredFire: unlock everything (the game's own _unlockAll switch, src/runtime_unlock.c),
@@ -1112,16 +1971,40 @@ void Menu() {
     if (ImGui::BeginTabItem(BbSettings::MenuText("Controllers", "Контроллеры"))) {
     MenuSection(BbSettings::MenuText("Controllers (split screen)", "Контроллеры (разделённый экран)"));
     {
+        bool split_auto = s.split_auto;
+        if (ImGui::Checkbox(BbSettings::MenuText("Assign controllers automatically (each one connected is the next player)",
+                                                 "Назначать контроллеры автоматически (каждый подключённый — следующий игрок)"),
+                            &split_auto)) {
+            s.split_auto = split_auto;
+            BbSettings::Save();
+        }
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Players 2-4 left on (none) get the controllers in the order they were "
+                                                       "connected. Off: one person can switch controllers freely.",
+                                                       "Игроки 2-4 с (нет) получают контроллеры в порядке подключения. "
+                                                       "Выкл.: один человек может свободно менять контроллеры."));
         int count = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        // Identical controllers share one GUID and name: they are listed once ("x2"), and choosing
+        // that entry for two ports gives each port one of them (runtime_pad.c). Listed twice, they
+        // were two menu items with one ImGui ID (issue #43).
         std::vector<std::pair<std::string, std::string>> pads; // guid, label
+        std::vector<int> copies;
         for (int i = 0; ids && i < count; ++i) {
             char guid[33];
             SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
+            const auto known = std::find_if(pads.begin(), pads.end(), [&](const auto& pad) { return pad.first == guid; });
+            if (known != pads.end()) {
+                ++copies[size_t(known - pads.begin())];
+                continue;
+            }
             const char* name = SDL_GetGamepadNameForID(ids[i]);
             pads.emplace_back(guid, std::string(name ? name : "gamepad") + "  [" + std::string(guid).substr(0, 8) + "]");
+            copies.push_back(1);
         }
         SDL_free(ids);
+        for (size_t i = 0; i < pads.size(); ++i) {
+            if (copies[i] > 1) pads[i].second += "  x" + std::to_string(copies[i]);
+        }
         bool changed = false;
         for (int p = 0; p < BbSettings::ControllerPorts; ++p) {
             std::string current;
@@ -1152,19 +2035,41 @@ void Menu() {
                     std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "keyboard");
                     changed = true;
                 }
-                for (const auto& [guid, text] : pads) {
+                for (size_t i = 0; i < pads.size(); ++i) {
+                    const auto& [guid, text] = pads[i];
+                    ImGui::PushID(int(i));
                     if (ImGui::Selectable(text.c_str(), guid == current)) {
                         std::lock_guard lk{BbSettings::PortsMutex()};
                         std::snprintf(s.ports[size_t(p)].data(), s.ports[size_t(p)].size(), "%s", guid.c_str());
                         changed = true;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }
+            // What the port plays with right now, automatic ports and identical controllers
+            // included; green while it presses something, to tell the controllers apart.
+            PadStatus now;
+            {
+                std::lock_guard lk{pad_status_mutex};
+                now = pad_status[p];
+            }
+            ImGui::Indent();
+            if (now.name.empty()) {
+                ImGui::TextColored(kMenuGrey, "%s", BbSettings::MenuText("No controller", "Нет контроллера"));
+            } else {
+                const char* with = now.name == "keyboard" ? keyboard : now.name.c_str();
+                ImGui::TextColored(now.pressing ? kFriendGreen : kMenuText, "%s %s%s",
+                                   BbSettings::MenuText("Playing:", "Играет:"), with,
+                                   now.pressing ? BbSettings::MenuText("  (pressing)", "  (нажато)") : "");
+            }
+            ImGui::Unindent();
         }
         if (changed) {
             BbSettings::Save();
         }
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Press a button on a controller: its player's line turns green.",
+                                                       "Нажмите кнопку на контроллере: строка его игрока станет зелёной."));
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled("%s", BbSettings::MenuText("Ports 2-4 log in as Player 2-4 while their gamepad is connected "
                                                        "(the keyboard: always; port 1 then has the gamepad only)",
@@ -1250,7 +2155,8 @@ void Menu() {
 
     bool restart =
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
+        s.live_resolution != s.startup_live_resolution ||
+        BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= s.effects[e] != s.startup_effects[e];
     }
@@ -1285,8 +2191,14 @@ void Menu() {
     // second press confirms; the window thread then closes like the window's own close button.
     static bool quit_armed;
     ImGui::SameLine();
-    if (ImGui::Button(quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
-                                 : BbSettings::MenuText("Quit game", "Выйти из игры"))) {
+
+    const char *quit_button_text = quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
+                                              : BbSettings::MenuText("Quit game", "Выйти из игры");
+
+    // keep a stable ID so changing the label preserves gamepad focus
+    const std::string quit_button_text_with_id = std::string(quit_button_text) + "###quit_game";
+
+    if (ImGui::Button(quit_button_text_with_id.c_str())) {
         if (quit_armed) {
             SDL_Event quit{};
             quit.type = SDL_EVENT_QUIT;
@@ -1325,7 +2237,123 @@ void FpsCounter() {
                 : s.upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
                 : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
                                                            : "");
+    corner_fps_height = ImGui::GetWindowHeight();
     ImGui::End();
+}
+
+/// show_ping: the players in the online room and their round trip, in the top right corner under
+/// the FPS counter; nothing outside a room.
+void PingCounter() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    const float below = BbSettings::Get().show_fps ? corner_fps_height + 6.0f * base_scale : 0.0f;
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, viewport->WorkPos.y + pad + below),
+        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##ping", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    PingLines();
+    corner_ping_height = ImGui::GetWindowHeight() + 6.0f * base_scale;
+    ImGui::End();
+}
+
+/// SPECTATOR (n): friends watching this player's race live, in the top right corner under the FPS
+/// counter and the ping; nothing when nobody watches.
+void SpectatorBadge(int viewers) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    const float below = (BbSettings::Get().show_fps ? corner_fps_height + 6.0f * base_scale : 0.0f) +
+                        corner_ping_height;
+    ImGui::SetNextWindowPos(
+        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, viewport->WorkPos.y + pad + below),
+        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##spectators", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    // a red "live" dot before the text
+    const float dot = ImGui::GetTextLineHeight() * 0.3f;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddCircleFilled(
+        ImVec2(at.x + dot, at.y + ImGui::GetTextLineHeight() * 0.5f), dot, IM_COL32(230, 40, 40, 255));
+    ImGui::Dummy(ImVec2(dot * 2.0f, ImGui::GetTextLineHeight()));
+    ImGui::SameLine();
+    ImGui::Text("SPECTATOR (%d)", viewers);
+    ImGui::End();
+}
+
+/// Replay results (spectator build): when the recording player finished, as a race's own results screen does,
+/// each racer's place, name and finish time on the right; the others fill in as they finish. The watched racer's
+/// row is highlighted. Nothing is taken from the pad: the replay's controls go on underneath.
+bool ReplayResultsShowing() {
+    RrView v;
+    return runtime_replay_view(&v) && v.results;
+}
+
+void ReplayResults(const RrView& v) {
+    const float s = base_scale;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // the finished first, by their finish place; then the ones still racing, by their place now
+    int order[8], n = 0;
+    for (int i = 0; i < 8; ++i)
+        if (v.racer[i].kind) order[n++] = i;
+    std::sort(order, order + n, [&](int a, int b) {
+        const auto& ra = v.racer[a];
+        const auto& rb = v.racer[b];
+        if ((ra.finished > 0) != (rb.finished > 0)) return ra.finished > 0;
+        return (ra.finished > 0 ? ra.finished : ra.rank) < (rb.finished > 0 ? rb.finished : rb.rank);
+    });
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - 48.0f * s,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.0f * s, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22.0f * s, 18.0f * s));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.25f, 0.55f, 0.90f));
+    ImGui::Begin("##replay_results", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::TextUnformatted(BbSettings::MenuText("RESULTS", "РЕЗУЛЬТАТЫ"));
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::Spacing();
+    const float time_x = 520.0f * s - 22.0f * s - ImGui::CalcTextSize("00:00:00").x;
+    for (int k = 0; k < n; ++k) {
+        const auto& r = v.racer[order[k]];
+        const bool watched = order[k] == v.watch;
+        const ImVec4 colour = watched ? ImVec4(1.0f, 0.82f, 0.25f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        const int place = r.finished > 0 ? r.finished : (r.rank > 0 ? r.rank : k + 1);
+        ImGui::TextColored(colour, "%d", place);
+        ImGui::SameLine(46.0f * s);
+        ImGui::TextColored(colour, "%s", r.name[0] ? r.name : "-");
+        ImGui::SameLine(time_x);
+        if (r.finished > 0 && r.time > 0.0f) {
+            const int cs = static_cast<int>(r.time * 100.0f + 0.001f);   // cut, as the game shows it
+            ImGui::TextColored(colour, "%d:%02d:%02d", cs / 6000, cs / 100 % 60, cs % 100);
+        } else {
+            ImGui::TextColored(ImVec4(0.75f, 0.82f, 0.95f, 1.0f), "--:--:--");
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Spacing();
+    char followed[32] = "", footer[160];
+    if (runtime_spectate_following(followed, sizeof followed)) {
+        std::snprintf(footer, sizeof footer,
+                      BbSettings::MenuText("Spectating %s: their next race loads by itself.",
+                                           "Смотрите %s: следующая гонка загрузится сама."),
+                      followed);
+    } else {
+        std::snprintf(footer, sizeof footer, "%s",
+                      BbSettings::MenuText("Pause > Quit: back to the menu.", "Пауза > Выход: назад в меню."));
+    }
+    ImGui::TextColored(ImVec4(0.80f, 0.88f, 1.0f, 1.0f), "%s", footer);
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 // RyuNET server announcements ("maintenance in 5 minutes"): the launcher writes
@@ -1445,19 +2473,38 @@ void NoticeBox(const Notice& n, float age) {
         ImVec4(0.80f, 0.83f, 0.88f, 1.0f), // silver
         ImVec4(1.0f, 0.80f, 0.29f, 1.0f),  // gold
         ImVec4(0.55f, 0.83f, 1.0f, 1.0f),  // platinum
+        ImVec4(0.36f, 0.85f, 0.47f, 1.0f), // a friend (PollFriends)
+        ImVec4(0.45f, 0.70f, 1.0f, 1.0f),  // an update (PollFriends)
+        ImVec4(1.0f, 0.54f, 0.12f, 1.0f),  // a message from the server (PollFriends)
     };
     static const char* const grade_es[] = {"", "Bronce", "Plata", "Oro", "Platino"};
     static const char* const grade_en[] = {"", "Bronze", "Silver", "Gold", "Platinum"};
-    const int kind = std::clamp(n.kind, 0, 4);
+    const int kind = std::clamp(n.kind, 0, 7);
     const ImVec4 color = grades[kind];
     const bool spanish = BbSettings::Get().menu_language == BbSettings::MenuLanguage::Spanish ||
                          n.title.rfind("Logro", 0) == 0;
     const float s = base_scale;
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float width = 520.0f * s, icon = 84.0f * s, pad = 14.0f * s;
-    const float y = viewport->WorkPos.y + 22.0f * s - (1.0f - in) * 80.0f * s;
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, y), ImGuiCond_Always,
-                            ImVec2(0.5f, 0.0f));
+    // Where (the menu's Notifications position): a corner, or the top centre. It slides in from the
+    // nearest edge; at the top right it goes under the FPS counter when that shows.
+    const auto& settings = BbSettings::Get();
+    const int where = std::clamp(settings.notice_position.load(), 0, int(BbSettings::NoticeCount) - 1);
+    const bool centre = where == BbSettings::NoticeTopCentre || where == BbSettings::NoticeBottomCentre;
+    const bool right = where == BbSettings::NoticeTopRight || where == BbSettings::NoticeBottomRight;
+    const bool bottom = where == BbSettings::NoticeBottomRight || where == BbSettings::NoticeBottomLeft ||
+                        where == BbSettings::NoticeBottomCentre;
+    const float width = (centre ? 520.0f : 440.0f) * s, icon = 84.0f * s, pad = 14.0f * s;
+    const float margin = 22.0f * s, slide = (1.0f - in) * 80.0f * s;
+    const float under_fps = where == BbSettings::NoticeTopRight
+                                ? (settings.show_fps ? 34.0f * s : 0.0f) + corner_ping_height
+                                : 0.0f;
+    const float x = centre  ? viewport->WorkPos.x + viewport->WorkSize.x * 0.5f
+                    : right ? viewport->WorkPos.x + viewport->WorkSize.x - margin
+                            : viewport->WorkPos.x + margin;
+    const float y = bottom ? viewport->WorkPos.y + viewport->WorkSize.y - margin + slide
+                           : viewport->WorkPos.y + margin + under_fps - slide;
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always,
+                            ImVec2(centre ? 0.5f : right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
     ImGui::SetNextWindowSize(ImVec2(width, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * s);
@@ -1476,6 +2523,33 @@ void NoticeBox(const Notice& n, float age) {
     if (n.texture) {
         dl->AddImageRounded(ImTextureRef(n.texture->GetTexRef()), p, ImVec2(p.x + icon, p.y + icon), ImVec2(0, 0),
                             ImVec2(1, 1), ImGui::GetColorU32(ImVec4(1, 1, 1, 1)), 10.0f * s);
+    } else if (kind == 7) {
+        // A message: a speech bubble with three dots.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const ImVec2 a(p.x + icon * 0.18f, p.y + icon * 0.22f), b(p.x + icon * 0.82f, p.y + icon * 0.66f);
+        dl->AddRectFilled(a, b, c, icon * 0.12f);
+        dl->AddTriangleFilled(ImVec2(p.x + icon * 0.30f, b.y - 1.0f), ImVec2(p.x + icon * 0.46f, b.y - 1.0f),
+                              ImVec2(p.x + icon * 0.28f, p.y + icon * 0.82f), c);
+        const ImU32 dot = ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f));
+        for (int i = 0; i < 3; ++i) {
+            dl->AddCircleFilled(ImVec2(p.x + icon * (0.36f + 0.14f * i), p.y + icon * 0.44f), icon * 0.045f, dot);
+        }
+    } else if (kind == 6) {
+        // An update: a download arrow over a tray, in the update colour.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const float cx = p.x + icon * 0.5f, w = icon * 0.09f;
+        dl->AddRectFilled(ImVec2(cx - w, p.y + icon * 0.20f), ImVec2(cx + w, p.y + icon * 0.52f), c);
+        dl->AddTriangleFilled(ImVec2(cx - icon * 0.22f, p.y + icon * 0.48f), ImVec2(cx + icon * 0.22f, p.y + icon * 0.48f),
+                              ImVec2(cx, p.y + icon * 0.70f), c);
+        dl->AddRectFilled(ImVec2(p.x + icon * 0.24f, p.y + icon * 0.76f), ImVec2(p.x + icon * 0.76f, p.y + icon * 0.82f), c,
+                          2.0f * s);
+    } else if (kind == 5) {
+        // A friend: head and shoulders in the friend colour.
+        dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
+        const float cx = p.x + icon * 0.5f;
+        dl->AddCircleFilled(ImVec2(cx, p.y + icon * 0.38f), icon * 0.15f, c);
+        dl->PathArcTo(ImVec2(cx, p.y + icon * 0.86f), icon * 0.27f, 3.14159265f, 6.28318531f);
+        dl->PathFillConvex(c);
     } else {
         dl->AddRectFilled(p, ImVec2(p.x + icon, p.y + icon), ImGui::GetColorU32(ImVec4(0.149f, 0.169f, 0.231f, 1.0f)), 10.0f * s);
         const float w = icon * 0.5f, x = p.x + icon * 0.25f, top = p.y + icon * 0.2f;
@@ -1491,7 +2565,7 @@ void NoticeBox(const Notice& n, float age) {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - icon - pad * 2.0f - 14.0f * s);
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.85f);
     std::string header = n.title;
-    if (kind) header += std::string("  ·  ") + (spanish ? grade_es[kind] : grade_en[kind]);
+    if (kind >= 1 && kind <= 4) header += std::string("  ·  ") + (spanish ? grade_es[kind] : grade_en[kind]);
     ImGui::TextColored(color, "%s", header.c_str());
     ImGui::PopFont();
     ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.3f);
@@ -1844,10 +2918,16 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
 }
 
 void UpdateTextInput(SDL_Window* window) {
+    if (open_request.exchange(false)) {
+        std::scoped_lock lock{imgui_mutex};
+        if (initialized) {
+            SetOpen(true);
+        }
+    }
     bool want = false;
     {
         std::scoped_lock lock{imgui_mutex};
-        want = initialized && (menu_open || online_prompt) && ImGui::GetIO().WantTextInput;
+        want = initialized && (menu_open || online_prompt || chat_typing) && ImGui::GetIO().WantTextInput;
     }
     if (want != SDL_TextInputActive(window)) {
         if (want) {
@@ -1865,6 +2945,7 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open || ultrawide_prompt || online_prompt;
+    const bool typing = chat_typing;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -1874,7 +2955,17 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
-        if (!is_open) {
+        if (down && !event.key.repeat && !is_open && !typing && event.key.key == SDLK_T && ChatShowing()) {
+            chat_typing = true;
+            chat_focus = true;
+            return true;
+        }
+        if (!is_open && !typing) {
+            // The Enter or Esc that closed the chat comes up after it: ImGui must see that, or it
+            // keeps the key down and its repeat closes the chat the next time it opens.
+            if (const ImGuiKey key = KeyFromSdl(event.key.key); !down && key != ImGuiKey_None) {
+                io.AddKeyEvent(key, false);
+            }
             return false;
         }
         io.AddKeyEvent(ImGuiMod_Ctrl, (event.key.mod & SDL_KMOD_CTRL) != 0);
@@ -1909,7 +3000,7 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_TEXT_INPUT: {
         // Typed characters (Ctrl+click on a slider, a text field): key events alone erase but
         // do not type. SDL sends them while text input is on (UpdateTextInput).
-        if (!is_open) {
+        if (!is_open && !typing) {
             return false;
         }
         io.AddInputCharactersUTF8(event.text.text);
@@ -1949,6 +3040,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
+    PollFriends();
     if (initialized && !ultrawide_prompt_checked) {
         // Once, at the first presented frame: the first start, or every start with ultrawide_ask.
         ultrawide_prompt_checked = true;
@@ -1972,8 +3064,9 @@ bool Visible() {
         std::scoped_lock lock{notice_mutex};
         notice = !notices.empty();
     }
-    return initialized && (menu_open || prompt_active || ultrawide_prompt || online_prompt ||
-                           BbSettings::Get().show_fps || AnnouncementActive() || notice);
+    return initialized && (menu_open || prompt_active || ultrawide_prompt || online_prompt || BbSettings::Get().show_fps ||
+                           (BbSettings::Get().show_ping && InOnlineRoom()) || AnnouncementActive() || notice ||
+                           runtime_spectate_viewers() > 0 || ReplayResultsShowing() || ChatShowing());
 }
 
 void Notify(const std::string& title, const std::string& name, const std::string& detail, int kind,
@@ -1993,6 +3086,16 @@ void Notify(const std::string& title, const std::string& name, const std::string
     }
 }
 
+void OpenMenu() {
+    open_request = true;
+}
+
+void QuitGame() {
+    SDL_Event quit{};
+    quit.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&quit);
+}
+
 bool MenuOpen() {
     return menu_open;
 }
@@ -2001,9 +3104,34 @@ bool TakePadRescan() {
     return pad_rescan_requested.exchange(false, std::memory_order_relaxed);
 }
 
+void SetPadStatus(int port, const std::string& name, bool pressing) {
+    if (port < 0 || port >= int(std::size(pad_status))) return;
+    std::lock_guard lk{pad_status_mutex};
+    pad_status[port].name = name;
+    pad_status[port].pressing = pressing;
+}
+
+/// The game reads the keyboard's state itself (runtime_pad.c): what is typed in the chat must not
+/// move its menus, nor the Enter or Esc that closed it, still down, accept or leave the room.
+bool ChatHoldsKeyboard() {
+    if (chat_typing) {
+        chat_closing = true;
+        return true;
+    }
+    if (!chat_closing) {
+        return false;
+    }
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    if (keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER] || keys[SDL_SCANCODE_ESCAPE])) {
+        return true;
+    }
+    chat_closing = false;
+    return false;
+}
+
 bool CapturesInput() {
     // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active || ultrawide_prompt || online_prompt;
+    return menu_open || prompt_active || ultrawide_prompt || online_prompt || ChatHoldsKeyboard();
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
@@ -2014,6 +3142,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
+    BbPerf::Frame(ms); // the performance diagnostic (bbport_perf.h)
     if (!Visible()) {
         return;
     }
@@ -2044,6 +3173,22 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    corner_ping_height = 0.0f;
+    if (BbSettings::Get().show_ping && !menu_open && InOnlineRoom()) {
+        PingCounter();
+    }
+    if (const int viewers = runtime_spectate_viewers(); viewers > 0 && !menu_open) {
+        SpectatorBadge(viewers);
+    }
+    if (RrView replay; !menu_open && runtime_replay_view(&replay) && replay.results) {
+        ReplayResults(replay);
+    }
+    if (menu_open || !ChatShowing()) {
+        chat_typing = false; // the race started, or the menu took the keyboard
+    }
+    if (!menu_open && ChatShowing()) {
+        ChatBox();
     }
     if (prompt_active && !menu_open) {
         TextPrompt();

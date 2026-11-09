@@ -1,5 +1,6 @@
 /* libScePad on SDL3 gamepads and the keyboard. SDL events are pumped by the window thread
- * (gpu/shim/window.cpp); here state is only sampled.
+ * (gpu/shim/window.cpp); joysticks are updated and sampled by this file's own thread (bb:pad,
+ * see pad_thread below), and the game's threads read the last sample without calling SDL.
  *
  * Keyboard layout (also with a gamepad connected: both drive the game, unless a split-screen port
  * 2..4 is bound to the keyboard, bbport.ini port.N=keyboard: that player plays on it alone):
@@ -73,6 +74,8 @@ _Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout"
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized, opened, sdl_ready;
 static SDL_Gamepad *gamepad;
+static SDL_Gamepad *other_gamepads[8];
+static int other_count;
 /* SacredFire: ports 2..4 for split screen: the gamepad named in bbport.ini (port.N=), opened while
  * connected; the game sees user N logged in while the port has its gamepad. Port 1 is `gamepad`. */
 #define PORTS 4
@@ -82,15 +85,25 @@ static Port ports[PORTS]; /* ports[0].want overrides BB_GAMEPAD for port 1 */
  * its gamepad alone (one person on the keyboard, another on a gamepad). */
 static int is_keyboard(const char *want) { return !SDL_strcasecmp(want,"keyboard"); }
 static int keyboard_port(void) { for (int p=1;p<PORTS;++p) if (is_keyboard(ports[p].want)) return p; return 0; }
+static int is_preferred(SDL_JoystickID id, const char *want);
+static int claimed_by_other_port(SDL_JoystickID id, int except);
 static unsigned pad_rescan_attempts; /* misses in a row looking for a bound controller (current_gamepad) */
 static struct timespec config_mtime; static uint64_t config_checked;
+/* split_auto (the in-game menu's and the launchers' "assign controllers automatically"; on unless
+ * split_auto=0): each port 2..4 without a controller named takes the next connected one that no
+ * player has, in the order they were connected, so two to four people play without choosing
+ * anything (players 2-4 save as guests, runtime_savedata.c). Off, such a port is unused and an
+ * idle player's pad is taken over by the one touched last (one person switching controllers). */
+static int split_auto=-1; /* -1 until bbport.ini is read */
 static void load_ports(void) {
     const char *path=getenv("BB_CONFIG");
     FILE *f=path ? fopen(path,"r") : NULL;
     char fresh[PORTS][64]; memset(fresh,0,sizeof fresh);
+    int auto_fresh=1;
     if (f) {
         char line[512];
         while (fgets(line,sizeof line,f)) {
+            if (!strncmp(line,"split_auto=",11)) { auto_fresh=line[11]!='0'; continue; }
             if (strncmp(line,"port.",5) || line[5]<'1' || line[5]>'4' || line[6]!='=') continue;
             char *v=line+7; v[strcspn(v,"\r\n")]=0;
             while (*v==' ' || *v=='\t') ++v;
@@ -102,9 +115,25 @@ static void load_ports(void) {
         if (strcmp(fresh[p],ports[p].want)) {
             pad_rescan_attempts=0; /* a new binding is looked for afresh */
             snprintf(ports[p].want,sizeof ports[p].want,"%.63s",fresh[p]);
+            if (!p && gamepad) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
             if (p && ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
+            if (p && gamepad && fresh[p][0] && !is_keyboard(fresh[p]) &&
+                is_preferred(SDL_GetGamepadID(gamepad),fresh[p])) {
+                int count=0, another=0;
+                SDL_JoystickID *ids=SDL_GetGamepads(&count);
+                for (int i=0;ids && i<count;++i)
+                    if (ids[i]!=SDL_GetGamepadID(gamepad) && is_preferred(ids[i],fresh[p]) &&
+                        !claimed_by_other_port(ids[i],p)) another=1;
+                SDL_free(ids);
+                if (!another) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+            }
             if (p) printf("Runtime: controller port %d -> %s\n",p+1,fresh[p][0] ? fresh[p] : "(none)");
         }
+    }
+    if (auto_fresh!=split_auto) {
+        split_auto=auto_fresh;
+        printf("Runtime: controllers for players 2-4 %s\n",split_auto ? "assigned automatically" : "as chosen per port");
+        if (!split_auto) for (int p=1;p<PORTS;++p) if (!ports[p].want[0] && ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
     }
 }
 /* bbport.ini re-read when it changes (the in-game menu writes it); called under lock. */
@@ -124,12 +153,29 @@ static void refresh_ports(uint64_t now) {
 #endif
     load_ports();
 }
-/* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). */
-static int is_preferred(SDL_JoystickID id, const char *want);
+/* 1 when the gamepad id is claimed by a port other than `except` (ports 2..4 with a name). A port
+ * that has its gamepad open claims that one pad only: identical controllers share one SDL GUID and
+ * name, so port.2=<GUID> matches every one of them, and port 1 would be left with none. A port still
+ * without its pad reserves every match from port 1 and from the ports after it (port 2 before 3
+ * before 4), so two ports bound to the same GUID take one pad each instead of yielding to each other. */
 static int claimed_by_other_port(SDL_JoystickID id, int except) {
-    for (int p=1;p<PORTS;++p)
-        if (p!=except && ports[p].want[0] && !is_keyboard(ports[p].want) && is_preferred(id,ports[p].want)) return 1;
+    for (int p=1;p<PORTS;++p) {
+        if (p==except) continue;
+        /* An open pad is its port's, named or taken automatically (split_auto). */
+        if (ports[p].pad) { if (SDL_GetGamepadID(ports[p].pad)==id) return 1; continue; }
+        if (!ports[p].want[0] || is_keyboard(ports[p].want)) continue;
+        if ((except==0 || p<except) && is_preferred(id,ports[p].want)) return 1;
+    }
     return 0;
+}
+/* A controller a named port 2..4 is still waiting for, or player 1's chosen one while player 1 is
+ * on another: a port taking pads automatically (split_auto) leaves it to them. */
+static const char *preferred_gamepad(void);
+static int wanted_by_named_port(SDL_JoystickID id) {
+    for (int p=1;p<PORTS;++p)
+        if (!ports[p].pad && ports[p].want[0] && !is_keyboard(ports[p].want) && is_preferred(id,ports[p].want)) return 1;
+    const char *want=preferred_gamepad();
+    return want && (!gamepad || !is_preferred(SDL_GetGamepadID(gamepad),want)) && is_preferred(id,want);
 }
 /* A controller that drops (Bluetooth, battery) is logged with the time since the game first read
  * the pads and the rumble sent until then, so a log tells a dropped pad from other input trouble. */
@@ -149,21 +195,26 @@ typedef struct PadCal {
     int base[4];                       /* 0: normal pad; else |neutral| of a biased axis */
     int max[4][2];                     /* largest push seen per direction on a biased axis */
     uint64_t since;
+    uint64_t sampled;                  /* now_us() of the last cal_sample (read_gamepad) */
 } PadCal;
 static PadCal cals[PORTS];             /* cals[0]: port 1 (`gamepad`), cals[p]: ports[p].pad */
 static void cal_reset(PadCal *c);
-/* The gamepad of port p (1..3), opened when its named controller is connected; NULL otherwise. */
+/* The gamepad of port p (1..3), opened when its named controller is connected (or, with
+ * split_auto and no name, the next free one); NULL otherwise. */
 static SDL_Gamepad *port_gamepad(int p) {
     Port *port=&ports[p];
-    if (!port->want[0] || is_keyboard(port->want)) { if (port->pad) { SDL_CloseGamepad(port->pad); port->pad=NULL; } return NULL; }
+    const int automatic=!port->want[0] && split_auto;
+    if ((!port->want[0] && !automatic) || is_keyboard(port->want)) { if (port->pad) { SDL_CloseGamepad(port->pad); port->pad=NULL; } return NULL; }
     if (port->pad && !SDL_GamepadConnected(port->pad)) { note_disconnect(port->pad,p+1); SDL_CloseGamepad(port->pad); port->pad=NULL; }
     if (port->pad) return port->pad;
+    /* Player 1 has the first controller before the others take theirs. */
+    if (automatic && !gamepad) return NULL;
     int count=0;
     SDL_JoystickID *ids=SDL_GetGamepads(&count);
     for (int i=0; ids && i<count && !port->pad; ++i) {
-        if (!is_preferred(ids[i],port->want)) continue;
+        if (!automatic && !is_preferred(ids[i],port->want)) continue;
         if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue; /* port 1 has it */
-        if (claimed_by_other_port(ids[i],p)) continue;
+        if (claimed_by_other_port(ids[i],p) || (automatic && wanted_by_named_port(ids[i]))) continue;
         port->pad=SDL_OpenGamepad(ids[i]);
         if (port->pad) cal_reset(&cals[p]);
         if (port->pad) printf("Runtime: controller port %d: %s connected\n",p+1,SDL_GetGamepadName(port->pad));
@@ -198,6 +249,7 @@ static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,
 #define PAD_CAL_TIMEOUT_US 3000000u    /* after this, an all-zero reading is accepted as the neutral */
 #define PAD_CAL_BIAS 8192              /* |neutral| past this: a biased neutral and a reduced travel */
 #define PAD_CAL_REFINE 90              /* % of the base travel a push must reach to count as the full scale */
+#define PAD_CAL_INTERVAL_US 15000u     /* one calibration sample a frame at most */
 static int cal_enabled=-1, pad_deadzone=-1, pad_deadzone_outer=-1, cal_manual, cal_manual_center[4];
 static void cal_load(void) {
     static int loaded;
@@ -371,6 +423,10 @@ static SDL_Gamepad *current_gamepad(void) {
             last_reinit=now;
             SDL_free(ids); ids=NULL;
             if (gamepad) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+            for (int p=1;p<PORTS;++p) if (ports[p].pad) { SDL_CloseGamepad(ports[p].pad); ports[p].pad=NULL; }
+            for (int i=0;i<other_count;++i) if (other_gamepads[i]) {
+                SDL_CloseGamepad(other_gamepads[i]); other_gamepads[i]=NULL;
+            }
             SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
             if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) { sdl_ready=-1; return NULL; }
             ids=SDL_GetGamepads(&count);
@@ -391,6 +447,23 @@ static SDL_Gamepad *current_gamepad(void) {
                 printf("Runtime: a bound controller was not found in %d rescans: treated as disconnected (the in-game menu's Rescan controllers tries again)\n",PAD_RESCAN_ATTEMPTS);
         }
         if (pick<0 && !gamepad && ids) for (int i=0;i<count && pick<0;++i) if (!claimed_by_other_port(ids[i],0)) pick=i;
+        /* If player 1's chosen pad is absent, use the first available split-screen pad for
+         * player 1. Otherwise its input can silently create a different user's save. */
+        int port_fallback=0;
+        if (pick<0 && !gamepad && ids && ports[0].want[0]) {
+            for (int p=1;p<PORTS && pick<0;++p) {
+                if (!ports[p].want[0] || is_keyboard(ports[p].want)) continue;
+                for (int i=0;i<count;++i) if (is_preferred(ids[i],ports[p].want) &&
+                    !claimed_by_other_port(ids[i],p)) { pick=i; break; }
+            }
+            if (pick>=0) {
+                for (int p=1;p<PORTS;++p) if (ports[p].pad && SDL_GetGamepadID(ports[p].pad)==ids[pick]) {
+                    SDL_CloseGamepad(ports[p].pad);
+                    ports[p].pad=NULL;
+                }
+                port_fallback=1;
+            }
+        }
         if (pick>=0 && (!gamepad || SDL_GetGamepadID(gamepad)!=ids[pick])) {
             if (gamepad) SDL_CloseGamepad(gamepad);
             gamepad=SDL_OpenGamepad(ids[pick]);
@@ -403,6 +476,7 @@ static SDL_Gamepad *current_gamepad(void) {
             }
         }
         SDL_free(ids);
+        if (port_fallback && gamepad) update_port_presence();
     }
     /* SacredFire: the controller touched last is the active one. Every other connected gamepad is
      * kept open and polled ten times a second; one that produces input while the active one is idle
@@ -410,28 +484,34 @@ static SDL_Gamepad *current_gamepad(void) {
     static uint64_t last_switch_scan;
     if (now-last_switch_scan>100000) {
         last_switch_scan=now;
-        static SDL_Gamepad *others[8]; static int other_count;
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        for (int i=0;i<other_count;++i) if (others[i] && !SDL_GamepadConnected(others[i])) { others[i]=NULL; }
+        for (int i=0;i<other_count;++i) {
+            SDL_Gamepad *other=other_gamepads[i];
+            if (other && (!SDL_GamepadConnected(other) || claimed_by_other_port(SDL_GetGamepadID(other),0))) {
+                SDL_CloseGamepad(other);
+                other_gamepads[i]=NULL;
+            }
+        }
         for (int i=0; ids && i<count; ++i) {
             if (gamepad && SDL_GetGamepadID(gamepad)==ids[i]) continue;
             if (claimed_by_other_port(ids[i],0)) continue;
             int known=0;
-            for (int j=0;j<other_count;++j) if (others[j] && SDL_GetGamepadID(others[j])==ids[i]) known=1;
+            for (int j=0;j<other_count;++j) if (other_gamepads[j] && SDL_GetGamepadID(other_gamepads[j])==ids[i]) known=1;
             if (!known) {
                 int slot=-1;
-                for (int j=0;j<other_count;++j) if (!others[j]) { slot=j; break; }
+                for (int j=0;j<other_count;++j) if (!other_gamepads[j]) { slot=j; break; }
                 if (slot<0 && other_count<8) slot=other_count++;
-                if (slot>=0) others[slot]=SDL_OpenGamepad(ids[i]);
+                if (slot>=0) other_gamepads[slot]=SDL_OpenGamepad(ids[i]);
             }
         }
         SDL_free(ids);
         if (gamepad && !gamepad_active(gamepad)) {
             for (int j=0;j<other_count;++j) {
-                if (!others[j] || !gamepad_active(others[j])) continue;
+                if (!other_gamepads[j] || !gamepad_active(other_gamepads[j]) ||
+                    claimed_by_other_port(SDL_GetGamepadID(other_gamepads[j]),0)) continue;
                 SDL_Gamepad *previous=gamepad;
-                gamepad=others[j]; others[j]=previous; on_preferred=1;
+                gamepad=other_gamepads[j]; other_gamepads[j]=previous; on_preferred=1;
                 printf("Runtime: gamepad switched to %s (it was used)\n",SDL_GetGamepadName(gamepad));
                 break;
             }
@@ -502,6 +582,42 @@ static void bind_defaults(void) {
         Binding *b=&bindings[pads[i].input]; b->pad[b->pad_count++]=pads[i].button;
     }
 }
+/* The mouse in key.<input>= lines, as the launchers capture it (tools/gpu_capabilities.c
+ * --read-input; the Windows launcher's Keyboard tab): "Mouse Left", "Mouse Middle", "Mouse Right",
+ * "Mouse X1", "Mouse X2", "Wheel Up", "Wheel Down" (spaces optional). Kept among the keys as
+ * codes past the keyboard's scancodes; a wheel step holds its "key" for WHEEL_HOLD_MS. */
+#define MOUSE_KEY_BASE SDL_SCANCODE_COUNT
+enum { MOUSE_WHEEL_UP=6, MOUSE_WHEEL_DOWN=7, WHEEL_HOLD_MS=120 };
+static const char *const mouse_names[]={"mouseleft","mousemiddle","mouseright","mousex1","mousex2", /* SDL_BUTTON_* 1..5 */
+                                        "wheelup","wheeldown"};
+static SDL_MouseButtonFlags mouse_buttons; /* this sample's */
+static int mouse_focus;                    /* the game window has the focus: the mouse counts */
+static _Atomic uint64_t wheel_until[2];   /* up, down: SDL_GetTicks() until which the step holds */
+static bool SDLCALL wheel_watch(void *unused, SDL_Event *e) {
+    (void)unused;
+    if (e->type==SDL_EVENT_MOUSE_WHEEL && e->wheel.y!=0) {
+        const float y=e->wheel.direction==SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        wheel_until[y>0 ? 0 : 1]=SDL_GetTicks()+WHEEL_HOLD_MS;
+    }
+    return true;
+}
+static SDL_Scancode key_from_name(const char *name) {
+    char flat[32]; size_t n=0;
+    for (const char *c=name;*c && n<sizeof flat-1;++c) if (*c!=' ') flat[n++]=(char)SDL_tolower((unsigned char)*c);
+    flat[n]=0;
+    for (int i=0;i<7;++i) {
+        if (strcmp(flat,mouse_names[i])) continue;
+        static int watching;
+        if (i+1>=MOUSE_WHEEL_UP && !watching) watching=SDL_AddEventWatch(wheel_watch,NULL);
+        return (SDL_Scancode)(MOUSE_KEY_BASE+i+1);
+    }
+    return SDL_GetScancodeFromName(name);
+}
+static int mouse_key_down(int button) {
+    if (!mouse_focus) return 0;
+    if (button>=MOUSE_WHEEL_UP) return SDL_GetTicks()<wheel_until[button-MOUSE_WHEEL_UP];
+    return (mouse_buttons & SDL_BUTTON_MASK(button))!=0;
+}
 static int pad_button_from_name(const char *name) {
     if (!SDL_strcasecmp(name,"lefttrigger")) return PAD_LEFT_TRIGGER;
     if (!SDL_strcasecmp(name,"righttrigger")) return PAD_RIGHT_TRIGGER;
@@ -531,7 +647,7 @@ static void load_bindings(void) {
             for (char *end=name+strlen(name); end>name && end[-1]==' ';) *--end=0;
             if (!*name) continue;
             if (keyboard) {
-                const SDL_Scancode s=SDL_GetScancodeFromName(name);
+                const SDL_Scancode s=key_from_name(name);
                 if (s==SDL_SCANCODE_UNKNOWN) printf("Runtime: controls: unknown key \"%s\" for %s\n",name,line+4);
                 else if (b->key_count<MAX_BIND) b->keys[b->key_count++]=s;
             } else {
@@ -544,7 +660,10 @@ static void load_bindings(void) {
     fclose(f);
 }
 static int key_down(const bool *k, int input) {
-    for (int i=0;i<bindings[input].key_count;++i) if (k[bindings[input].keys[i]]) return 1;
+    for (int i=0;i<bindings[input].key_count;++i) {
+        const int key=(int)bindings[input].keys[i];
+        if (key>MOUSE_KEY_BASE ? mouse_key_down(key-MOUSE_KEY_BASE) : k[key]) return 1;
+    }
     return 0;
 }
 /* The bound gamepad buttons' state; triggers as their analog value. */
@@ -577,16 +696,15 @@ static void apply_keyboard(PadData *d, const bool *k) {
     d->right_y=key_axis(d->right_y,key_down(k,IN_LOOK_UP),key_down(k,IN_LOOK_DOWN));
 }
 
-static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *cal) {
+static void pad_neutral(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
-    d->connected=1; d->connected_count=connected_count ? connected_count : 1;
-    d->timestamp=now_us();
-    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
-    if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
-    const bool *k=keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
-    if (g) {
+    d->connected=1;
+}
+/* The gamepad's part of a sample (d neutral); on the pad thread, under lock. */
+static void read_gamepad(PadData *d, SDL_Gamepad *g, PadCal *cal) {
+    {
         int touch_right=0;
         for (int i=IN_CROSS;i<=IN_RIGHT;++i) {
             const int v=pad_value(g,i);
@@ -600,7 +718,10 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         int16_t raw[4];
         for (int i=0;i<4;++i) raw[i]=(int16_t)SDL_GetGamepadAxis(g,stick_axes[i]);
         cal_load();
-        cal_sample(cal,raw);
+        /* The neutral's quiet window counts samples at the game's rate (one a frame), not the
+         * pad thread's. */
+        const uint64_t now=now_us();
+        if (now-cal->sampled>=PAD_CAL_INTERVAL_US) { cal->sampled=now; cal_sample(cal,raw); }
         uint8_t *axis_out[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
         for (int i=0;i<4;++i) *axis_out[i]=stick_axis(cal,i,raw[i]); /* center 0 until the neutral is known */
         if (SDL_GetNumGamepadTouchpads(g)>0) {
@@ -618,18 +739,155 @@ static void sample_host_from(PadData *d, SDL_Gamepad *g, int keyboard, PadCal *c
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
         if (touch_right) touch_click(d,1);
     }
-    if (k) apply_keyboard(d,k);
 }
-static void sample_host(PadData *d) {
+
+/* SacredFire: SDL's device detection can block for a long time on Windows (DirectInput asking a
+ * slow HID device its name, after any controller connects or turns off) while it holds SDL's
+ * joystick lock; the game, reading the pad through SDL, froze until it was done. The bb:pad thread
+ * now updates SDL and samples every port's gamepad into `snap`; the game's threads copy that
+ * (snap_lock) and never wait on SDL. While an update is stuck, retain the last sample so held
+ * buttons are not released and pressed again. After 3 seconds, neutralize as a safety fallback;
+ * detected disconnects are applied as soon as the worker publishes them. */
+typedef struct { PadData data; int has_pad, keyboard; } PortSnap;
+static pthread_mutex_t snap_lock=PTHREAD_MUTEX_INITIALIZER; /* snap, snap_at, rumble_want */
+static PortSnap snap[PORTS];
+static uint64_t snap_at;            /* now_us() of the last sample; 0 until the first */
+static uint8_t snap_connected_count;
+static struct { uint16_t low, high; int pending; } rumble_want[PORTS]; /* the game's last request */
+static int pad_thread_state;        /* 0 not started, 1 running; -1: no thread, pad_read_state polls (tests) */
+#define PAD_STALE_US 250000u       /* diagnostic threshold, not a disconnect */
+#define PAD_EXPIRE_US 3000000u     /* bound held input when the worker stops responding */
+#define PAD_POLL_NS 2000000u
+static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high);
+/* One sample of every port's gamepad, and the rumble asked since the last one. */
+/* Issue #50: what each port plays with, for the in-game Controllers tab (bbgpu_pad_status): the
+ * gamepad's name, "keyboard" or none, and whether a button or a stick is held, so that pressing
+ * a button shows which player each controller is (identical ones included). */
+typedef struct { char name[64]; int pressing; } PortStatus;
+static PortStatus status_sent[PORTS];
+static int status_ready;
+static int pad_pressing(const PadData *d) {
+    const uint8_t sticks[4]={d->left_x,d->left_y,d->right_x,d->right_y};
+    for (int i=0;i<4;++i) if (sticks[i]<88 || sticks[i]>168) return 1;
+    return (d->buttons & ~BTN_TOUCHPAD)!=0 || d->touch_count>0;
+}
+static void report_status(const PortStatus *now) {
+    for (int p=0;p<PORTS;++p) {
+        if (status_ready && !strcmp(now[p].name,status_sent[p].name) && now[p].pressing==status_sent[p].pressing) continue;
+        status_sent[p]=now[p];
+        bbgpu_pad_status(p,now[p].name,now[p].pressing);
+    }
+    status_ready=1;
+}
+static void pad_poll(void) {
+    PortSnap fresh[PORTS];
+    PortStatus status[PORTS];
+    struct { uint16_t low, high; int pending; } want[PORTS];
+    pthread_mutex_lock(&lock);
+    if (!bindings_ready) { load_bindings(); bindings_ready=1; }
     SDL_Gamepad *g=current_gamepad();
-    sample_host_from(d,g,!keyboard_port(),&cals[0]);
+    for (int p=0;p<PORTS;++p) {
+        const int keyboard=p ? is_keyboard(ports[p].want) : !keyboard_port();
+        /* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard), once the game opened them. */
+        SDL_Gamepad *pad=!p ? g : keyboard || !ports[p].opened ? NULL : port_gamepad(p);
+        pad_neutral(&fresh[p].data);
+        fresh[p].has_pad=pad!=NULL;
+        fresh[p].keyboard=keyboard;
+        if (pad) read_gamepad(&fresh[p].data,pad,&cals[p]);
+        const char *name=pad ? SDL_GetGamepadName(pad) : keyboard ? "keyboard" : "";
+        snprintf(status[p].name,sizeof status[p].name,"%s",name ? name : "gamepad");
+        status[p].pressing=pad && pad_pressing(&fresh[p].data);
+    }
+    pthread_mutex_lock(&snap_lock);
+    memcpy(want,rumble_want,sizeof want);
+    for (int p=0;p<PORTS;++p) rumble_want[p].pending=0;
+    pthread_mutex_unlock(&snap_lock);
+    for (int p=0;p<PORTS;++p) {
+        SDL_Gamepad *pad=p ? ports[p].pad : gamepad;
+        if (want[p].pending && pad) rumble(p,pad,want[p].low,want[p].high);
+    }
+    const uint8_t count=connected_count;
+    pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&snap_lock);
+    memcpy(snap,fresh,sizeof snap);
+    snap_at=now_us();
+    snap_connected_count=count;
+    pthread_mutex_unlock(&snap_lock);
+    report_status(status);
 }
+static void *pad_thread(void *unused) {
+    (void)unused;
+    for (;;) {
+        const uint64_t start=now_us();
+        if (sdl_ready>0) SDL_UpdateJoysticks(); /* the window thread's event pump no longer does */
+        const uint64_t updated=now_us();
+        pad_poll();
+        const uint64_t polled=now_us();
+        if (polled-start>=PAD_STALE_US) {
+            printf("Runtime: slow controller cycle: SDL update %.1f ms, poll/publish %.1f ms\n",
+                   (double)(updated-start)/1000.0,(double)(polled-updated)/1000.0);
+            fflush(stdout);
+        }
+        SDL_DelayNS(PAD_POLL_NS);
+    }
+    return NULL;
+}
+/* A port's sample for the game: its gamepad from the pad thread's last sample, then the keyboard.
+ * Snapshot age diagnoses a slow poll; it does not imply a button release or disconnect. */
+static int stale_noted, expired_noted;
+/* After the safety release, require a physical release before accepting the same button again.
+ * Per-port and protected by read_lock, like sample_host_from's other game-side state. */
+static uint32_t rearm_buttons[PORTS];
+static void sample_host_from(PadData *d, int p) {
+    if (pad_thread_state<0) pad_poll();
+    PortSnap s;
+    pthread_mutex_lock(&snap_lock);
+    s=snap[p];
+    const uint64_t at=snap_at;
+    const uint8_t count=snap_connected_count;
+    pthread_mutex_unlock(&snap_lock);
+    const uint64_t now=now_us();
+    const int stale=at && now-at>PAD_STALE_US;
+    const int expired=at && now-at>=PAD_EXPIRE_US;
+    if (stale && !stale_noted) {
+        printf("Runtime: controller snapshot older than 250 ms; retaining input for up to 3 s\n");
+        fflush(stdout);
+    }
+    if (expired && !expired_noted) {
+        puts("Runtime: controller snapshot expired after 3 s; releasing gamepad input");
+        fflush(stdout);
+    }
+    stale_noted=stale;
+    expired_noted=expired;
+    if (expired) rearm_buttons[p]|=s.data.buttons;
+    else if (at) rearm_buttons[p]&=s.data.buttons;
+    if (!at || expired) { pad_neutral(&s.data); s.has_pad=0; }
+    else {
+        s.data.buttons&=~rearm_buttons[p];
+        if (rearm_buttons[p]&BTN_L2) s.data.l2=0;
+        if (rearm_buttons[p]&BTN_R2) s.data.r2=0;
+        if (rearm_buttons[p]&BTN_TOUCHPAD) {
+            s.data.touch_count=0;
+            s.data.touch_held_time=0;
+            memset(s.data.touches,0,sizeof s.data.touches);
+        }
+    }
+    if (!at) s.keyboard=0; /* the controls are loaded with the first sample */
+    *d=s.data;
+    d->connected_count=count ? count : 1;
+    d->timestamp=now;
+    if (bbgpu_overlay_captures_input()) { pad_neutral(d); d->connected_count=count ? count : 1; d->timestamp=now; return; }
+    const bool *k=s.keyboard && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    if (k) {
+        /* Mouse buttons count, like keys, only while the game window has the focus. */
+        mouse_focus=SDL_GetKeyboardFocus()!=NULL;
+        mouse_buttons=mouse_focus ? SDL_GetMouseState(NULL,NULL) : 0;
+        apply_keyboard(d,k);
+    }
+}
+static void sample_host(PadData *d) { sample_host_from(d,0); }
 /* Ports 2..4: their own gamepad, or the keyboard (port.N=keyboard); no scripted input. */
-static void sample_port(PadData *d, int p) {
-    current_gamepad(); /* keeps the port table fresh */
-    const int keyboard=is_keyboard(ports[p].want);
-    sample_host_from(d,keyboard ? NULL : port_gamepad(p),keyboard,&cals[p]);
-}
+static void sample_port(PadData *d, int p) { sample_host_from(d,p); }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
@@ -781,7 +1039,20 @@ static void sample(PadData *d) {
     touch_ids(d);
 }
 
-static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }
+static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER; /* the game side of sampling (sample) */
+static ABI int32_t pad_init(void) {
+    pthread_mutex_lock(&lock);
+    /* Also cover pad initialization before the SDL window exists. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+    initialized=1;
+    if (!pad_thread_state) {
+        pthread_t thread;
+        if (pthread_create(&thread,NULL,pad_thread,NULL)==0) { pthread_detach(thread); pad_thread_state=1; }
+        else { pad_thread_state=-1; puts("Runtime: no controller thread: the pads are read on the game's thread"); }
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
 /* Handles are the user ids: 1 is the player's port, 2..4 the split-screen ports while assigned. */
 static int handle_open(int32_t handle) {
     if (handle==PAD_HANDLE) return opened;
@@ -796,11 +1067,12 @@ static ABI int32_t pad_open(int32_t user, int32_t type, int32_t index, const voi
     pthread_mutex_lock(&lock);
     int already, assigned=1;
     if (user==1) { already=opened; opened=1; }
-    else { assigned=ports[user-1].want[0]!=0; already=ports[user-1].opened; if (assigned) ports[user-1].opened=1; }
+    else { assigned=ports[user-1].want[0]!=0 || ports[user-1].pad!=NULL; already=ports[user-1].opened; if (assigned) ports[user-1].opened=1; }
     pthread_mutex_unlock(&lock);
     if (!assigned) return ERR_INVALID_ARG;
     if (already) return ERR_ALREADY_OPENED;
-    printf("Runtime: pad opened for user %d (%s)\n",user,user==1 ? "SDL gamepad or keyboard" : ports[user-1].want);
+    printf("Runtime: pad opened for user %d (%s)\n",user,user==1 ? "SDL gamepad or keyboard" :
+           ports[user-1].want[0] ? ports[user-1].want : "automatically assigned controller");
     return user;
 }
 static ABI int32_t pad_close(int32_t handle) {
@@ -811,10 +1083,10 @@ static ABI int32_t pad_close(int32_t handle) {
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (!handle_open(handle)) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&read_lock);
     if (handle==PAD_HANDLE) sample(data); else sample_port(data,handle-1);
     ++reads; if (!pad_started_us) pad_started_us=now_us();
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&read_lock);
     return 0;
 }
 /* Buffered read: the port samples once per call, so one entry is returned. */
@@ -831,24 +1103,23 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     info->pixel_density=44.86f; info->resolution_x=1920; info->resolution_y=943;
     info->dead_zone_left=info->dead_zone_right=2;
     info->connection_type=0; info->connected=1; info->device_class=0;
-    pthread_mutex_lock(&lock);
-    current_gamepad();
-    info->connected_count=connected_count ? connected_count : 1;
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&snap_lock);
+    info->connected_count=snap_connected_count ? snap_connected_count : 1;
+    pthread_mutex_unlock(&snap_lock);
     return 0;
 }
 /* Rumble: the game sets it every frame, and in a race the strength changes almost every time.
  * Each change is a report sent to the controller; over Bluetooth that many (60+ a second) can
  * make Xbox and 8BitDo pads drop the connection. A new strength goes out at most every
  * RUMBLE_INTERVAL_US; stopping goes out at once, and the same strength again only renews SDL's
- * timer (SDL sends nothing for it). BB_RUMBLE=0 turns rumble off. Called under lock. */
+ * timer (SDL sends nothing for it). BB_RUMBLE=0 turns rumble off. Called under lock, by
+ * pad_poll with the game's last request (pad_vibration). */
 #define RUMBLE_INTERVAL_US 50000u
 typedef struct { SDL_Gamepad *pad; uint16_t low, high; uint64_t at; } RumbleSent;
 static RumbleSent rumble_state[PORTS];
 static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high) {
     static int enabled=-1;
     if (enabled<0) { const char *v=getenv("BB_RUMBLE"); enabled=!(v && *v=='0'); }
-    ++rumble_calls;
     if (!enabled || slot<0 || slot>=PORTS) return;
     RumbleSent *r=&rumble_state[slot];
     const uint64_t now=now_us();
@@ -862,10 +1133,13 @@ static void rumble(int slot, SDL_Gamepad *g, uint16_t low, uint16_t high) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!handle_open(handle)) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
-    pthread_mutex_lock(&lock);
-    SDL_Gamepad *g=handle==PAD_HANDLE ? current_gamepad() : port_gamepad(handle-1);
-    if (g) rumble(handle==PAD_HANDLE ? 0 : handle-1,g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257));
-    pthread_mutex_unlock(&lock);
+    const int slot=handle==PAD_HANDLE ? 0 : handle-1;
+    pthread_mutex_lock(&snap_lock);
+    ++rumble_calls;
+    rumble_want[slot].low=(uint16_t)(param[0]*257);
+    rumble_want[slot].high=(uint16_t)(param[1]*257);
+    rumble_want[slot].pending=1;
+    pthread_mutex_unlock(&snap_lock);
     return 0;
 }
 static ABI int32_t pad_ok_handle(int32_t handle) { return handle_open(handle) ? 0 : ERR_INVALID_HANDLE; }

@@ -23,6 +23,8 @@ void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
 void runtime_set_report_hook(void (*hook)(void));
+void runtime_lzma_patch(unsigned char *image, size_t size);
+void runtime_lzma_report(void);
 void runtime_finalize(void *dso);
 uintptr_t runtime_mutex_resolve(const char *name);
 void runtime_mutex_report(void);
@@ -96,6 +98,61 @@ void runtime_cinematic_start(const unsigned char *image);
 void runtime_cinematic_video(int delta); /* +1 a video file opened, -1 closed */
 int runtime_cinematic_cutscene(void); /* 1 while a cutscene plays (not a race's fly-over) */
 void runtime_cinematic_cutscene_fill(void); /* cutscenes get a 16:9 field of view, not a crop */
+/* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */
+void runtime_frontend_start(const unsigned char *image);
+int runtime_online_mode_start(unsigned char *image, size_t size);
+int runtime_friends_native_start(unsigned char *image, size_t size);
+int runtime_time_trial_start(unsigned char *image, size_t size);
+/* The private room's mode through RyuNET (runtime_room_mode.c): the host publishes its choice,
+ * a player who joins takes it, also when joining by invitation (no selector seen). */
+void runtime_online_mode_adopt(int speed);
+void runtime_online_mode_leave_cup(void);
+int runtime_online_mode_private_speed(void);
+int runtime_online_mode_private_cup(void);
+int runtime_online_mode_private_single_options(void);
+int runtime_online_mode_private_teams(void);
+int runtime_online_mode_in_private(void);
+int runtime_online_mode_lobby_open(void);        /* an online lobby is on screen */
+void runtime_online_mode_note_frame(void);       /* the game's thread, every frame */
+int runtime_online_mode_room_on(void);           /* in_private as of the last frame, for any thread */
+int runtime_online_mode_public_on(void);         /* a public match's lobby as of the last frame */
+int runtime_online_mode_private_cup_race(void); /* a race of a private room's CUP is loading or running */
+void runtime_room_mode_hosting(void);
+void runtime_room_mode_joined(const char *session_id);
+void runtime_room_mode_left(void);
+int runtime_room_mode_following(void);
+void runtime_room_mode_host_name(char out[24]);
+int runtime_room_mode_ready(void);
+/* 1 verified/frozen, 0 rejected, -1 background verification pending. */
+int runtime_room_mode_begin_race(void);
+void runtime_room_mode_end_race(void);
+int runtime_public_itemless_start(unsigned char *image, size_t size);
+int runtime_public_itemless_available(void);
+int runtime_public_itemless_announce(void);
+int runtime_public_itemless_active(void);
+int runtime_public_match_active(void);
+int runtime_private_match_active(void);
+/* 1 accepted, 0 rejected, -1 asynchronous check pending. */
+int runtime_private_party_check(void);
+void runtime_private_party_defer_start(void *self, void (ABI *resume)(void *));
+int runtime_private_party_update(void);
+void runtime_private_party_cancel(void);
+int runtime_private_difficulty_modified(void);
+int runtime_public_itemless_selected(void);
+void runtime_public_itemless_select(int enabled);
+void runtime_public_itemless_reset(void);
+void runtime_public_itemless_party_ready(void);
+void runtime_public_itemless_update(void);
+int runtime_speed_mode_enabled(void);
+int runtime_speed_race_active(void);
+void runtime_race_options_leave_room(void);
+void runtime_race_options_map_loading(const char *map);
+int runtime_race_options_start(unsigned char *image, size_t size);
+void runtime_race_options_stop_boost(void *boost, void (ABI *stop)(void *));
+int runtime_itemless_start(unsigned char *image, size_t size);
+int runtime_replay_start(unsigned char *image, size_t size); /* runtime_replay.c (spectator build) */
+/* 1 while a replay of a race without item crates (Time Trial, Itemless) loads or plays (runtime_replay_play.c) */
+int runtime_replay_no_crates(void);
 /* SacredFire online: the running game's title id for the PSN data (runtime_services.c). */
 void runtime_np_set_title(const char *title_id);
 /* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */
@@ -133,9 +190,13 @@ int runtime_pad_user_present(int user);
 void runtime_services_user_change(int user, int login);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
+const char *runtime_file_progress_dir(void); /* saves and trophies: BB_PROGRESS_DIR or the user folder */
 void runtime_savedata_configure(const char *title);
+const char *runtime_savedata_title(void);
 /* The game's TITLE_ID: where its trophies are kept (<user>/trophies/<title>/). */
 void runtime_trophy_configure(const char *title);
+void runtime_meta_dump_start(unsigned char *image, size_t size); /* BB_META_DUMP=1: field metadata (lab) */
+void runtime_trophy_badges(const char *json); /* the server's badges: OCTR's trophies (ctr_trophies.h) */
 uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_savedata_report(void);
 void runtime_thread_attach_host(const char *name);

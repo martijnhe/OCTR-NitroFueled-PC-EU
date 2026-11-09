@@ -20,6 +20,9 @@ inline bool IsFsr4(int upscaler) {
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
 enum class MenuLanguage { English, Russian, Dutch, Spanish };
+/// Where trophy, friend and other notices show (bbport.ini notice_position).
+enum NoticePosition : int { NoticeTopRight = 0, NoticeTopLeft, NoticeBottomRight, NoticeBottomLeft, NoticeTopCentre,
+                            NoticeBottomCentre, NoticeCount };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -84,12 +87,16 @@ inline constexpr int GamePatchCount = int(sizeof(GamePatches) / sizeof(GamePatch
 /// 1080p; scripts/patches.py and run.py apply it at start, docs/sacredfire/13-resolution.md).
 inline constexpr int RenderResHeights[] = {480, 720, 1080, 1440, 1620, 2160};
 inline constexpr int RenderResCount = 6;
+/// Display shape (aspect_ratio); the corrected wide modes also accept the older widescreen keys.
+enum AspectRatio : int { Aspect16x9 = 0, Aspect16x10, Aspect21x9, Aspect32x9, AspectRatioCount };
+inline constexpr const char* AspectRatioKeys[] = {"16x9", "16x10", "21x9", "32x9"};
+inline constexpr const char* AspectRatioNames[] = {"16:9", "16:10", "21:9", "32:9"};
 /// Live output resolutions: the upscaler's output and the UI host targets.
 /// 16:9 sizes, then GetLostIn's native ultrawide outputs (by tcosi; Settings > Display >
 /// Aspect / output, bbport.ini aspect_ratio + output_res, applied at start by run.sh / run.py).
 inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 2560, 3440, 5120};
 inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 1080, 1440, 1440};
-inline constexpr int OutputAspects[] = {0, 0, 0, 0, 1, 1, 2}; ///< 0 16:9, 1 21:9, 2 32:9
+inline constexpr int OutputAspects[] = {0, 0, 0, 0, 2, 2, 3}; ///< the AspectRatio values: 0 16:9, 2 21:9, 3 32:9
 inline constexpr int OutputCount = 7;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
@@ -98,7 +105,7 @@ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 constexpr int ControllerPorts = 4;
 /// SacredFire: the upscaler (bbport.ini temporal=off|fsr1|fsr3|dlss|fsr4): FSR 1 (spatial, the
 /// display pass's stretch) or temporal upscaling/AA of the finished frame (vk_ctr_fsr3; FSR 3
-/// where DLSS cannot run, FSR 4 where INT8 and its models allow).
+/// where DLSS or FSR 4 cannot run).
 enum Temporal : int { TemporalOff = 0, TemporalFsr1 = 1, TemporalFsr3 = 2, TemporalDlss = 3,
                       TemporalFsr4 = 4, TemporalCount = 5 };
 inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr3", "dlss", "fsr4"};
@@ -107,6 +114,9 @@ inline constexpr const char* TemporalNames[TemporalCount] = {"off", "fsr1", "fsr
 /// 16-framegen.md). One generated frame is shown before every real one.
 enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenCount = 2 };
 inline constexpr const char* FrameGenNames[FrameGenCount] = {"off", "fsr3"};
+/// v0.7.4: FSR 4 (temporal=fsr4) is offered only when its model files are there (fsr4_shaders
+/// next to the package, or BB_FSR4_DIR) and the GPU has INT8 dot products.
+bool Fsr4Available();
 /// bbport.ini dlss_quality: auto (render_res decides the render size) or one of NVIDIA's modes,
 /// which set the render size from dlss_output (scripts/patches.py render_plan; at start).
 inline constexpr const char* DlssQualityNames[] = {"auto", "dlaa", "quality", "balanced",
@@ -119,6 +129,8 @@ inline constexpr const char* DlssModelNames[] = {"transformer", "cnn"};
 
 struct Values {
     std::array<std::array<char, 64>, ControllerPorts> ports{}; ///< guarded by PortsMutex()
+    /// split_auto: ports 2-4 without a controller chosen take the next connected one (runtime_pad.c).
+    std::atomic<bool> split_auto{true};
     std::atomic<MenuLanguage> menu_language{MenuLanguage::Russian};
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
@@ -132,6 +144,20 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
+    /// show_ping: the round trip to the players in the online room, under the FPS counter.
+    std::atomic<bool> show_ping{false};
+    /// RyuNET friends (the menu's Friends tab): no "friend online" notices; appear offline to
+    /// friends (the server hides it); no friend notices at all.
+    std::atomic<bool> friends_hide_activity{false};
+    std::atomic<bool> friends_hide_me{false};
+    std::atomic<bool> friends_no_notices{false};
+    /// Spectator build: share my races with my friends (src/runtime_spectate.c).
+    std::atomic<bool> spectate_share{true};
+    /// The text chat of a private room (src/runtime_chat.c).
+    std::atomic<bool> chat_enabled{true};
+    /// Also in public lobbies, with strangers: a choice of its own.
+    std::atomic<bool> chat_public{true};
+    std::atomic<int> notice_position{NoticeTopRight};
     /// SacredFire: frames per second the present thread lets through (0: no limit). The 60 FPS
     /// patch lets the game run as fast as the machine goes; 60 is the pace it was made for.
     /// Applies at once. BB_FPS_LIMIT overrides it.
@@ -146,12 +172,17 @@ struct Values {
     /// shader no longer stops the game; a pass drawn every frame may miss a frame or two.
     /// Experimental (STATUS.md, issue #2). Applies at once. BB_ASYNC_PIPELINES overrides it.
     std::atomic<bool> async_pipelines{false};
-    /// SacredFire: the game's 2x MSAA (G-buffer and forward passes). Off by default: on the host
-    /// GPU, single-sample colour drawn over the 2x depth buffer blends twice along triangle edges
-    /// (dotted lines in skies and light shafts, GitHub issues #16/#18), and at the internal
-    /// resolutions this port offers MSAA adds little. Read once at start (restart to apply);
+    /// SacredFire: the game's 2x MSAA (G-buffer and forward passes; foliage's alpha edges need
+    /// it). The dotted lines single-sample colour over the 2x depth buffer drew on NVIDIA (GitHub
+    /// issues #16/#18) are fixed by truncating coverage in mixed-sample pipelines
+    /// (vk_graphics_pipeline.cpp, VK_NV_coverage_reduction_mode; AMD has
+    /// VK_AMD_mixed_attachment_samples). Still off by default (v0.7): it costs frames on weak GPUs
+    /// and GPUs with neither extension (Intel) would draw the lines again. Read once at start;
     /// BB_NO_MSAA=1/0 overrides it. AmdGpu::BbNoMsaa() is the switch the renderer reads.
     std::atomic<bool> msaa{false};
+    /// The game's Options menu gets a "Graphics" tab (the hidden Language Select tab, relabelled
+    /// by scripts/graphics_tab.py) with the port's settings. Read once at start.
+    std::atomic<bool> graphics_tab{true};
     /// SacredFire: exclusive fullscreen on the game's display (BB_DISPLAY). Applies at once;
     /// BB_FULLSCREEN=1 at start. Saved to bbport.ini by the menu.
     std::atomic<bool> fullscreen{false};
@@ -195,6 +226,10 @@ struct Values {
     bool startup_online = false;
     std::array<char, 32> startup_online_name{};
     std::atomic<int> ultrawide_w{0}, ultrawide_h{0};
+    /// The launcher's aspect_ratio / aspect_output (scripts/aspect_ratio.py at start).
+    std::atomic<int> aspect_ratio{Aspect16x9};
+    std::atomic<int> aspect_w{0}, aspect_h{0};
+    bool aspect_ratio_seen = false, aspect_output_seen = false; ///< newer keys win while loading
     /// The desktop size of the game's monitor (window.cpp), for the ultrawide choice.
     std::atomic<int> display_w{0}, display_h{0};
     /// SacredFire: the upscaler (Temporal: off, FSR 1, FSR 3, DLSS).
@@ -208,9 +243,6 @@ struct Values {
     bool legacy_fsr3 = false;
     std::atomic<float> fsr3_sharpness{0.3f}; ///< FSR 3's RCAS, 0 off .. 1
     std::atomic<int> output_res{OutputDefault}; ///< index into OutputWidths
-    /// GetLostIn's native ultrawide aspect (bbport.ini aspect_ratio): 0=16:9, 1=21:9, 2=32:9; set
-    /// together with output_res by the Aspect / output choice. Applied at start (restart).
-    std::atomic<int> aspect_ratio{0};
     /// launcher_at_start: the AppImage, the Steam shortcut and the menu entry open the launcher
     /// first (Linux and the Steam Deck). Takes effect at the next start.
     std::atomic<bool> launcher_at_start{false};
@@ -231,9 +263,9 @@ struct Values {
     int startup_render_res = -1;
     bool startup_ultrawide = false;
     int startup_ultrawide_w = 0, startup_ultrawide_h = 0;
+    int startup_aspect_ratio = Aspect16x9;
     int startup_temporal = TemporalFsr1, startup_dlss_quality = 0, startup_dlss_output = 0;
     int startup_output_res = OutputDefault;
-    int startup_aspect_ratio = 0;
     int startup_live_resolution = 0;
 };
 

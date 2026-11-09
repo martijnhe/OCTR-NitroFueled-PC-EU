@@ -126,6 +126,15 @@ def third_party(dlls, python=None, dlss=False):
                   f'  home:    {field("URL")}',
                   f'  source:  https://packages.msys2.org/packages/{package}',
                   f'  files:   {", ".join(packages[package]["dlls"])}', '']
+    lines += ['DirectX Shader Compiler (dxc.exe, dxcompiler.dll), in bin\\dxc\\ (the native Vulkan',
+              '  renderer compiles its shaders with it on your PC)',
+              '  license: University of Illinois/NCSA (LLVM) and MIT (bin\\dxc\\LICENSE-LLVM.txt,',
+              '           bin\\dxc\\LICENCE-MIT.txt)',
+              '  home:    https://github.com/microsoft/DirectXShaderCompiler', '',
+              'gcn2hlsl and its modules, in third_party\\gcn2hlsl\\ (the native renderer\'s shader',
+              '  translator, from the D3D11 port by FrankHUN88453, with SacredFire changes)',
+              '  license: MIT (third_party\\gcn2hlsl\\LICENSE)',
+              '  home:    https://github.com/straightarrows/CTR-NitroFueled-PC-d3d11', '']
     if python:
         lines += [f'{python}, in python\\',
                   '  license: PSF-2.0 (python\\LICENSE.txt; also covers the bundled OpenSSL, libffi,',
@@ -148,6 +157,8 @@ def third_party(dlls, python=None, dlss=False):
                   'https://github.com/FireBurn/FSR-Vulkan (MIT).', '']
     lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
+    lines += ['sacredfire.exe includes code ported from Replay Mode by Erluinzo (MIT,',
+              'licenses\\ctrnf-replay-mode-LICENSE.txt, https://github.com/Erluinzo/ctrnf-replay-mode).', '']
     lines += ['art\\ctr-menu.ttf: the Lilita One font by Juan Montoreano (SIL Open Font License 1.1,',
               'art\\ctr-menu-font-license.txt). art\\ctr-hero.png and art\\ctr-logo.png: game artwork',
               'from SteamGridDB, the property of its owners (art\\README.txt).', '']
@@ -209,6 +220,10 @@ def main():
     p.add_argument('--version', default='')
     p.add_argument('--dist', type=Path, default=ROOT / 'dist')
     p.add_argument('--dlss-sdk', type=Path, help='NVIDIA DLSS SDK folder: bundle DLSS')
+    # DXC (github.com/microsoft/DirectXShaderCompiler releases, dxc_*.zip unpacked): the native
+    # renderer's shaders are compiled with it on the player's PC (scripts/native_shaders.py)
+    p.add_argument('--dxc-dir', type=Path, default=ROOT.parent / 'OCTR-vulkan-lab-tools' / 'dxc',
+                   help='an unpacked DXC release (bin/x64/dxc.exe): bundle it for the native renderer')
     a = p.parse_args()
     dlss_files = []
     if a.dlss_sdk:
@@ -226,7 +241,7 @@ def main():
     shutil.rmtree(folder, ignore_errors=True)
     if folder.exists():
         sys.exit(f'{folder} could not be removed (is it open?)')
-    for sub in ('bin', 'scripts', 'tools', 'patches', 'out'):
+    for sub in ('bin', 'scripts', 'tools', 'patches', 'out', 'mods'):
         (folder / sub).mkdir(parents=True)
     shutil.copy2(exe, folder / 'bin')
     shutil.copy2(caps, folder / 'bin')
@@ -235,10 +250,18 @@ def main():
     dlls = closure([exe, caps])
     for path in dlls.values():
         shutil.copy2(path, folder / 'bin')
+    # The Vulkan loader (vulkan-1.dll, loaded at run time, so not in the closure): Windows keeps
+    # the one an old GPU driver installed, which can report only Vulkan 1.2 even where the GPU's
+    # current driver has 1.3 ("only 1.2 is supported by instance"). Next to the exe, ours is used.
+    loader = CLANG_BIN / 'vulkan-1.dll'
+    if loader.is_file():
+        shutil.copy2(loader, folder / 'bin')
+    (folder / 'licenses').mkdir()
+    write_text(folder / 'licenses' / 'ctrnf-replay-mode-LICENSE.txt',
+               (ROOT / 'third_party' / 'ctrnf-replay-mode' / 'LICENSE').read_text(encoding='utf-8'))
     if dlss_files:
         for path in dlss_files:
             shutil.copy2(path, folder / 'bin')
-        (folder / 'licenses').mkdir()
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
@@ -246,20 +269,35 @@ def main():
     python = bundle_python(folder, a.dist / 'pycache')
     bundle_iced_x86(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
+    (folder / 'docs').mkdir(exist_ok=True)
+    for document in ('mod-packaging.html', 'mod-support.txt'):
+        shutil.copy2(ROOT / 'docs' / document, folder / 'docs' / document)
+    shutil.copytree(ROOT / 'docs' / 'native-handbook', folder / 'docs' / 'native-handbook')
     for script in (ROOT / 'scripts').glob('*.py'):
         shutil.copy2(script, folder / 'scripts')
-    # GetLostIn's native ultrawide data (manifests, baseline, shaders): needed by run.py.
-    for data in list((ROOT / 'scripts').glob('ultrawide_*_data')):
-        if data.is_dir():
-            # Prepared game views (view*/, several GB) and the EU work folder are per player.
-            shutil.copytree(data, folder / 'scripts' / data.name, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns('view', 'view-*', 'view-building-*', 'profile-eu-*'))
+    for data in ('aspect_ratio_data', 'widescreen_data', 'button_prompts'):
+        shutil.copytree(ROOT / 'scripts' / data, folder / 'scripts' / data, dirs_exist_ok=True)
     # FSR 4 v07 weights (fsr4_shaders/, MIT per LICENSE-FSR4-v07.txt inside).
     if (ROOT / 'fsr4_shaders').is_dir():
         shutil.copytree(ROOT / 'fsr4_shaders', folder / 'fsr4_shaders', dirs_exist_ok=True)
     shutil.copytree(ROOT / 'assets', folder / 'assets')  # button icons (scripts/buttons.py)
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
+    # The native Vulkan renderer's shader build (scripts/native_shaders.py): the translator, its
+    # driver script and DXC. Only dxc.exe and dxcompiler.dll: SPIR-V needs no dxil.dll.
+    (folder / 'tools' / 'shaders').mkdir()
+    shutil.copy2(ROOT / 'tools' / 'shaders' / 'build_spirv.py', folder / 'tools' / 'shaders')
+    shutil.copytree(ROOT / 'third_party' / 'gcn2hlsl', folder / 'third_party' / 'gcn2hlsl',
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    dxc_bin = a.dxc_dir / 'bin' / 'x64'
+    if not (dxc_bin / 'dxc.exe').is_file():
+        sys.exit(f'{dxc_bin / "dxc.exe"} not found: give --dxc-dir an unpacked DXC release')
+    (folder / 'bin' / 'dxc').mkdir()
+    for f in ('dxc.exe', 'dxcompiler.dll'):
+        shutil.copy2(dxc_bin / f, folder / 'bin' / 'dxc')
+    for f in ('LICENSE-LLVM.txt', 'LICENCE-MIT.txt'):
+        if (a.dxc_dir / f).is_file():
+            shutil.copy2(a.dxc_dir / f, folder / 'bin' / 'dxc')
     for patch in (ROOT / 'patches').glob('*.xml'):
         shutil.copy2(patch, folder / 'patches')
     # The shader recipe (shaders/README.md): prepared for the player's GPU at the first start.
@@ -271,8 +309,15 @@ def main():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
     # The launcher's artwork and menu font (art\README.txt says where each comes from).
     shutil.copytree(ROOT / 'art', folder / 'art', dirs_exist_ok=True)
-    if (ROOT / 'out' / 'aerolib.inl').is_file():
-        shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
+    # shadPS4's import names (tools/gen_import_names.py) ship with the package: without them a
+    # first start where raw.githubusercontent.com cannot be reached stops at the first import
+    # the runtime's compiled table does not name (_sceKernelSetThreadDtors, code 20).
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import gen_import_names
+    aerolib = ROOT / 'out' / 'aerolib.inl'
+    if not gen_import_names.aerolib_names(aerolib):
+        sys.exit(f'{aerolib} could not be fetched; the package needs it')
+    shutil.copy2(aerolib, folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in
     # bbport.default.ini and ship under the real name.
     # The launcher sets up the game folder and starts it; the .bat is the way without it.

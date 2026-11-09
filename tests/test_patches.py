@@ -106,10 +106,58 @@ class SignatureTests(unittest.TestCase):
         elf = tiny_elf(b'\0' * 4 + b'\xaa\xbb\x07\xdd' + b'\0' * 24)
         self.assertEqual(self.writes(elf, EBOOT_BASE + 0x1012), [(0x1006, b'\x90\x90')])
 
+    def test_signature_already_patched(self):
+        # Some 6.72+ builds ship with the patch applied: the site holds the patch's own bytes.
+        elf = tiny_elf(b'\0' * 16 + b'\xaa\xbb\x90\x90' + b'\0' * 12)
+        self.assertEqual(self.writes(elf, EBOOT_BASE + 0x1012), [(0x1012, b'\x90\x90')])
+        moved = tiny_elf(b'\0' * 4 + b'\xaa\xbb\x90\x90' + b'\0' * 24)
+        self.assertEqual(self.writes(moved, EBOOT_BASE + 0x1012), [(0x1006, b'\x90\x90')])
+        # Only the patch's bytes count: other bytes there still make it a miss.
+        self.assertEqual(self.writes(tiny_elf(b'\0' * 16 + b'\xaa\xbb\x90\x91' + b'\0' * 12),
+                                     EBOOT_BASE + 0x1012), [])
+
     def test_signature_missing_or_ambiguous_skips_the_patch(self):
         self.assertEqual(self.writes(tiny_elf(b'\0' * 32), EBOOT_BASE + 0x1012), [])
         twice = tiny_elf(b'\xaa\xbb\x00\xdd' * 2 + b'\0' * 24)
         self.assertEqual(self.writes(twice, EBOOT_BASE + 0x1012), [])
+
+
+class OptionalGamePatchTests(unittest.TestCase):
+    """A bundled game patch (60 FPS, motion blur) whose code this build lacks never blocks a
+    mod session, and out/patches-applied.json says which ones were applied."""
+
+    @staticmethod
+    def selected(name, signature):
+        meta = patches.ET.fromstring(
+            f'<Metadata Name="{name}" AppVer="01.21"><PatchList><Line Type="bytes" Address="0x00501012" '
+            f'Value="9090" Signature="{signature}" SignatureOffset="0x2"/></PatchList></Metadata>')
+        return meta
+
+    def test_strict_compile_skips_a_missing_game_patch_only(self):
+        elf = tiny_elf(b'\0' * 32)
+        missing = self.selected('60 FPS Unlock', 'aa bb ?? dd')
+        for key in ('CrashTeamRacing.xml/60 FPS Unlock', 'CrashTeamRacingEU.xml/60 FPS Unlock'):
+            applied = []
+            self.assertEqual(compile_external([(key, None, missing)], eboot_segments(elf), elf,
+                                              strict=True, applied=applied), [])
+            self.assertEqual(applied, [])
+        with self.assertRaisesRegex(ValueError, 'Cannot apply enabled mod patch'):
+            compile_external([('OCTR-Mod-Content.xml/x', None, missing)], eboot_segments(elf), elf,
+                             strict=True)
+
+    def test_applied_keys_round_trip(self):
+        elf = tiny_elf(b'\0' * 16 + b'\xaa\xbb\x01\xdd' + b'\0' * 12)
+        applied = []
+        selected = [('CrashTeamRacingEU.xml/60 FPS Unlock', None, self.selected('60 FPS Unlock', 'aa bb ?? dd')),
+                    ('CrashTeamRacing.xml/Disable Motion Blur', None, self.selected('Disable Motion Blur', 'ee ff'))]
+        compile_external(selected, eboot_segments(elf), elf, applied=applied)
+        self.assertEqual(applied, ['CrashTeamRacingEU.xml/60 FPS Unlock'])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(patches.applied_game_patches(tmp))
+            (Path(tmp) / patches.APPLIED_FILE).write_text(json.dumps(applied))
+            self.assertEqual(patches.applied_game_patches(tmp), {'patch_60fps'})
+            (Path(tmp) / patches.APPLIED_FILE).write_text('[]')
+            self.assertEqual(patches.applied_game_patches(tmp), set())
 
 
 class RenderResTests(unittest.TestCase):
@@ -170,6 +218,22 @@ class RenderResTests(unittest.TestCase):
         elf = tiny_elf(b'\0' + blob, vaddr=0xfff)
         self.assertEqual(patches.class_vtable(elf, 'CBuildData'), 0x1200)
         self.assertIsNone(patches.class_vtable(elf, 'CMissing'))
+    def test_layout_internal_scales_the_scene(self):
+        # The base path draws 1920x1080 targets whatever the layout's display size, so a layout
+        # above (or below) 1080 takes the Pro path's scale, without its output doubling.
+        addresses = lambda s: [line.get('Address') for _, _, meta in patches.render_patches(s)
+                               for line in meta.iter('Line')]
+        settings = {'render_res': '1080', 'layout_internal': '2160', 'temporal': 'off'}
+        plan = patches.render_plan(settings)
+        self.assertEqual(plan['label'], '2160p ultrawide')
+        self.assertTrue(plan['pro'] and plan['single'] and plan['heap'])
+        self.assertEqual(plan['scale'], 2.0)
+        self.assertEqual(addresses(settings), ['0x017aa662', '0x017aa648', '0x017aa658', '0x01fbb93e'])
+        # 1440: the Pro path's own scale.
+        settings['layout_internal'] = '1440'
+        self.assertEqual(addresses(settings), ['0x017aa648', '0x017aa658'])
+        self.assertEqual(patches.render_plan({'render_res': '1080', 'layout_internal': '1080'})['label'], '1080p')
+        self.assertEqual(patches.render_patches({'render_res': '1080', 'layout_internal': '1080'}), [])
 
     def test_dlss_quality_picks_the_render_size(self):
         plan = patches.render_plan
@@ -231,14 +295,14 @@ class GamePatchTests(unittest.TestCase):
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.00'), [])
 
     def test_eu_edition_patches_follow_menu_keys(self):
-        # The three game patches of the menu (60 FPS, motion blur, 1080p Pro); Camiloop's unlock
-        # patch is for the USA executable only, the online key patch has its own EU file for 1.21.
+        # The three base-game patches (60 FPS, motion blur, 1080p Pro); the online key and
+        # Camiloop's unlock patch also have EU files for the 1.21 update.
         classic = [k for k in GAME_PATCH_KEYS if k not in ('patch_unlock_all', 'patch_online_key')]
         found = external_patches(ROOT / 'patches', app_version='01.00', title_id='CUSA14876')
         self.assertEqual({key.split('/')[0] for key, _, _ in found}, {'CrashTeamRacingEU.xml'})
         self.assertEqual(len(found), len(classic))
         found_121 = external_patches(ROOT / 'patches', app_version='01.21', title_id='CUSA14876')
-        self.assertEqual(len(found_121), len(classic) + 1)  # EU with the 1.21 update, and its online key
+        self.assertEqual(len(found_121), len(classic) + 2)  # EU 1.21 also has online and unlock patches
         self.assertIn('CrashTeamRacingOnlineEU.xml/Online: custom Demonware key', [k for k, _, _ in found_121])
         self.assertEqual(external_patches(ROOT / 'patches', app_version='01.10', title_id='CUSA14876'), [])
         selected = external_selection(found, None, {'patch_60fps': '1'})

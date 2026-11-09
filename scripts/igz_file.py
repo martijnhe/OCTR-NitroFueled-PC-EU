@@ -14,6 +14,7 @@ Fixups this needs:
 Other fixups are kept as they are.
 """
 import struct
+from bisect import bisect_left
 
 MAGIC = 0x49475A01
 STRING_LISTS = ('TSTR', 'TMET', 'EXNM', 'TDEP')
@@ -106,7 +107,10 @@ class Igz:
         self.strings = self.read_list('TSTR', read_strings)
         self.types = self.read_list('TMET', read_strings)
         self.sizes = list(struct.unpack(f'<{self.fixup("TMET")[1]}I', self.fixup('MTSZ')[3][:4 * self.fixup('TMET')[1]]))
-        self.sites = {tag: self.read_list(tag, unpack_offsets) for tag in ('RVTB', 'RSTT', 'ROFS', 'RPID')}
+        # A file without references of a kind (the .lng files have no RPID) has no such fixup.
+        present = {f[0] for f in self.fixups}
+        self.sites = {tag: self.read_list(tag, unpack_offsets)
+                      for tag in ('RVTB', 'RSTT', 'ROFS', 'RPID') if tag in present}
 
     def fixup(self, tag):
         for f in self.fixups:
@@ -153,9 +157,10 @@ class Igz:
         return off
 
     def add_site(self, tag, off):
-        if off not in self.sites[tag]:
-            self.sites[tag].append(off)
-            self.sites[tag].sort()
+        sites = self.sites[tag]
+        index = bisect_left(sites, off)
+        if index == len(sites) or sites[index] != off:
+            sites.insert(index, off)
 
     # --- writing ---------------------------------------------------------------------------
     def build(self):

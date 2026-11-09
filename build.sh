@@ -2,6 +2,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
+release=$(python3 tools/build_version.py)
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links sacredfire.exe as well; no PGO (GCC-only flags), LTO off by default.
 case $(uname -s) in
@@ -20,7 +21,7 @@ MINGW*|MSYS*)
             git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
         fi
     done
-    cmake -S gpu -B out/gpu-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
+    cmake -S gpu -B out/gpu-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off -DSACREDFIRE_RELEASE="$release" \
         -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF}"
     if ! ninja -C out/gpu-win sacredfire bb-gpu-capabilities ctr-launcher > out/gpu-build.log 2>&1; then
@@ -29,7 +30,7 @@ MINGW*|MSYS*)
     fi
     cp out/gpu-win/sacredfire.exe out/gpu-win/bb-gpu-capabilities.exe out/gpu-win/CTR-NitroFueled-PC.exe out/
     # BB_VERSION names a build before its release tag exists (BB_VERSION=v0.5 bash build.sh).
-    version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
+    version=$release
     printf '%s-windows\n' "$version" > out/VERSION
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
     exit 0
@@ -46,21 +47,25 @@ fi
 if [[ -z ${CC:-} ]]; then echo 'Install GCC/Clang or set CC.' >&2; exit 1; fi
 # Dependencies come from pkg-config (Vulkan loader/headers, SDL3). On NixOS the
 # environment is provided by shell.nix; re-enter it automatically if needed.
-if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 && command -v cmake >/dev/null && command -v ninja >/dev/null; }; then
+if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 'liblzma >= 5.4' && command -v cmake >/dev/null && command -v ninja >/dev/null; }; then
     if [[ -z ${BB_IN_NIX_SHELL:-} ]] && command -v nix-shell >/dev/null; then
         exec env BB_IN_NIX_SHELL=1 nix-shell shell.nix --run "bash build.sh $*"
     fi
-    echo 'Need pkg-config with vulkan and sdl3, cmake and ninja (see shell.nix).' >&2; exit 1
+    echo 'Need pkg-config with vulkan, sdl3 and liblzma >= 5.4, cmake and ninja (see shell.nix).' >&2; exit 1
 fi
 # SacredFire: header-only libraries the host lacks (magic_enum, VulkanMemoryAllocator, xbyak) come
 # from tools/deps.sh into out/deps/prefix; CMake finds them through CMAKE_PREFIX_PATH.
 if [[ ! -f out/deps/prefix/include/vk_mem_alloc.h ]]; then bash tools/deps.sh; fi
 export CMAKE_PREFIX_PATH="$PWD/out/deps/prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
-read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
+read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3 liblzma)"
+read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3 liblzma)"
 # GPU library (shadPS4 video core + drivers), built by CMake into out/gpu/libbbgpu.so.
 # BB_PGO: generate (instrumented build that writes pgo/ while the game runs), use, off.
 # Default: use the profile in pgo/ when there is one. BB_LTO=OFF disables link-time optimization.
+if [[ ${BB_SKIP_GPU:-0} == 1 ]]; then
+    [[ -s out/gpu/libbbgpu.so ]] || { echo 'BB_SKIP_GPU=1 needs an existing out/gpu/libbbgpu.so' >&2; exit 1; }
+    echo 'GPU build skipped; using existing out/gpu/libbbgpu.so'
+else
 pgo=${BB_PGO:-}
 if [[ -z $pgo ]]; then
     if [[ -n $(find pgo -name '*.gcda' -print -quit 2>/dev/null) ]]; then pgo=use; else pgo=off; fi
@@ -94,6 +99,7 @@ if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
+fi
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/runtime*.c)
@@ -106,7 +112,7 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -no-pie "${includes[@]}" "-DSACREDFIRE_RELEASE=\"$release\"" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sacredfire
 echo "Built $PWD/out/sacredfire"
 # The launcher (launcher/linux: GetLostIn's Windows launcher v0.4 on SDL3, for Linux and the Steam
 # Deck): Dear ImGui with its SDL3 and SDL_Renderer backends, compiled once into out/launcher/.
@@ -130,19 +136,39 @@ for source in launcher/linux/launcher.cpp launcher/linux/gamepads.cpp; do
 done
 "$CXX" "${launcher_objects[@]}" "${libraries[@]}" -ldl -pthread -o out/ctr-launcher
 echo "Built $PWD/out/ctr-launcher"
-# out/VERSION: the source revision this build came from (the nearest v* tag, else the commit;
-# "-dirty" when tracked files differ from it). run.sh prints it, the launcher shows it and the
-# package carries it, so a published binary can be matched to its source. The FSR-Vulkan patch
-# build.sh applies inside its submodule does not count as a change. BB_VERSION names a build
-# before its release tag exists.
-version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
-git update-index -q --refresh 2>/dev/null || true
-if ! git diff-index --quiet --ignore-submodules=dirty HEAD -- 2>/dev/null; then version="$version-dirty"; fi
+# Embed and package the same platform-independent release/build identity.
+version=$release
 printf '%s\n' "$version" > out/VERSION
 echo "Version: $version (out/VERSION)"
 # GPU check for run.sh (live_resolution=auto) and the launcher's gamepad list (--gamepads).
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_online_mode.c src/runtime_online_mode.c -o out/online-mode-test
+    out/online-mode-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_race_options.c src/runtime_tt_reference.c src/runtime_ai_catchup.c -lm -o out/race-options-test
+    out/race-options-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_ai_catchup.c -lm -o out/ai-catchup-test
+    out/ai-catchup-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror tests/test_tt_reference.c -lm -o out/tt-reference-test
+    out/tt-reference-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_itemless.c -o out/itemless-test
+    out/itemless-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_public_itemless.c -o out/public-itemless-test
+    out/public-itemless-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_room_mode.c -o out/room-mode-test
+    out/room-mode-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_chat.c -o out/chat-test
+    out/chat-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_name_colors.c -o out/name-colors-test
+    out/name-colors-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_private_peer.c -o out/private-peer-test
+    out/private-peer-test
+    "$CC" -std=gnu11 -O2 -g -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Isrc tests/test_catchup_lan.c src/runtime_net_ping.c src/runtime_net_tunnel.c src/runtime_ai_catchup.c -lm -o out/catchup-lan-test
+    out/catchup-lan-test
+    "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -Igpu/shim -Igpu/shadps4 tests/test_graphics_tab.cpp -o out/graphics-tab-test
+    out/graphics-tab-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_lzma.c $(pkg-config --cflags --libs liblzma) -o out/lzma-test
+    out/lzma-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Wno-format-truncation -Wno-stringop-truncation -pthread -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
@@ -158,4 +184,10 @@ if [[ ${1:-} == --test ]]; then
     out/eventflag-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_tunnel.c src/runtime_net_tunnel.c -o out/net-tunnel-test
     out/net-tunnel-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_ping.c src/runtime_net_ping.c -o out/net-ping-test
+    out/net-ping-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc "${includes[@]}" tests/test_savedata_guest.c -o out/savedata-guest-test
+    out/savedata-guest-test > /dev/null
+    "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_http_ryunet.c src/runtime_http.c -o out/http-ryunet-test
+    out/http-ryunet-test > /dev/null
 fi

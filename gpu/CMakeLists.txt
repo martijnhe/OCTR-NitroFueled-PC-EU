@@ -244,6 +244,11 @@ if (WIN32)
     add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/sacredfire.rc)
+    if (NOT SACREDFIRE_RELEASE)
+        execute_process(COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/build_version.py
+            OUTPUT_VARIABLE SACREDFIRE_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    target_compile_definitions(sacredfire PRIVATE SACREDFIRE_RELEASE="${SACREDFIRE_RELEASE}")
     set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
     # isa_emulate runs inside guest code: no XMM/YMM.
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
@@ -251,7 +256,9 @@ if (WIN32)
     target_compile_options(sacredfire PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror
         -Wno-unknown-warning-option -Wno-unused-but-set-global>)
     target_include_directories(sacredfire PRIVATE .. ../src)
-    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 onecore bcrypt ws2_32 -pthread)
+    # liblzma (MSYS2 mingw-w64-clang-x86_64-xz), static: the archive decoder (src/runtime_lzma.c)
+    find_library(BB_LIBLZMA NAMES liblzma.a REQUIRED)
+    target_link_libraries(sacredfire PRIVATE bbgpu atrac9 ${BB_LIBLZMA} onecore bcrypt ws2_32 -pthread)
     # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
     # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
     target_link_options(sacredfire PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
@@ -261,6 +268,7 @@ if (WIN32)
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
     add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/discord_presence.cpp
         ../launcher/windows/discord_link.cpp ../launcher/windows/nat_check.cpp ../launcher/windows/port_update.cpp
+        ../launcher/windows/settings_import.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
@@ -276,6 +284,13 @@ if (WIN32)
     target_compile_definitions(port-update-test PRIVATE UNICODE _UNICODE)
     target_link_options(port-update-test PRIVATE -static)
     target_link_libraries(port-update-test PRIVATE winhttp bcrypt)
+    # Bringing the settings from another installation: the list, finding one, what is copied.
+    add_executable(settings-import-test EXCLUDE_FROM_ALL ../tests/test_settings_import.cpp
+        ../launcher/windows/settings_import.cpp)
+    target_compile_options(settings-import-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_include_directories(settings-import-test PRIVATE ../launcher/windows)
+    target_compile_definitions(settings-import-test PRIVATE UNICODE _UNICODE)
+    target_link_options(settings-import-test PRIVATE -static)
     # Discord presence and invites against a fake Discord pipe; never touches the real one.
     add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp
         ../launcher/windows/discord_presence.cpp)
@@ -298,6 +313,22 @@ endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
+if (NOT WIN32)
+    add_executable(native-shader-async-test EXCLUDE_FROM_ALL
+        ../tests/test_native_shader_async.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(native-shader-async-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(native-shader-async-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_native_shader_async.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(native-shader-async-test PRIVATE bbgpu)
+    add_executable(pipeline-cache-io-test EXCLUDE_FROM_ALL
+        ../tests/test_pipeline_cache_io.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(pipeline-cache-io-test PRIVATE shim shadps4 third_party/gcn/include)
+    target_compile_options(pipeline-cache-io-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_pipeline_cache_io.cpp PROPERTIES
+        COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(pipeline-cache-io-test PRIVATE bbgpu)
+endif()
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)
 add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
@@ -309,6 +340,10 @@ target_include_directories(ui-composition-test PRIVATE ..)
 add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp)
 target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(settings-test PRIVATE .. shim)
+add_executable(aspect-settings-test EXCLUDE_FROM_ALL ../tests/test_aspect_settings.cpp
+    shim/bbport_settings.cpp shim/bbport_menu_es.cpp)
+target_compile_options(aspect-settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(aspect-settings-test PRIVATE .. shim)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)

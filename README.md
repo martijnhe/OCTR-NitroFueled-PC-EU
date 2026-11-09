@@ -176,6 +176,9 @@ forms (the update's version, the Grand Prix, and the names, sizes and checksums 
 
 The notes below are from the upstream project (Windows packaging, releases, credits).
 
+> **EU mod packages:** [CUSA14876 01.21 loader support and update instructions](docs/eu-mod-packages.md).
+> [CNK Drift Gauge + Reserves Meter — EU](https://github.com/Majed-allababedi/CTR-CNK-Drift-Gauge-EU): original mod by tomtotom, EU adaptation by Majed-allababedi. Select **Speedometer HUD** in-game.
+
 **Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
 Linux, with online play on a community server.**
 
@@ -208,8 +211,28 @@ start prepares the game's shaders for your GPU from your own dump (a few seconds
 [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
 compile them; the few the recipe lacks are compiled when first seen and cached.
 
+Time Trial on recognized USA/EU 1.21 executables credits every challenge beaten by a finish:
+N. Tropy, Oxide, Velo and developer times, even with no ghost selected. Times must be strictly
+faster; existing progress is kept. Rewards still require completing their required tracks.
+Other executable layouts keep the game's original progression.
+
 | Release | What it brought |
 |---|---|
+| [v0.8.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8.3) | Crash fixes: leaving a room, online races and game starts. |
+| [v0.8.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8.2) | Replays and spectator mode (beta): every race is recorded, and friends can watch each other live; text chat in private rooms and public lobbies; team races no longer stop with 8 players; faster mod options and full 32:9 menus (tcosi); friends and controller fixes (n0buholic). |
+| [v0.8.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8.1) | Private races in sync: team positions and finishes, Cup rules kept between tracks, AI catch-up and smarter high-difficulty driving (n0buholic); private extended modes need the whole party on the same version; 21:9 and 32:9 layouts start again with Online on (tcosi); NVIDIA GPUs found when the Linux AppImage is the first thing opened after boot (Vo1dTear); controller names in the launcher follow its language |
+| [v0.8](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.8) | Public Itemless matchmaking with its own queue and private team races (n0buholic); much faster starts (boot cache, n0buholic; Itemless kept between starts) and no black screen from Steam shortcuts; one save with or without mods; online item odds the client cannot change; bans that follow the player's PC; GPU picker by name for laptops; time trials credit every beaten ghost at once (n0buholic); borderless window covers the screen and faster native Vulkan compiles on NVIDIA (Enrique-Ale); Bahasa Indonesia in the launcher |
+| [v0.7.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.5) | Another player's racer from a mod you don't have shows as Crash instead of freezing the lobby at 0; Itemless no longer carries over to public races (no items, Tiger Temple's door open); Discord invites with mods on (Vo1dTear); a clear message when an antivirus blocks the game |
+| [v0.7.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.4) | Private online cups: four tracks with the game's points and a podium from the totals (n0buholic); a native Graphics page and no crash opening Options in a race (n0buholic); Speed Mode renamed Itemless, where bumping another kart keeps your reserves (n0buholic); experimental 16:10 (david-labib); AMD FSR 4 (experimental, shown only with its model files; GetLostIn's wiring); crash signatures in the anonymous performance data |
+| [v0.7.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.3) | Native Vulkan: faster (translated shaders about half as heavy, no hitches from descriptor sets, a lighter capture thread in the adventure hub), Hyper Spaceway's dark sheet of triangles and Assembly Lane's whitish steam fixed; a damaged game file no longer stops online at start (Speed Mode is skipped); Graphics and Quit Game in Arabic (Majed-allababedi) |
+| [v0.7.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7.2) | Online with a 21:9/32:9 layout starts again (amscova); Aspect Ratio in the in-game Graphics menu (immaculatevibes2025); EU 1.21 gets the Graphics menu, Quit Game and private Speed Mode (n0buholic), the native Vulkan engine and the faster loading; native Vulkan: the sun's glow and lens flares, and fur without holes on AMD GPUs |
+| [v0.7](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7) | Native Vulkan engine as an experimental choice in the launcher (straightarrows), with a shader build window; Speed Mode for private rooms, synced to the players who join (n0buholic); loading screens about half as long (liblzma decoding, n0buholic, and a RAM cache); motion blur off by default; older GPUs start again; opt-in anonymous performance reports; foldable friends list; in-game Graphics menu, Quit Game, Skip intro and the MSAA sky lines fixed on NVIDIA (immaculatevibes2025) |
+| [v0.6.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.5) | Online item-box odds set by the server; 21:9/32:9 layouts render at the chosen internal resolution up to 4K (startupandhold); mods start at any internal resolution (Vo1dTear), EU mod packages (Majed-allababedi) and several name mods together (SoyAlejandroCalixto); no code 20 at a first start without GitHub; nicknames register behind ISP filters; GPUs without sparse buffers get a clear message |
+| [v0.6.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.4) | Mods checked at the code they change, so they work on more 1.21 dumps (tcosi); mods import from deep folders; no freeze when a controller connects or drops (SoyAlejandroCalixto); the Controllers tab shows each player's controller; Linux launcher with Achievements and Mods (Brony666); a racer's outfit no longer ends the game with code 3 |
+| [v0.6.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.3) | Mod fixes: game mods start again without a 21:9/32:9 layout, "Apply and restart" works with mods, and loose mods work with the game on another drive |
+| [v0.6.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.2) | Mods load without copying the game (tcosi); ping counter in the corner and a Room tab in the in-game menu; online login goes through networks and antivirus filters that redirect it; GameBanana link on the Mods page |
+| [v0.6.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.1) | Xbox button prompts (option); split screen assigns controllers automatically and players 2-4 play as guests (no extra saves); ping of the players in the room (in-game menu); Report in its own tab; mouse buttons and the wheel in the key bindings; online works with a PC clock that is off, and the login is no longer held by antivirus web shields; a new folder can bring the settings, saves and nickname of another installation; a nickname taken by another installation on the same PC is recovered; the Mods page (tcosi); ultrawide on every 1.21 build the layout fits (tcosi); DLC on Linux (Vo1dTear); controller ownership in split screen (n0buholic) |
+| [v0.6](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6) | Friends inside the game (search, requests, invitations, notices when they come online; the game's Invite button works); report players from the game, reviewed by the server's moderators (bans, cheated records removed); messages and announcements from the administrators as in-game notices; online rules and the community Discord in the launchers, which also say why a player is banned; online races end 30 s after the first player finishes; notice position and a notice when a new version is out; the Linux AppImage updates itself; NVIDIA laptops on Linux; a GPU without Vulkan 1.3 is named as such instead of code 23 (code 23 itself is not fixed); the NAT test detects networks that drop the server's replies; identical controllers in split screen. Versions 0.4.1 and older can no longer play online |
 | [v0.5.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.4) | Every race track in public matchmaking, at the same chance (Koala Carnival and the later Grand Prix tracks included); regional relays for the online tunnel; corrected 21:9 and 32:9 menus and centered HUD (tcosi; USA and EU 1.21, offline); CPUs without MOVBE/BMI1/LZCNT (Sandy and Ivy Bridge) can play; achievements with in-game notices and a launcher page; the in-game menu in Spanish, General tab first; a badly extracted game is reported instead of a code 3 (contributions from GetLostIn's repository by MetaHeart and Naif Alqurashi). Code 23 is not fixed and can still happen. |
 | [v0.5.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.3) | The European edition (CUSA14876, with or without its 1.21 update), online with the USA one; ultrawide screens; the first start prepares the game's shaders for your GPU (far fewer stalls in the first races); one more cause of the code 23 GPU hang removed (a stale GPU idle signal; code 23 itself is not fixed and can still happen); shadPS4 crash fixes; Bluetooth controllers no longer drop from rumble; the launcher checks for updates and installs them keeping your files; the Linux launcher gets the Windows options (volume, player per controller, window settings, more languages, patches) |
 | [v0.5.2](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.2) | Two causes of the code 23 GPU hang mitigated (garbage buffer descriptors, a minimised window) and more detail in crash logs; Linux launcher close to the Windows one: controls, DLC, friends, internal resolution, Discord account link, status and invites (also from Steam), AppImage icon, Steam shortcut that survives updates |
@@ -258,6 +281,12 @@ Shared default names (RyuPC, Player, Jugador...) are refused. The first installa
 with a nickname keeps it, through the key in `ryunet_online.key` (copied to
 `%APPDATA%\CTR-NitroFueled-PC`): **never share that file.**
 
+**Fair play.** Players banned for cheating are banned with their PC, not only their nickname: a
+new nickname or a fresh install does not bring them back. For this the game sends the server an
+anonymous fingerprint of the PC: two SHA-256 digests of Windows' installation ID and the
+motherboard's ID (`scripts/machine_id.py`). The server can only tell whether it saw the same PC
+again; it never learns the hardware, and the IDs themselves never leave the PC.
+
 **Discord** (Windows launcher, Online tab):
 
 - **Link with Discord** ties your nickname to your Discord account. *Recover with Discord* gets
@@ -274,10 +303,8 @@ on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) c
 other players. If a match keeps failing with the same people, enabling UPnP on your router or
 forwarding UDP 3074 to your PC helps.
 
-**Supporting the server:** the server and its domain are paid for by Ryu7w7. If you want to help
-keep them running, you can donate on [Ko-fi](https://ko-fi.com/ryu7w7). Donations are voluntary
-and give nothing in the game: online play is the same for everyone. They pay for the server, not
-for the game or the port.
+**No donations:** this is a non-commercial fan project. It does not accept donations and sells
+nothing; online play is free and the same for everyone. You need your own copy of the game.
 
 **Picture** (launcher: Settings > Display; in game: Insert):
 
@@ -455,6 +482,14 @@ output. `--play` starts the game with the saved settings and no window (Steam De
 The menu entry and the launcher use the game's own icon (`sce_sys/icon0.png`), copied from your
 game folder into your icon theme; the game window shows it too.
 
+**Native LZMA decoder (Linux).** Recognized CTR 01.21 executables use liblzma for independent
+archive blocks, keeping the original compressed game files and requiring no disk cache. The
+patch checks the decoder and its one-shot caller before installing; unsupported layouts and
+blocks retain the original decoder. Set `BB_NATIVE_LZMA=0` in the launcher's extra environment
+to compare or disable it. The streaming queue keeps the game's four workers to limit concurrent
+memory use. `BB_LZMA_WORKERS=6` experimentally enables six on hosts with at least eight logical
+CPUs. Source builds require liblzma 5.4 or newer (`xz` in `shell.nix`).
+
 **In-game menu** (Insert, or L3+R3 on the pad): game patches, controller ports for split
 screen, FPS limit, fullscreen, FPS counter, menu language. It is saved to `bbport.ini`; patches apply after a restart.
 
@@ -479,10 +514,35 @@ not include: with your own key (the same shadPS4 uses; paste it, or import it fr
 5568 MiB of direct memory) and takes its Pro rendering path; with the 1080p patch it renders
 at 1920×1080. Off by default: the Steam Deck is closer to a base PS4.
 
-**Mods:** loose-file mod folders (with the game's folders inside) are overlaid on the game
-folder at start, with enable switches and load order in `mods.json`
-(`scripts/mods.py`, [docs/MODS.md](docs/MODS.md), written for bbport). Further shadPS4-format
-patch files go into `patches/` or `BB_PATCHES_DIR`, selected through `patches.json`.
+**Mods (Windows):** the Mods page lists built-in patches first, followed by installed
+add-ons. Add `.pak`, `.zip`, `.xml` files or an unpacked folder to `mods/` beside the
+launcher, using Add files / Add folder or copying them there and pressing Reload.
+Manifest packages can combine assets and executable patches under one switch;
+creator descriptions appear when the card's chevron is expanded. Legacy `patches/`
+is still read. See the [creator and packaging guide](docs/mod-packaging.html) and
+[implementation notes](docs/mod-support.txt), also available from the Mods page.
+No actual mod payloads are bundled with this feature. Online compatibility is a
+package declaration, not a server approval or whitelist service.
+
+Enabled mods override matching relative paths through the engine's read-only file
+map and sparse archive overlays. The selected source game directory stays unchanged:
+no original game files are copied, linked, repacked or overwritten. Disabling mods
+restores source reads. Only mod payloads, generated metadata and separate user saves/
+shader caches are stored. This path requires the matching updated engine, not only
+new launcher scripts. Multiple versions of a stable mod ID appear once, using the
+newest validated version; older inputs remain
+available for rollback. Different content claiming the same selected version is
+reported as a conflict.
+
+Mods do not need an engine-version/hash allowlist. Older manifests containing
+those fields still load; the fields are no longer a launch gate. Engine features
+are negotiated automatically, while game executable hashes, resource checksums,
+XML signatures, conflicts and online declarations remain enforced.
+
+The existing loose-folder CLI loader and `mods.json` remain available for older
+workflows ([docs/MODS.md](docs/MODS.md), originally written for bbport). The unified
+Mods UI/import flow is Windows-only in this revision; AppImage `run.sh` integration
+is not included.
 
 ## AppImage (Steam Deck)
 
@@ -615,12 +675,28 @@ renderer this builds on), [shadPS4](https://github.com/shadps4-emu/shadPS4) vide
 recompiler, [sirit](https://github.com/shadps4-emu/sirit), [half](https://half.sourceforge.net/),
 [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) by FireBurn (MIT), AMD FidelityFX SDK (MIT),
 [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) (MIT), [Dear ImGui](https://github.com/ocornut/imgui)
-(MIT), DejaVu fonts, [miniz](https://github.com/richgel999/miniz) (MIT). Game patches by illusion
+(MIT), DejaVu fonts, [miniz](https://github.com/richgel999/miniz) (MIT). Replays and spectating are
+ported from [Replay Mode](https://github.com/Erluinzo/ctrnf-replay-mode) by Erluinzo (MIT,
+[third_party/ctrnf-replay-mode/LICENSE](third_party/ctrnf-replay-mode/LICENSE)). Game patches by illusion
 and TroyWarez ([illusionyy/PS-Game-Patch](https://github.com/illusionyy/PS-Game-Patch)). Import
 names from shadPS4's aerolib list. Button icons for Xbox, Steam Deck and Switch: [Xelu's Free Controller & Key
 Prompts](https://thoseawesomeguys.com/prompts/) by Nicolae "Xelu" Berbece, [Those Awesome
 Guys](https://thoseawesomeguys.com/) (CC0, [assets/button_icons](assets/button_icons/README.md)).
 
+### Aspect ratio
+
+Display settings offer 16:9 (default), 16:10, 21:9 and 32:9. The in-game
+Graphics page offers the same choices after a restart. 16:10 supports 1280x800, 1920x1200
+and 2560x1600 through its own display/camera preparation, with aligned HUD effects
+(including Adventure collectibles and the filling drift gauge) and corrected gauge
+proportions. The original menu layout is retained.
+See [aspect ratio settings and 16:10 verification](docs/sacredfire/23-aspect-ratios.md).
+
+### Corrected widescreen layouts (Windows)
+
+The 21:9 and 32:9 layouts include menu/background/HUD asset fixes and centered-HUD shaders.
+The initial integration is for the tested USA 1.21 game and official v0.5.3 Windows engine, offline.
+See [setup, verification and limitations](docs/sacredfire/18-widescreen-layouts.md).
 <p align="center">
   <a href="https://star-history.dera.page/martijnhe/OCTR-NitroFueled-PC-EU">
     <img src="https://api.star-history.com/svg?repos=martijnhe/OCTR-NitroFueled-PC-EU&type=Date" alt="Star History Chart" width="600">

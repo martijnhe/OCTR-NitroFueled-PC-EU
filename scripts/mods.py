@@ -34,10 +34,10 @@ def content_root(folder):
     folder = Path(folder)
     if not folder.is_dir():
         return None
-    for wrapper in ('', 'app0', 'CUSA03173'):
+    for wrapper in ('', 'app0', 'CUSA13795', 'CUSA14876', 'CUSA03173'):
         base = child(folder, wrapper) if wrapper else folder
         dvdroot = child(base, 'dvdroot_ps4')
-        if dvdroot.is_dir():
+        if dvdroot.is_dir() or child(base, 'archives').is_dir():
             return base, ''
     entries = [e for e in folder.iterdir() if not e.name.startswith('.')]
     folders = [e for e in entries if e.is_dir()]
@@ -92,7 +92,7 @@ def mod_files(folder):
             relative = Path(prefix) / source.relative_to(root) if prefix else source.relative_to(root)
             # Readme/metadata stay outside the mounted game. This loader handles assets;
             # executable patches use the existing patch compiler, with address validation.
-            if relative.parts[0].casefold() != 'dvdroot_ps4':
+            if relative.parts[0].casefold() not in ('dvdroot_ps4', 'archives'):
                 if relative.parts[0].casefold() in ('eboot.bin', 'sce_module', 'sce_sys'):
                     raise ValueError(f'Executable/system replacement is unsupported: {source}')
                 continue
@@ -102,12 +102,13 @@ def mod_files(folder):
 
 
 # Windows without the symlink privilege (Developer Mode off): directories become junctions,
-# files hard links (copies across volumes). Those are not symlinks, so the overlay remembers
-# what it linked and where to.
+# files hard links. Those are not symlinks, so the overlay remembers what it linked and where to.
+# A game file is never copied; a mod's file (copy=True) is when it cannot be linked: hard links
+# only reach the same volume, and the overlay sits beside a game on another drive than the mods.
 LINKED = {}
 
 
-def make_link(link, target):
+def make_link(link, target, copy=False):
     try:
         link.symlink_to(target, target_is_directory=target.is_dir())
         return
@@ -120,8 +121,13 @@ def make_link(link, target):
     else:
         try:
             os.link(target, link)
-        except OSError:
-            shutil.copy2(target, link)
+        except OSError as error:
+            if copy:
+                shutil.copy2(target, link)
+                return
+            raise OSError('Mod overlays require filesystem links; no game files will be copied. '
+                          'Enable Windows Developer Mode or keep mods and game on the same volume: '
+                          + str(target)) from error
     LINKED[str(link)] = target
 
 
@@ -168,9 +174,9 @@ def expand(directory):
         directory.mkdir(exist_ok=True)
 
 
-def build_overlay(game, out, mods):
+def build_overlay(game, out, mods, replacements=None):
     game = Path(game).resolve(strict=True)
-    replacements = []
+    replacements = list(replacements or [])
     owners = {}
     for name, root in mods:
         count = 0
@@ -208,7 +214,7 @@ def build_overlay(game, out, mods):
                 raise ValueError(f'File/directory conflict: {relative}')
             else:
                 added += 1
-            make_link(destination, source)
+            make_link(destination, source, copy=True)
         print(f'Mods: {replaced} game files replaced, {added} added', file=sys.stderr)
         return overlay
     except BaseException:

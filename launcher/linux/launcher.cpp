@@ -2106,12 +2106,12 @@ void SettingsTab() {
         }
         HelpMarker(T("Una sola opción: aspecto y salida juntos, con HUD centrado en ultra-panorámico. "
                      "Mientras hay ultra-panorámico el escalado se desactiva; la resolución interna puede llegar a 4K (se reduce a la pantalla). "
-                     "La primera vez prepara unos 9 GB de archivos; tus archivos originales no cambian. "
+                     "La primera vez prepara sus archivos una vez; tus archivos originales no cambian. "
                      "Antes de usarlo, una vez en 16:9: JUGAR hasta el menú principal, unos segundos, y cerrar "
                      "el juego desde su menú, para que la caché de shaders se guarde. Funciona también online.",
                      "One choice: aspect and output together, with centered HUD in ultrawide. "
                      "Upscaling is off while ultrawide is on; the internal resolution can go up to 4K (scaled down to the screen). "
-                     "The first run prepares about 9 GB of files; your original files are kept. "
+                     "The first run prepares its files once; your original files are kept. "
                      "Before using it, once in 16:9: PLAY to the main menu, stay a few seconds and close "
                      "the game from its menu, so the shader cache is saved. Works online too."));
     }
